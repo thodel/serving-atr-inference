@@ -1,0 +1,19 @@
+# /etc/systemd/system/atr-gateway.service
+# Public-facing gateway (no ML deps). Engines bind 127.0.0.1; only this is exposed.
+[Unit]
+Description=ATR serving gateway (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atr
+WorkingDirectory=/opt/serving-atr-inference
+EnvironmentFile=/opt/serving-atr-inference/.env
+ExecStart=/opt/serving-atr-inference/.venvs/gateway/bin/uvicorn \
+    atr_serving.app:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-local
+.venvs/
+.env
+models_cache/
+weights/

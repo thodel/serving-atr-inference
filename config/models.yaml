@@ -1,0 +1,164 @@
+# ATR model registry — single source of truth for /models.
+#
+# Each entry is a ModelSpec (see src/atr_serving/registry.py). The gateway only
+# reads this file; engines load the weights. Selection (script/lang/century ->
+# model) is done client-side by agentic_historian/model_selector.py against this
+# metadata.
+#
+# residency:  pinned = always resident; lazy = load on first request, LRU-evict.
+# gpu_affinity: fixed GPU index, or null = ModelManager decides.
+# NOTE: vram_mb values are rough estimates — refine after Phase 3 measurements.
+
+models:
+  # ── VLM OCR (page-level) — served by vLLM ────────────────────────────────
+  - id: lightonocr-catmus-caroline
+    engine: vllm
+    hf_repo: wjbmattingly/LightOnOCR-2-1B-catmus-caroline
+    base_model: lightonai/LightOnOCR-2-1B-base
+    task: ocr
+    level: page
+    languages: [la]
+    scripts: [Caroline]
+    centuries: [9, 10, 11, 12]
+    vram_mb: 3000
+    residency: pinned
+    gpu_affinity: 0
+
+  - id: qwen3vl-8b-old-church-slavonic
+    engine: vllm
+    hf_repo: wjbmattingly/Qwen3-VL-8B-old-church-slavonic-line-3-epochs
+    base_model: Qwen/Qwen3-VL-8B-Instruct
+    task: ocr
+    level: page
+    languages: [cu]
+    scripts: [Cyrillic, Glagolitic]
+    centuries: [10, 11, 12, 13, 14]
+    vram_mb: 18000
+    residency: lazy
+    gpu_affinity: null
+
+  - id: qwen3vl-8b-hebrew
+    engine: vllm
+    hf_repo: wjbmattingly/Qwen3-VL-8B-hebrew-3-epochs
+    base_model: Qwen/Qwen3-VL-8B-Instruct
+    task: ocr
+    level: page
+    languages: [he]
+    scripts: [Hebrew]
+    centuries: [13, 14, 15, 16, 17, 18]
+    vram_mb: 18000
+    residency: lazy
+    gpu_affinity: null
+
+  # ── Party HTR — its own always-on service (runs for every image) ──────────
+  - id: party
+    engine: party
+    zenodo_id: "10.5281/zenodo.20642057"
+    task: htr
+    level: page
+    languages: [mul]
+    scripts: [Medieval]
+    centuries: [13, 14, 15, 16]
+    vram_mb: 2000
+    residency: pinned
+    gpu_affinity: 1
+
+  # ── TrOCR (line-level, vision-encoder-decoder seq2seq) ────────────────────
+  - id: trocr-medieval-escriptmask
+    engine: trocr
+    hf_repo: dh-unibe/trocr-medieval-escriptmask
+    task: htr
+    level: line
+    languages: [de, fr, la, nl]
+    scripts: [Medieval]
+    centuries: [13, 14, 15, 16]
+    vram_mb: 1500
+    residency: pinned
+    gpu_affinity: 1
+
+  - id: trocr-kurrent-xvi-xvii
+    engine: trocr
+    hf_repo: dh-unibe/trocr-kurrent-XVI-XVII
+    task: htr
+    level: line
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [16, 17, 18]
+    vram_mb: 1500
+    residency: pinned
+    gpu_affinity: 1
+
+  - id: trocr-essoins-middle-latin
+    engine: trocr
+    hf_repo: dh-unibe/trocr-essoins-middle-latin
+    task: htr
+    level: line
+    languages: [la]
+    scripts: [Medieval]
+    centuries: [13, 14, 15]
+    vram_mb: 1500
+    residency: pinned
+    gpu_affinity: 1
+
+  # ── Kraken (page; segments internally) ────────────────────────────────────
+  # Curated subset. Full Zenodo registry port tracked in ISSUE-02 — source:
+  # agentic_historian/agent_a/models.py (KRAKEN_MODELS).
+  - id: kraken-catmus-medieval
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7516057"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Caroline]
+    centuries: [14, 15, 16]
+    vram_mb: 500
+    residency: pinned
+    gpu_affinity: 1
+
+  - id: kraken-late-medieval-german
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.15366732"
+    task: htr
+    level: page
+    languages: [de]
+    scripts: [Textura]
+    centuries: [14, 15, 16]
+    vram_mb: 500
+    residency: pinned
+    gpu_affinity: 1
+
+  - id: kraken-early-modern-german
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.15030337"
+    task: htr
+    level: page
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [16, 17]
+    vram_mb: 500
+    residency: pinned
+    gpu_affinity: 1
+
+  - id: kraken-printed-french
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.10592716"
+    task: ocr
+    level: page
+    languages: [fr]
+    scripts: [Antiqua]
+    centuries: [16, 17, 18, 19]
+    vram_mb: 500
+    residency: pinned
+    gpu_affinity: 1
+
+  - id: kraken-openiti-arabic
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.11113737"
+    task: ocr
+    level: page
+    languages: [ar]
+    scripts: [Arabic]
+    centuries: [12, 13, 14, 15, 16, 17, 18, 19]
+    vram_mb: 500
+    residency: pinned
+    gpu_affinity: 1
