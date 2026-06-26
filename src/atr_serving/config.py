@@ -22,8 +22,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ATR_", env_file=".env", extra="ignore")
 
     # ── HTTP ──────────────────────────────────────────────────────────────
+    # :8000/:8080/:9000/:11434/:80 are already taken on asterAIx — see
+    # docs/asteraix-environment.md. Gateway lives on :8200, engines on :820x.
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8200
 
     # ── Auth ──────────────────────────────────────────────────────────────
     # Static shared key. Sent by clients in the `X-API-Key` header.
@@ -37,9 +39,9 @@ class Settings(BaseSettings):
 
     # ── Engine backends (gateway -> engine services over localhost) ───────
     # Phase 0 only records them; routes that use them arrive in later phases.
-    kraken_url: str = "http://127.0.0.1:8101"
-    trocr_url: str = "http://127.0.0.1:8102"
-    party_url: str = "http://127.0.0.1:8103"
+    kraken_url: str = "http://127.0.0.1:8201"
+    trocr_url: str = "http://127.0.0.1:8202"
+    party_url: str = "http://127.0.0.1:8203"
     # vLLM instances are dynamic (one per resident VLM); discovered via the
     # ModelManager in Phase 3, not statically configured here.
 

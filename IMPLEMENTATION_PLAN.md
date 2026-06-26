@@ -243,10 +243,12 @@ TrOCR ≈ 1.3 GB; kraken/party models ≪ 1 GB.
 - `ModelManager` tracks a per-GPU VRAM budget (e.g. cap 8 B residents so KV cache fits)
   and evicts the least-recently-used **lazy** engine on pressure. Pinned engines never
   evict.
-- vLLM VLMs run as **templated systemd units** (`atr-vllm@<id>`) the `ModelManager`
-  starts/stops via `systemctl`; `gpu_memory_utilization` is set low enough to co-reside
-  with pinned models on the same GPU. Cold start ≈ 30–60 s → expose resident state in
-  `/health` and `/models` so the client can prefer warm models.
+- vLLM VLMs are started/stopped by the `ModelManager` as **child subprocesses**
+  (`vllm serve …` via `subprocess.Popen`) — asterAIx has no passwordless sudo and
+  `Linger=no`, so root `systemctl`-managed `atr-vllm@` units aren't available. The
+  manager reads **live free VRAM from `nvidia-smi`** (GPU 0 is shared with a RAG
+  service) and sets `--gpu-memory-utilization` to co-reside with pinned models. Cold
+  start ≈ 30–60 s → expose resident state in `/health` and `/models`.
 - **LoRA opportunity:** these Qwen3-VL finetunes are *full* SFTs today. If future
   finetunes are produced as LoRA adapters on a shared `Qwen3-VL-8B-Instruct` base,
   vLLM multi-LoRA could serve many of them from one resident base — a large memory
@@ -280,12 +282,12 @@ serving-atr-inference/
   scripts/
     download_models.py           # prefetch HF repos + `kraken get` Zenodo ids
     make_venvs.sh                # build the per-engine venvs
-  deploy/systemd/
+  deploy/systemd/                # `systemctl --user` units (no root on asterAIx)
     atr-gateway.service
     atr-kraken.service
     atr-trocr.service
     atr-party.service
-    atr-vllm@.service            # templated unit, instance per VLM (e.g. atr-vllm@qwen3vl-8b-hebrew)
+    # vLLM: spawned by ModelManager as subprocesses, not systemd (see §8)
   eval/                          # ported os-vlm-tester harness -> hits the live API
   tests/
 ```
@@ -308,10 +310,10 @@ serving-atr-inference/
 - **Phase 4 — Unify & evaluate.** Optional server-side `select:` shortcut; port
   `os-vlm-tester` eval harness into `eval/` running against the live API; baseline
   CER on a held-out set per model.
-- **Phase 5 — Deploy & ops.** systemd units (gateway + per-engine + templated
-  `atr-vllm@`), API-key auth, structured logs + Prometheus metrics (latency, VRAM,
-  evictions), async `/jobs` for large batches. The `ModelManager` starts/stops
-  `atr-vllm@<id>` instances via `systemctl` for lazy VLM rotation.
+- **Phase 5 — Deploy & ops.** `systemctl --user` units for the gateway + pinned engines
+  (one-time admin `enable-linger`), ModelManager-spawned vLLM **subprocesses** for lazy
+  rotation, API-key auth, `ufw` rule scoped to the client VM, structured logs +
+  Prometheus metrics (latency, VRAM, evictions), async `/jobs` for large batches.
 
 ---
 
@@ -331,11 +333,11 @@ serving-atr-inference/
 - **Auth / exposure** — **static shared API key** in the `X-API-Key` header
   (`ATR_API_KEY`, identical on both VMs); same private university network behind the
   same firewall; **no TLS**. Only the gateway port is exposed; engines bind `127.0.0.1`.
-- **Target host** — **asterAIx** (DH GPU server). Build is custom to this box. Capture
-  the real environment with `scripts/probe_host.sh` (read-only) and pin each engine
-  venv from its output. Baseline *assumption* pending the probe: Ubuntu 22.04, NVIDIA
-  driver ≥ 535 (CUDA 12.x), Python 3.11; each venv brings its own `torch`+CUDA via
-  wheel, no system CUDA toolkit. See README "Target host: asterAIx".
+- **Target host** — **asterAIx** (`srv`), probed 2026-06-26: Ubuntu 24.04, **Python
+  3.12 only**, 2× A40 (~45 GB), driver 565.57.01 / CUDA 12.7, **GPU 0 shared** with a
+  RAG service / GPU 1 free, **no passwordless sudo**, ports `:8000/8080/9000/11434/80`
+  taken. Full details + derived decisions in `docs/asteraix-environment.md`; each venv
+  brings its own cu12x `torch`, no system CUDA toolkit.
 
 **Still open:**
 1. Exact `party` runtime invocation (standalone `party` CLI vs kraken path the current

@@ -12,7 +12,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENVS="${ROOT}/.venvs"
-PY="${PYTHON:-python3.11}"
+# asterAIx ships Python 3.12 only (no 3.11) — see docs/asteraix-environment.md
+PY="${PYTHON:-python3.12}"
 mkdir -p "${VENVS}"
 
 echo "== gateway venv =="

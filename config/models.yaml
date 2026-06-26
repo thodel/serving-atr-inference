@@ -8,6 +8,10 @@
 # residency:  pinned = always resident; lazy = load on first request, LRU-evict.
 # gpu_affinity: fixed GPU index, or null = ModelManager decides.
 # NOTE: vram_mb values are rough estimates — refine after Phase 3 measurements.
+#
+# asterAIx placement (see docs/asteraix-environment.md): GPU 0 is SHARED with a
+# live RAG service (~10 GB), GPU 1 is free. Default everything to GPU 1; the
+# ModelManager uses GPU 0 only as overflow when nvidia-smi shows room.
 
 models:
   # ── VLM OCR (page-level) — served by vLLM ────────────────────────────────
@@ -22,7 +26,7 @@ models:
     centuries: [9, 10, 11, 12]
     vram_mb: 3000
     residency: pinned
-    gpu_affinity: 0
+    gpu_affinity: 1
 
   - id: qwen3vl-8b-old-church-slavonic
     engine: vllm

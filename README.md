@@ -36,43 +36,43 @@ Run tests:
 
 ## Target host: asterAIx (DH)
 
-This deployment is **custom-built for asterAIx**, the GPU server at the DH. Before
-pinning any versions, capture the real environment:
+This deployment is **custom-built for asterAIx** (`srv`, 2× A40). Full probe results
+and the decisions derived from them are in
+[`docs/asteraix-environment.md`](docs/asteraix-environment.md). To refresh after the
+box changes:
 
 ```bash
 # ON asterAIx (read-only, changes nothing):
 bash scripts/probe_host.sh | tee asteraix-probe.txt
 ```
 
-Paste `asteraix-probe.txt` back so the engine pins (torch/CUDA, vLLM, kraken,
-transformers, Python) and the systemd/user setup can be tailored to the box.
-The fields that drive the pins: OS, **NVIDIA driver version**, GPU model/VRAM,
-available **Python** versions, whether **conda / Lmod modules / Slurm** are in
-play, whether the user can manage **systemd** units, and whether **GPUStack /
-Docker** are already running on it.
+### What the box actually is (probed 2026-06-26)
 
-### The CUDA / Python baseline issue (why we probe)
+- **Ubuntu 24.04**, kernel 6.8, Threadripper PRO (48 threads), 251 GB RAM.
+- **2× A40 (~45 GB each)**, compute 8.6, driver **565.57.01 / CUDA 12.7** — any cu12x
+  `torch` wheel works; no system CUDA toolkit dependency.
+- **Python 3.12 only** (no 3.11) → all venvs use `python3.12`.
+- **GPU 0 is shared** with a live RAG service (~10 GB); **GPU 1 is free** → our stack
+  defaults to GPU 1, GPU 0 is overflow-only.
+- **No passwordless sudo, `Linger=no`, docker socket denied** → run as `systemctl --user`
+  units (one-time `enable-linger` needs admin) and have the ModelManager spawn vLLM as
+  **child subprocesses** rather than root systemd units. Rootless **podman** is the
+  container fallback (not docker).
+- **`:8000/:8080/:9000/:11434/:80` are taken** (incl. Ollama + nginx) → gateway on
+  **`:8200`**, engines `:8201–:8203`, vLLM `:8210+`.
+- `/` is **80 % full (~356 G free)** → set `HF_HOME` and monitor.
 
-vLLM and kraken each expect a specific `torch` build, and `torch` is pinned to a
-**CUDA runtime** that must match the host **NVIDIA driver**. The A40 (Ampere,
-compute 8.6) supports bf16, so that's fine — the risk is version skew: a driver
-too old for the CUDA that vLLM's `torch` wants, or a kraken release pinning an
-older `torch`/`transformers` than vLLM. One shared env breaks (exactly the
-failures in `os-vlm-tester`'s README).
+### Setup principles
 
-**Baseline assumption (to confirm from the probe):** Ubuntu 22.04, NVIDIA driver
-≥ 535 (CUDA 12.x), Python 3.11.
-
-**Setup principles (independent of the exact numbers):**
-- One venv per engine family (`.venvs/{gateway,vllm,kraken,trocr,party}`), each
-  pinning its own `torch`. The gateway venv has **no** ML deps.
-- Install the driver only; let each venv bring its own CUDA via the `torch` wheel
-  — do **not** rely on a system CUDA toolkit.
-- vLLM: published wheel (pulls matching `torch`+CUDA), exact version pinned in
+- One venv per engine family (`.venvs/{gateway,vllm,kraken,trocr,party}`, all Python
+  3.12), each pinning its own cu12x `torch`. The gateway venv has **no** ML deps —
+  this isolation avoids the `torch`/`transformers` conflicts documented in
+  `os-vlm-tester`'s README.
+- vLLM: published wheel (pulls matching `torch`+CUDA), version pinned in
   `engines/vllm/requirements.txt`.
-- kraken / trocr / party: separate venvs, separate pins; small models, share GPU 1.
+- kraken / trocr / party: separate venvs, separate pins; small models on GPU 1.
 
-Provisioning + final pins are tracked in the deploy issue (#9).
+Provisioning + final pins + firewall are tracked in the deploy issue (#9).
 
 ## Security
 
