@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+loguru>=0.7
+pillow>=10.0
+# Kraken powers party HTR
+kraken>=5.0
+torch>=2.2.0
+torchvision>=0.17.0
