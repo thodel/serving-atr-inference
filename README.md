@@ -34,30 +34,45 @@ Run tests:
 .venvs/gateway/bin/pytest
 ```
 
-## The CUDA / Python baseline issue (decision #3)
+## Target host: asterAIx (DH)
 
-**The issue:** vLLM and kraken each ship/expect a specific `torch` build, and
-`torch` is pinned to a **CUDA runtime** that must match the host **NVIDIA driver**.
-The A40 (Ampere, compute 8.6) supports bf16, so that's fine — the risk is purely
-version skew: a driver too old for the CUDA that vLLM's `torch` wants, or a kraken
-release that pins an older `torch`/`transformers` than vLLM does. If you install
-everything in one env, one of them breaks (exactly the failures documented in
-`os-vlm-tester`'s README).
+This deployment is **custom-built for asterAIx**, the GPU server at the DH. Before
+pinning any versions, capture the real environment:
 
-**Recommended setup:**
-- **OS:** Ubuntu 22.04 LTS (best-supported by NVIDIA + vLLM wheels).
-- **Driver:** a recent NVIDIA datacenter driver new enough for **CUDA 12.x**
-  (e.g. driver ≥ 535). Install the driver only; let each venv bring its own
-  CUDA via the `torch` wheel — do **not** rely on a system CUDA toolkit.
-- **Python:** 3.11 (or 3.12) per venv.
-- **Isolation:** one venv per engine family (`.venvs/{gateway,vllm,kraken,trocr,party}`),
-  each pinning its own `torch`. The gateway venv has **no** ML deps.
-- **vLLM:** install the published wheel (pulls a matching `torch`+CUDA); pin the
-  exact version in `engines/vllm/requirements.txt`.
-- **kraken / trocr / party:** separate venvs, separate pins; small models, can
-  share GPU 1.
+```bash
+# ON asterAIx (read-only, changes nothing):
+bash scripts/probe_host.sh | tee asteraix-probe.txt
+```
 
-Confirm the actual driver version on the box before building venvs (ISSUE-09).
+Paste `asteraix-probe.txt` back so the engine pins (torch/CUDA, vLLM, kraken,
+transformers, Python) and the systemd/user setup can be tailored to the box.
+The fields that drive the pins: OS, **NVIDIA driver version**, GPU model/VRAM,
+available **Python** versions, whether **conda / Lmod modules / Slurm** are in
+play, whether the user can manage **systemd** units, and whether **GPUStack /
+Docker** are already running on it.
+
+### The CUDA / Python baseline issue (why we probe)
+
+vLLM and kraken each expect a specific `torch` build, and `torch` is pinned to a
+**CUDA runtime** that must match the host **NVIDIA driver**. The A40 (Ampere,
+compute 8.6) supports bf16, so that's fine — the risk is version skew: a driver
+too old for the CUDA that vLLM's `torch` wants, or a kraken release pinning an
+older `torch`/`transformers` than vLLM. One shared env breaks (exactly the
+failures in `os-vlm-tester`'s README).
+
+**Baseline assumption (to confirm from the probe):** Ubuntu 22.04, NVIDIA driver
+≥ 535 (CUDA 12.x), Python 3.11.
+
+**Setup principles (independent of the exact numbers):**
+- One venv per engine family (`.venvs/{gateway,vllm,kraken,trocr,party}`), each
+  pinning its own `torch`. The gateway venv has **no** ML deps.
+- Install the driver only; let each venv bring its own CUDA via the `torch` wheel
+  — do **not** rely on a system CUDA toolkit.
+- vLLM: published wheel (pulls matching `torch`+CUDA), exact version pinned in
+  `engines/vllm/requirements.txt`.
+- kraken / trocr / party: separate venvs, separate pins; small models, share GPU 1.
+
+Provisioning + final pins are tracked in the deploy issue (#9).
 
 ## Security
 

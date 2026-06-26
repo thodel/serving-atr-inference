@@ -331,10 +331,11 @@ serving-atr-inference/
 - **Auth / exposure** — **static shared API key** in the `X-API-Key` header
   (`ATR_API_KEY`, identical on both VMs); same private university network behind the
   same firewall; **no TLS**. Only the gateway port is exposed; engines bind `127.0.0.1`.
-- **Host baseline** — Ubuntu 22.04, NVIDIA driver ≥ 535 (CUDA 12.x), Python 3.11 per
-  venv; each engine venv brings its own `torch`+CUDA via wheel, no system CUDA toolkit.
-  See README "The CUDA / Python baseline issue". Confirm the box's actual driver
-  version before building venvs (ISSUE-09).
+- **Target host** — **asterAIx** (DH GPU server). Build is custom to this box. Capture
+  the real environment with `scripts/probe_host.sh` (read-only) and pin each engine
+  venv from its output. Baseline *assumption* pending the probe: Ubuntu 22.04, NVIDIA
+  driver ≥ 535 (CUDA 12.x), Python 3.11; each venv brings its own `torch`+CUDA via
+  wheel, no system CUDA toolkit. See README "Target host: asterAIx".
 
 **Still open:**
 1. Exact `party` runtime invocation (standalone `party` CLI vs kraken path the current
