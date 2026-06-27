@@ -28,10 +28,15 @@ echo "== party venv =="
 "${VENVS}/party/bin/pip" install -U pip wheel
 "${VENVS}/party/bin/pip" install -r "${ROOT}/engines/party_svc/requirements.txt"
 
-# TODO(ISSUE-04): trocr venv  -> ${VENVS}/trocr
-# TODO(ISSUE-05): vllm venv   -> ${VENVS}/vllm
+echo "== trocr venv =="
+"${PY}" -m venv "${VENVS}/trocr"
+"${VENVS}/trocr/bin/pip" install -U pip wheel
+"${VENVS}/trocr/bin/pip" install -r "${ROOT}/engines/trocr_svc/requirements.txt"
+
+# TODO(ISSUE-05): vllm venv  -> ${VENVS}/vllm
 
 echo "Done."
 echo "  Gateway: ${VENVS}/gateway/bin/uvicorn atr_serving.app:app --host 0.0.0.0 --port 8200"
 echo "  Kraken:  ${VENVS}/kraken/bin/python -m uvicorn kraken_svc.app:app --host 127.0.0.1 --port 8201"
 echo "  Party:   ${VENVS}/party/bin/python -m uvicorn party_svc.app:app --host 127.0.0.1 --port 8203"
+echo "  TrOCR:   ${VENVS}/trocr/bin/python -m uvicorn trocr_svc.app:app --host 127.0.0.1 --port 8202"
