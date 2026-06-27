@@ -1,0 +1,14 @@
+[Unit]
+Description=ATR TrOCR Engine
+After=network.target
+
+[Service]
+User=dh
+WorkingDirectory=/home/dh/.openclaw/workspace/serving-atr-inference
+Environment="CUDA_VISIBLE_DEVICES=1"
+ExecStart=/home/dh/.openclaw/workspace/serving-atr-inference/.venvs/troct/bin/python -m uvicorn trocr_svc.app:app --host 127.0.0.1 --port 8202
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
