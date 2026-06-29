@@ -105,8 +105,465 @@ models:
     gpu_affinity: 1
 
   # ── Kraken (page; segments internally) ────────────────────────────────────
-  # Curated subset. Full Zenodo registry port tracked in ISSUE-02 — source:
-  # agentic_historian/agent_a/models.py (KRAKEN_MODELS).
+  # ── Kraken models — full Zenodo registry (port from agentic_historian/agent_a/models.py) ──
+  # Sourced from KRAKEN_MODELS (38 entries). Full registry tracked in ISSUE-02.
+
+  # CatMuS Medieval — full model
+  - id: kraken-catmus_medieval
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7516057"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Caroline minuscule]
+    centuries: [14, 15, 16]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # CatMuS — Caroline minuscule
+  - id: kraken-catmus_caroline
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.5468665"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Caroline minuscule]
+    centuries: [9, 10, 11, 12]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # McCATMuS — Medieval Transcription
+  - id: kraken-mccatmus
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.6542744"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Medieval]
+    centuries: [13, 14, 15]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Kraken HTR — Bohemian 19th c.
+  - id: kraken-bohemian_19th
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.2577813"
+    task: htr
+    level: page
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed Urdu Base — Kraken
+  - id: kraken-printed_urdu
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.20529753"
+    task: htr
+    level: page
+    languages: [ur]
+    scripts: [Nastaliq]
+    centuries: [19, 20]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Early Medieval Latin (9th–12th c.)
+  - id: kraken-early_medieval_latin
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.19222213"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Caroline minuscule]
+    centuries: [9, 10, 11, 12]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Medieval Charters — Latin
+  - id: kraken-medieval_charters
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.18732245"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Caroline minuscule]
+    centuries: [11, 12, 13, 14, 15]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Medieval HTR Model A
+  - id: kraken-medieval_generic_a
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.18207779"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Medieval]
+    centuries: [13, 14, 15]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Medieval HTR Model B
+  - id: kraken-medieval_generic_b
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.18220238"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Medieval]
+    centuries: [14, 15, 16]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Medieval HTR Model C
+  - id: kraken-medieval_generic_c
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.18207767"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Medieval]
+    centuries: [13, 14]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Medieval HTR Model D
+  - id: kraken-medieval_generic_d
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.18207719"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Medieval]
+    centuries: [14, 15]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Medieval HTR Model E
+  - id: kraken-medieval_generic_e
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.18207676"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Medieval]
+    centuries: [15, 16]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Late Medieval Latin (14th–16th c.)
+  - id: kraken-late_medieval_latin
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.17690418"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Textura]
+    centuries: [14, 15, 16]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Late Medieval German (14th–16th c.)
+  - id: kraken-late_medieval_german
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.15366732"
+    task: htr
+    level: page
+    languages: [de]
+    scripts: [Textura]
+    centuries: [14, 15, 16]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Early Modern German (16th–17th c.)
+  - id: kraken-early_modern_german
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.15030337"
+    task: htr
+    level: page
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [16, 17]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # McCATMuS Transcription model
+  - id: kraken-mccatmus_transcription
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.13788177"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Medieval]
+    centuries: [12, 13, 14, 15]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Medieval 12th–14th c. Latin
+  - id: kraken-medieval_12_14
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.13814200"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Caroline minuscule]
+    centuries: [12, 13, 14]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Medieval 14th–16th c. Latin
+  - id: kraken-medieval_14_16
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.13862096"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Textura]
+    centuries: [14, 15, 16]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Medieval/Early Modern 15th–16th c.
+  - id: kraken-medieval_15_16
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.13942714"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Humanistische Kursive]
+    centuries: [15, 16]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Early Modern Latin (16th–17th c.)
+  - id: kraken-early_modern_latin
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.13741957"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Humanistisch]
+    centuries: [16, 17]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Early Modern German 16th c.
+  - id: kraken-early_modern_german_16
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.13736584"
+    task: htr
+    level: page
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [16]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Kraken HTR — Bohemian 19th c. (v2)
+  - id: kraken-bohemian_19th_v2
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.11673242"
+    task: htr
+    level: page
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # OpenITI Arabic — Kraken
+  - id: kraken-openiti_arabic
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.11113737"
+    task: htr
+    level: page
+    languages: [ar]
+    scripts: [Arabic]
+    centuries: [12, 13, 14, 15, 16, 17, 18, 19]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # OpenITI Urdu — Kraken
+  - id: kraken-openiti_urdu
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.10886224"
+    task: htr
+    level: page
+    languages: [ur]
+    scripts: [Nastaliq]
+    centuries: [19, 20]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed Latin — general
+  - id: kraken-printed_latin
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.10599911"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Printed]
+    centuries: [15, 16, 17, 18]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed French — Kraken default
+  - id: kraken-printed_french
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.10592716"
+    task: htr
+    level: page
+    languages: [fr]
+    scripts: [Antiqua]
+    centuries: [16, 17, 18, 19]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Generic Printed model
+  - id: kraken-printed_generic
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.10556673"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Printed]
+    centuries: [15, 16, 17, 18]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed Medieval Latin
+  - id: kraken-printed_medieval
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.10519596"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Textura]
+    centuries: [15, 16]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed Arabic — Kraken
+  - id: kraken-printed_arabic
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.8193498"
+    task: htr
+    level: page
+    languages: [ar]
+    scripts: [Arabic]
+    centuries: [18, 19, 20]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed Urdu Base (OpenITI)
+  - id: kraken-printed_urdu_base
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7933402"
+    task: htr
+    level: page
+    languages: [ur]
+    scripts: [Nastaliq]
+    centuries: [19, 20]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed Urdu — wide
+  - id: kraken-printed_urdu_wide
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7755504"
+    task: htr
+    level: page
+    languages: [ur]
+    scripts: [Nastaliq]
+    centuries: [19, 20]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed Urdu (OpenITI extended)
+  - id: kraken-printed_urdu_openiti
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7755483"
+    task: htr
+    level: page
+    languages: [ur]
+    scripts: [Nastaliq]
+    centuries: [19, 20]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed Urdu Extended
+  - id: kraken-printed_urdu_extended
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7631619"
+    task: htr
+    level: page
+    languages: [ur]
+    scripts: [Nastaliq]
+    centuries: [19, 20]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Printed generic v2
+  - id: kraken-printed_generic_v2
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7516310"
+    task: htr
+    level: page
+    languages: [la]
+    scripts: [Printed]
+    centuries: [16, 17, 18]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Czech Historic — Kraken
+  - id: kraken-czech_historic
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7050270"
+    task: htr
+    level: page
+    languages: [cs]
+    scripts: [Kurrent]
+    centuries: [18, 19]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # Czech Historic v2 — Kraken
+  - id: kraken-czech_historic_v2
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7050342"
+    task: htr
+    level: page
+    languages: [cs]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # OpenITI Arabic v2
+  - id: kraken-openiti_arabic_v2
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7051644"
+    task: htr
+    level: page
+    languages: [ar]
+    scripts: [Arabic]
+    centuries: [12, 13, 14, 15, 16, 17, 18, 19]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+  # OpenITI Arabic v3
+  - id: kraken-openiti_arabic_v3
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.7410529"
+    task: htr
+    level: page
+    languages: [ar]
+    scripts: [Arabic]
+    centuries: [12, 13, 14, 15, 16, 17, 18, 19]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
   - id: kraken-catmus-medieval
     engine: kraken
     zenodo_id: "10.5281/zenodo.7516057"
