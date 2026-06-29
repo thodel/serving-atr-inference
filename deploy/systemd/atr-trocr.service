@@ -1,0 +1,15 @@
+[Unit]
+Description=ATR TrOCR Engine Service
+After=network.target
+
+[Service]
+Type=simple
+User=dh
+WorkingDirectory=/home/dh/serving-atr-inference
+ExecStart=/home/dh/serving-atr-inference/.venvs/trocr/bin/python -m uvicorn trocr_svc.app:app --host 127.0.0.1 --port 8202
+Restart=on-failure
+RestartSec=5
+Environment="CUDA_VISIBLE_DEVICES=1"
+
+[Install]
+WantedBy=multi-user.target
