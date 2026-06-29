@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+python-multipart>=0.0.9
 torch>=2.2
 transformers>=4.40
 Pillow>=10.0
