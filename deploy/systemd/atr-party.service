@@ -1,0 +1,15 @@
+[Unit]
+Description=ATR Party Engine Service (always-on)
+After=network.target
+
+[Service]
+Type=simple
+User=dh
+WorkingDirectory=/home/dh/serving-atr-inference
+ExecStart=/home/dh/serving-atr-inference/.venvs/party/bin/python -m uvicorn party_svc.app:app --host 127.0.0.1 --port 8203
+Restart=on-failure
+RestartSec=5
+Environment="CUDA_VISIBLE_DEVICES=1"
+
+[Install]
+WantedBy=multi-user.target
