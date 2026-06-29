@@ -79,7 +79,9 @@ let vLLM pull its default torch. (Avoided the alternative — upgrading the driv
 to ≥580 — to not disturb the RAG service on GPU 0.)
 
 ## Open confirmations (need admin / info)
-- `ufw status` and which source IP (the agentic_historian VM) must reach `:8200`.
+- Two-server topology: **asterAIx** (`srv`, `130.92.59.240`) runs this stack; the
+  client is **agentic_historian on `tei.dh.unibe.ch`**. Confirm `ufw status` and the
+  source IP `tei.dh.unibe.ch` actually uses to reach `:8200`.
 - Whether a one-time `loginctl enable-linger tobias` (or adding `tobias` to `docker`)
   is acceptable — decides supervision style.
 - Whether kraken/party install cleanly on Python 3.12.

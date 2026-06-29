@@ -75,20 +75,23 @@ enables and starts them (engines first, gateway last).
 sudo loginctl enable-linger tobias
 ```
 
-## 6. Open the gateway to the client VM only
+## 6. Open the gateway to the client host only
 
-The box has a routable IP (`130.92.59.240`). Expose `:8200` **only** to the
-agentic_historian VM (needs admin once):
+Topology: **asterAIx** (`srv`, `130.92.59.240`) runs this server; the client is
+**agentic_historian on `tei.dh.unibe.ch`**. asterAIx has a routable IP, so expose
+`:8200` **only** to `tei.dh.unibe.ch` (needs admin once):
 
 ```bash
-sudo ufw allow from <AGENTIC_HISTORIAN_VM_IP> to any port 8200 proto tcp
+CLIENT_IP=$(getent hosts tei.dh.unibe.ch | awk '{print $1}')   # resolve to an IP
+sudo ufw allow from "$CLIENT_IP" to any port 8200 proto tcp
 sudo ufw reload
 ```
 
 Engines stay on `127.0.0.1` (never exposed). Auth is the shared `X-API-Key`; the
 gateway logs a SECURITY warning if it starts exposed with the default key.
 
-> TODO: confirm the agentic_historian VM's source IP and current `ufw status`.
+> TODO: confirm `tei.dh.unibe.ch` resolves to the IP that actually reaches asterAIx
+> (it may egress via a different address) and check `ufw status`.
 
 ## 7. Verify
 
@@ -98,7 +101,7 @@ curl -s -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)" localhost:8200/m
 journalctl --user -u atr-gateway -f
 ```
 
-From the agentic_historian VM:
+From the agentic_historian host (`tei.dh.unibe.ch`):
 
 ```bash
 curl -s -H "X-API-Key: <shared-key>" http://130.92.59.240:8200/health
