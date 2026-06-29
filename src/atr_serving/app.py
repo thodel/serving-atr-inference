@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from loguru import logger
 
 from atr_serving import __version__
 from atr_serving.api.routes import router
 from atr_serving.config import DEFAULT_INSECURE_KEY, Settings, get_settings
+from atr_serving.manager import ModelManager
 from atr_serving.registry import Registry, load_registry
 
 
@@ -30,13 +33,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     logger.info("Loaded {} models from {}", len(registry), settings.models_config)
     _check_auth_hardening(settings)
 
+    manager = ModelManager(registry, settings)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):  # pragma: no cover - lifecycle hook
+        yield
+        manager.shutdown()
+
     app = FastAPI(
         title="serving-atr-inference",
         version=__version__,
         summary="Flexible ATR/OCR/HTR inference gateway",
+        lifespan=lifespan,
     )
     app.state.settings = settings
     app.state.registry = registry
+    app.state.model_manager = manager
     app.include_router(router)
     return app
 

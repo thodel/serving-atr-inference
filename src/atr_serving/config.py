@@ -51,6 +51,21 @@ class Settings(BaseSettings):
     def engine_urls(self) -> dict[str, str]:
         return {"kraken": self.kraken_url, "trocr": self.trocr_url, "party": self.party_url}
 
+    # ── vLLM (managed as subprocesses by the ModelManager, not systemd) ───────
+    # asterAIx: GPU 1 only (GPU 0 is the shared RAG GPU); one 8B resident at a time.
+    vllm_python: Path = REPO_ROOT / ".venvs" / "vllm" / "bin" / "vllm"
+    vllm_gpu: int = 1
+    vllm_port_base: int = 8210
+    # Budget for resident vLLM models on vllm_gpu. ~30 GB lets LightOnOCR (3 GB,
+    # pinned) + one 8B (18 GB) co-reside while leaving headroom for the small
+    # engine services that also sit on GPU 1. A 2nd 8B is evicted (LRU).
+    vllm_vram_budget_mb: int = 30000
+    vllm_gpu_memory_utilization: float = 0.45
+    vllm_trust_remote_code: bool = True
+    vllm_max_model_len: int | None = None
+    vllm_startup_timeout_s: int = 180
+    vllm_max_new_tokens: int = 512
+
 
 _settings: Settings | None = None
 

@@ -33,10 +33,15 @@ echo "== trocr venv =="
 "${VENVS}/trocr/bin/pip" install -U pip wheel
 "${VENVS}/trocr/bin/pip" install -r "${ROOT}/engines/trocr_svc/requirements.txt"
 
-# TODO(ISSUE-05): vllm venv  -> ${VENVS}/vllm
+echo "== vllm venv =="
+# vLLM pulls its own torch+CUDA wheel. Confirm the pin with scripts/spike_engine_installs.sh.
+"${PY}" -m venv "${VENVS}/vllm"
+"${VENVS}/vllm/bin/pip" install -U pip wheel
+"${VENVS}/vllm/bin/pip" install -r "${ROOT}/engines/vllm/requirements.txt"
 
 echo "Done."
 echo "  Gateway: ${VENVS}/gateway/bin/uvicorn atr_serving.app:app --host 0.0.0.0 --port 8200"
 echo "  Kraken:  ${VENVS}/kraken/bin/python -m uvicorn kraken_svc.app:app --host 127.0.0.1 --port 8201"
 echo "  Party:   ${VENVS}/party/bin/python -m uvicorn party_svc.app:app --host 127.0.0.1 --port 8203"
 echo "  TrOCR:   ${VENVS}/trocr/bin/python -m uvicorn trocr_svc.app:app --host 127.0.0.1 --port 8202"
+echo "  vLLM:    spawned on demand by the gateway's ModelManager (ports 8210+)"

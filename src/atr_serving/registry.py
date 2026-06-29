@@ -30,6 +30,7 @@ class ModelSpec(BaseModel):
     vram_mb: int = 0
     residency: Literal["pinned", "lazy"] = "lazy"
     gpu_affinity: int | None = None
+    prompt: str | None = None  # optional VLM instruction; None = image-only (e.g. LightOnOCR)
 
     @model_validator(mode="after")
     def _check_source(self) -> "ModelSpec":
