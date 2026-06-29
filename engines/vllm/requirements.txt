@@ -1,0 +1,6 @@
+# vLLM venv (its own torch + CUDA wheel; isolated from the other engines).
+# asterAIx: Python 3.12, driver 565 / CUDA 12.7 -> any cu12x wheel works.
+#
+# CONFIRM the exact version with: bash scripts/spike_engine_installs.sh vllm
+# Qwen3-VL support requires a recent vLLM; pin the spike's version here.
+vllm>=0.11.0

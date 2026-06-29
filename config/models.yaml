@@ -14,13 +14,15 @@
 # ModelManager uses GPU 0 only as overflow when nvidia-smi shows room.
 
 models:
-  # ── VLM OCR (page-level) — served by vLLM ────────────────────────────────
+  # ── VLM OCR — served by vLLM (subprocesses managed by ModelManager) ───────
+  # GPU 1 only (GPU 0 is the shared RAG GPU). LightOnOCR is pinned + line-level;
+  # the two 8B Qwen fine-tunes are lazy (one resident at a time, LRU-evicted).
   - id: lightonocr-catmus-caroline
     engine: vllm
     hf_repo: wjbmattingly/LightOnOCR-2-1B-catmus-caroline
     base_model: lightonai/LightOnOCR-2-1B-base
     task: ocr
-    level: page
+    level: line          # LightOnOCR expects cropped line images, not full pages
     languages: [la]
     scripts: [Caroline]
     centuries: [9, 10, 11, 12]
@@ -33,26 +35,26 @@ models:
     hf_repo: wjbmattingly/Qwen3-VL-8B-old-church-slavonic-line-3-epochs
     base_model: Qwen/Qwen3-VL-8B-Instruct
     task: ocr
-    level: page
+    level: line          # "line-3-epochs" — trained on line crops
     languages: [cu]
     scripts: [Cyrillic, Glagolitic]
     centuries: [10, 11, 12, 13, 14]
     vram_mb: 18000
     residency: lazy
-    gpu_affinity: null
+    gpu_affinity: 1
 
   - id: qwen3vl-8b-hebrew
     engine: vllm
     hf_repo: wjbmattingly/Qwen3-VL-8B-hebrew-3-epochs
     base_model: Qwen/Qwen3-VL-8B-Instruct
     task: ocr
-    level: page
+    level: page          # full-page input
     languages: [he]
     scripts: [Hebrew]
     centuries: [13, 14, 15, 16, 17, 18]
     vram_mb: 18000
     residency: lazy
-    gpu_affinity: null
+    gpu_affinity: 1
 
   # ── Party HTR — its own always-on service (runs for every image) ──────────
   - id: party
