@@ -61,3 +61,17 @@ class RecognitionResult(BaseModel):
     timing_ms: int = 0
     segmented_by: str | None = None
     version: str
+
+
+# ── /ocr (legacy alias) ────────────────────────────────────────────────────
+class OcrResponse(BaseModel):
+    """Shape consumed by agentic_historian's ``KrakenResult`` (kraken_client.py).
+
+    Deliberately minimal: ``{text, confidence, model, version}``. New clients
+    should call ``/recognize`` for the richer ``RecognitionResult``.
+    """
+
+    text: str
+    confidence: float = 0.0
+    model: str
+    version: str
