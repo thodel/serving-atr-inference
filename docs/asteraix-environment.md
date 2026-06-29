@@ -60,6 +60,24 @@ Re-run the probe and update this file if the box changes.
 8. **Coexistence.** Ollama (`:11434`), nginx (`:80`), docker and the RAG service are
    already running. Our stack must not grab their ports or GPU 0 memory.
 
+## Engine install results (spike, 2026-06-29 — all PASS on Python 3.12)
+
+| stack | result |
+|---|---|
+| kraken | 7.0.2 — OK |
+| trocr | transformers 5.12.1, torch 2.6.0+cu124 — OK |
+| party | kraken-based (`party_svc` uses `kraken.rpred`); covered by the kraken install |
+| vllm | **0.23.0** — OK, but see the torch/CUDA pin below |
+
+**vLLM torch pin (important).** `pip install vllm` pulls **torch 2.11.0+cu130**
+(CUDA 13.0), which **fails** here — driver 565 only supports CUDA 12.7
+(`RuntimeError: NVIDIA driver too old, found 12070`). **torch 2.11.0+cu128**
+works (`cuda.is_available() == True`, matmul OK) via minor-version compatibility.
+So `make_venvs.sh` installs `torch==2.11.0` from the **cu128** index *before*
+`vllm==0.23.0` (which pins torch==2.11.0, preserving the cu128 build). Do **not**
+let vLLM pull its default torch. (Avoided the alternative — upgrading the driver
+to ≥580 — to not disturb the RAG service on GPU 0.)
+
 ## Open confirmations (need admin / info)
 - `ufw status` and which source IP (the agentic_historian VM) must reach `:8200`.
 - Whether a one-time `loginctl enable-linger tobias` (or adding `tobias` to `docker`)

@@ -1,6 +1,8 @@
-# vLLM venv (its own torch + CUDA wheel; isolated from the other engines).
-# asterAIx: Python 3.12, driver 565 / CUDA 12.7 -> any cu12x wheel works.
+# vLLM venv. asterAIx: Python 3.12, driver 565.57.01 / CUDA 12.7.
 #
-# CONFIRM the exact version with: bash scripts/spike_engine_installs.sh vllm
-# Qwen3-VL support requires a recent vLLM; pin the spike's version here.
-vllm>=0.11.0
+# IMPORTANT: torch is installed SEPARATELY as 2.11.0+cu128 by make_venvs.sh.
+# `pip install vllm` defaults to a cu130 torch (CUDA 13) which fails on this
+# driver ("driver too old, found 12070"). cu128 runs via CUDA minor-version
+# compatibility (confirmed: torch.cuda.is_available() == True). vLLM 0.23.0 pins
+# torch==2.11.0, so the pre-installed cu128 build is preserved.
+vllm==0.23.0

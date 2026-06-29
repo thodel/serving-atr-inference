@@ -34,9 +34,12 @@ echo "== trocr venv =="
 "${VENVS}/trocr/bin/pip" install -r "${ROOT}/engines/trocr_svc/requirements.txt"
 
 echo "== vllm venv =="
-# vLLM pulls its own torch+CUDA wheel. Confirm the pin with scripts/spike_engine_installs.sh.
+# Driver 565 / CUDA 12.7: vLLM's default torch is cu130 (needs driver >=580) and
+# fails on this box. Install a cu128 torch first (confirmed working); vLLM 0.23.0
+# pins torch==2.11.0 so pip keeps the cu128 build. See docs/asteraix-environment.md.
 "${PY}" -m venv "${VENVS}/vllm"
 "${VENVS}/vllm/bin/pip" install -U pip wheel
+"${VENVS}/vllm/bin/pip" install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 "${VENVS}/vllm/bin/pip" install -r "${ROOT}/engines/vllm/requirements.txt"
 
 echo "Done."

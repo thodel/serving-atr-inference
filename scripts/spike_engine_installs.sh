@@ -15,8 +15,10 @@
 set -uo pipefail
 
 PY="${PYTHON:-python3.12}"
-# cu124 wheels run fine on driver 565 / CUDA 12.7 (forward compatible).
-TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# cu128 confirmed working on asterAIx (driver 565 / CUDA 12.7); cu130 fails
+# ("driver too old"). cu128 runs via CUDA minor-version compatibility.
+TORCH_INDEX="https://download.pytorch.org/whl/cu128"
 WORK="$(mktemp -d)"
 KEEP=0
 ONLY=""
@@ -79,33 +81,32 @@ PY
 }
 
 # ── vllm ────────────────────────────────────────────────────────────────────
-vllm_install() { echo "+ pip install vllm (pulls its own torch+cuda)"; pip install -q vllm; }
+# Force a cu128 torch (vLLM's default pulls cu130, which fails on driver 565).
+vllm_install() {
+  echo "+ pip install torch ($TORCH_INDEX) then vllm"
+  pip install -q torch --index-url "$TORCH_INDEX"
+  pip install -q vllm
+}
 vllm_check() {
   python - <<'PY'
 import vllm, torch
 print("vllm", vllm.__version__, "| torch", torch.__version__, "cuda", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())   # must be True on the GPU box
 print("vllm import OK")
 PY
 }
 
-# ── party ───────────────────────────────────────────────────────────────────
-# Package name unconfirmed; try PyPI then the upstream repo. This is the stack
-# most likely to need attention.
+# ── party (kraken-based; party_svc runs the model via kraken.rpred) ──────────
 party_install() {
-  echo "+ pip install party (PyPI attempt)"
-  pip install -q party 2>/dev/null && return 0
-  echo "  PyPI 'party' failed; trying git+https://github.com/mittagessen/party"
-  pip install -q "git+https://github.com/mittagessen/party.git" 2>/dev/null && return 0
-  echo "  party install failed — confirm the correct package/source"
-  return 1
+  echo "+ pip install -r engines/party_svc/requirements.txt"
+  pip install -q -r "${ROOT}/engines/party_svc/requirements.txt"
 }
 party_check() {
   python - <<'PY'
-try:
-    import party
-    print("party import OK", getattr(party, "__version__", "?"))
-except Exception as e:
-    print("party import FAILED:", e); raise
+import importlib.metadata as m
+import kraken
+from kraken import rpred  # party_svc uses kraken's recognizer
+print("party (kraken-based) OK; kraken", m.version("kraken"))
 PY
 }
 
