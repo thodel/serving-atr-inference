@@ -222,3 +222,6 @@ __marimo__/
 .env
 models_cache/
 weights/
+
+# agent worktrees
+.claude/
