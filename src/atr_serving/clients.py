@@ -82,6 +82,80 @@ def get_kraken_client(settings) -> KrakenEngineClient:
     return KrakenEngineClient(settings.kraken_url)
 
 
+# ── generic multipart engine client (kraken / trocr / party) ────────────────
+# Engine services disagree on the image form field and (trocr) on the line
+# schema, so the client knows the field name and coerces responses tolerantly.
+ENGINE_IMAGE_FIELD = {"kraken": "image", "trocr": "file", "party": "file"}
+
+
+def _coerce_line(idx: int, ln: dict[str, Any]) -> Line:
+    bbox = ln.get("bbox")
+    baseline = ln.get("baseline")
+    # trocr returns baseline as a BBox dict {x0,y0,x1,y1}; map it to bbox
+    if isinstance(baseline, dict):
+        if bbox is None:
+            bbox = [baseline.get(k, 0) for k in ("x0", "y0", "x1", "y1")]
+        baseline = None
+    if not (isinstance(baseline, list) and baseline and isinstance(baseline[0], (list, tuple))):
+        baseline = None
+    if not (isinstance(bbox, list) and len(bbox) == 4):
+        bbox = None
+    return Line(
+        order=ln.get("order", idx), text=ln.get("text"),
+        confidence=ln.get("confidence"), bbox=bbox, baseline=baseline,
+    )
+
+
+def coerce_result(data: dict[str, Any], engine: str, fallback_model: str) -> RecognitionResult:
+    """Build a gateway RecognitionResult from a (possibly divergent) engine JSON."""
+    raw_lines = data.get("lines") or []
+    lines = [_coerce_line(i, ln) for i, ln in enumerate(raw_lines) if isinstance(ln, dict)]
+    return RecognitionResult(
+        model=data.get("model") or fallback_model,
+        engine=data.get("engine") or engine,
+        text=data.get("text") or "",
+        lines=lines,
+        confidence=data.get("confidence"),
+        timing_ms=data.get("timing_ms") or 0,
+        segmented_by=data.get("segmented_by"),
+        version=data.get("version") or "?",
+    )
+
+
+class EngineHTTPClient:
+    """Generic async client for a multipart engine ``/recognize`` endpoint."""
+
+    def __init__(self, base_url: str, engine: str, image_field: str, timeout: float = 300.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.engine = engine
+        self.image_field = image_field
+        self.timeout = timeout
+
+    async def recognize(
+        self, image: bytes, filename: str, content_type: str,
+        model: str, lines: list[Line] | None = None,
+    ) -> RecognitionResult:
+        form: dict[str, str] = {"model": model}
+        if lines is not None and self.engine == "kraken":
+            form["lines"] = json.dumps([ln.model_dump() for ln in lines])
+        url = f"{self.base_url}/recognize"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(
+                    url, files={self.image_field: (filename, image, content_type)}, data=form
+                )
+        except httpx.RequestError as exc:
+            raise EngineError(f"{self.engine} engine unreachable at {url}: {exc}") from exc
+        if resp.status_code >= 400:
+            raise EngineError(f"{self.engine} engine error {resp.status_code} at {url}: {resp.text}")
+        return coerce_result(resp.json(), self.engine, model)
+
+
+def get_engine_client(engine: str, settings) -> EngineHTTPClient:
+    """Factory used by routes; a seam for tests to monkeypatch."""
+    return EngineHTTPClient(settings.engine_urls()[engine], engine, ENGINE_IMAGE_FIELD[engine])
+
+
 # ── vLLM (OpenAI-compatible) ────────────────────────────────────────────────
 def _data_url(image: bytes, content_type: str) -> str:
     mime = content_type if content_type and content_type.startswith("image/") else "image/png"

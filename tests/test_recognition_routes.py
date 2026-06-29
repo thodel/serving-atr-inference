@@ -106,12 +106,13 @@ def test_recognize_unknown_model_defaults_to_kraken(client: TestClient, fake: Fa
     assert fake.calls[0][1] == "10.5281/zenodo.7516057"
 
 
-def test_recognize_non_kraken_engine_501(client: TestClient):
+def test_recognize_unreachable_engine_502(client: TestClient):
+    # party is now wired; with no live party engine the gateway surfaces a clean 502
     resp = client.post(
         "/recognize", headers=HEADERS, files={"image": IMG},
-        data={"model": "trocr-kurrent-xvi-xvii"},
+        data={"model": "party"},
     )
-    assert resp.status_code == 501
+    assert resp.status_code == 502
 
 
 def test_recognize_passes_precomputed_lines(client: TestClient, fake: FakeKrakenClient):

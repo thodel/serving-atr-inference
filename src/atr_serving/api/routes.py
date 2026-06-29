@@ -24,10 +24,10 @@ from atr_serving.api.schemas import (
     RecognitionResult,
     SegmentResponse,
 )
-from atr_serving.clients import EngineError, get_kraken_client, get_vllm_client
+from atr_serving.clients import EngineError, get_engine_client, get_kraken_client, get_vllm_client
 from atr_serving.config import Settings
 from atr_serving.manager import ManagerError
-from atr_serving.pipeline import recognize_lines_vllm, recognize_page_vllm
+from atr_serving.pipeline import recognize_lines, recognize_page_vllm
 from atr_serving.registry import ModelSpec, Registry
 
 router = APIRouter()
@@ -55,6 +55,15 @@ def _vllm_client(request: Request, port: int):
     """Resolve a vLLM client for ``port`` (overridable on app.state for tests)."""
     client = getattr(request.app.state, "vllm_client", None)
     return client if client is not None else get_vllm_client(port)
+
+
+def _engine_client(request: Request, engine: str):
+    """Resolve a generic engine client (trocr/party); overridable for tests via
+    ``app.state.engine_clients[engine]``."""
+    overrides = getattr(request.app.state, "engine_clients", None)
+    if overrides and engine in overrides:
+        return overrides[engine]
+    return get_engine_client(engine, _settings(request))
 
 
 def _parse_lines(lines: str | None) -> list[Line] | None:
@@ -152,27 +161,48 @@ async def recognize(
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
 
-    if engine == "kraken":
-        try:
+    try:
+        # kraken & party segment internally → one engine call.
+        if engine == "kraken":
             return await _kraken_client(request).recognize(
                 raw, filename, ctype, model=model, lines=_parse_lines(lines)
             )
-        except EngineError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if engine == "party":
+            return await _engine_client(request, "party").recognize(
+                raw, filename, ctype, model=model
+            )
 
-    if engine == "vllm":
-        assert spec is not None  # vllm engine only resolved from a registry spec
-        port = await _ensure_vllm_port(request, model)
-        vclient = _vllm_client(request, port)
-        max_tokens = _settings(request).vllm_max_new_tokens
-        try:
+        # trocr is line-level (engine handles one line) → gateway segments + crops.
+        if engine == "trocr":
+            tro = _engine_client(request, "trocr")
+
+            async def _trocr_line(line_img: bytes, line_ct: str) -> str:
+                res = await tro.recognize(line_img, "line.png", line_ct, model=model)
+                return res.text
+
+            return await recognize_lines(
+                raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line
+            )
+
+        # vLLM: page = one call; line = segment + per-line chat.
+        if engine == "vllm":
+            assert spec is not None
+            port = await _ensure_vllm_port(request, model)
+            vclient = _vllm_client(request, port)
+            max_tokens = _settings(request).vllm_max_new_tokens
             if spec.level == "page":
                 return await recognize_page_vllm(raw, ctype, spec, vclient, max_tokens)
-            return await recognize_lines_vllm(
-                raw, filename, ctype, spec, _kraken_client(request), vclient, max_tokens
+
+            async def _vllm_line(line_img: bytes, line_ct: str) -> str:
+                return await vclient.transcribe_image(
+                    spec.id, line_img, line_ct, spec.prompt, max_tokens
+                )
+
+            return await recognize_lines(
+                raw, filename, ctype, model, "vllm", _kraken_client(request), _vllm_line
             )
-        except EngineError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except EngineError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     raise HTTPException(status_code=501, detail=f"engine '{engine}' not wired yet")
 

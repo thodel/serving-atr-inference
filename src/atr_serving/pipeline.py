@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import io
 import time
+from typing import Awaitable, Callable
 
 from PIL import Image
 
 from atr_serving import __version__
 from atr_serving.api.schemas import Line, RecognitionResult
 from atr_serving.image_io import decode_image
+
+# async (line_image_bytes, content_type) -> recognized text
+RecognizeLine = Callable[[bytes, str], Awaitable[str]]
 
 
 def _bbox_from_line(ln: Line, w: int, h: int) -> tuple[int, int, int, int] | None:
@@ -60,10 +64,12 @@ async def recognize_page_vllm(image, content_type, spec, vllm_client, max_tokens
     )
 
 
-async def recognize_lines_vllm(
-    image, filename, content_type, spec, segmenter, vllm_client, max_tokens
+async def recognize_lines(
+    image, filename, content_type, model_id, engine, segmenter, recognize_line: RecognizeLine
 ) -> RecognitionResult:
-    """Line-level VLM: segment -> crop each line -> per-line chat call -> assemble."""
+    """Engine-agnostic line pipeline: segment -> crop each line -> recognize ->
+    assemble. ``recognize_line`` runs one line image through whichever backend
+    (a line-level vLLM model, or the TrOCR engine)."""
     t0 = time.perf_counter()
     seg = await segmenter.segment(image, filename, content_type, mode="baseline")
     pil = decode_image(image)
@@ -73,13 +79,11 @@ async def recognize_lines_vllm(
         crop = crop_line(pil, ln)
         if crop is None:
             continue
-        txt = await vllm_client.transcribe_image(
-            spec.id, _png_bytes(crop), "image/png", spec.prompt, max_tokens
-        )
+        txt = await recognize_line(_png_bytes(crop), "image/png")
         out_lines.append(Line(order=ln.order, bbox=ln.bbox, baseline=ln.baseline, text=txt))
         texts.append(txt)
     return RecognitionResult(
-        model=spec.id, engine="vllm", text="\n".join(texts), lines=out_lines,
+        model=model_id, engine=engine, text="\n".join(texts), lines=out_lines,
         timing_ms=int((time.perf_counter() - t0) * 1000),
         segmented_by=seg.segmented_by, version=__version__,
     )
