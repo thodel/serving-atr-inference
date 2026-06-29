@@ -1,238 +1,157 @@
-"""
-Kraken engine service for ATR/OCR inference.
+"""Kraken engine service — blla segmentation + kraken recognition models.
 
-Serves /segment, /recognize, and /ocr endpoints using kraken's blla segmenter
-and the kraken `get` → `recpredict` pipeline. Lazy-loads models on first use,
-caches them in a local directory.
+kraken 7.x flow (verified against the installed lib):
+  - download a Zenodo model by DOI via ``htrmopo.get_model``
+  - segment with ``blla.segment(im)`` (built-in default segmentation model)
+  - recognise with ``rpred.rpred(net, im, segmentation)`` where the net comes
+    from ``kraken.lib.models.load_any``
+
+Lazy-loads recognition models, keeps one resident (LRU-of-1).
 """
 
 from __future__ import annotations
 
 import time
+from importlib.metadata import version as _pkg_version
+from io import BytesIO
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import htrmopo
+import torch
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
-from PIL import Image
+from kraken import blla, rpred
+from kraken.lib import models
 from loguru import logger
-import kraken
-import kraken.lib.jp2k as jp2k
-from kraken import blla
-from kraken import get as kraken_get
+from PIL import Image
 
-from atr_serving.api.schemas import SegmentResponse, RecognitionResult, Line
+from atr_serving.api.schemas import Line, RecognitionResult, SegmentResponse
 
-# ── Application ───────────────────────────────────────────────────────────────
-
-app = FastAPI(title="ATR Kraken Engine", version="0.1.0")
-
-# ── Disk cache ─────────────────────────────────────────────────────────────────
-
+KRAKEN_VERSION = _pkg_version("kraken")
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 CACHE_DIR = Path(__file__).resolve().parent / "models_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
-# ── Model state (lazy) ─────────────────────────────────────────────────────────
+app = FastAPI(title="ATR Kraken Engine", version="0.1.0")
 
-_resident_model_id: str | None = None
-_resident_model: object | None = None  # kraken recognition model
+_model_files: dict[str, Path] = {}     # model_id -> resolved .mlmodel path
+_resident_id: str | None = None
+_resident_net = None
 
 
-def _resolve_model_file(model_id: str) -> Path:
-    """Return path to a cached kraken model, downloading if needed."""
-    cached = CACHE_DIR / f"{model_id}.mlmodel"
-    if cached.exists():
-        logger.debug("model {model_id} found in cache", model_id=model_id)
-        return cached
-    logger.info("downloading kraken model {model_id} → {cached}", model_id=model_id, cached=cached)
+def _model_file(model_id: str) -> Path:
+    """Download (once) a kraken model by DOI and return its .mlmodel path."""
+    if model_id in _model_files:
+        return _model_files[model_id]
+    logger.info("Fetching kraken model {} via htrmopo", model_id)
+    p = Path(htrmopo.get_model(model_id, path=str(CACHE_DIR)))
+    if p.is_dir():
+        cands = sorted(p.rglob("*.mlmodel")) or [f for f in p.rglob("*") if f.is_file()]
+        if not cands:
+            raise RuntimeError(f"no model file found under downloaded path {p}")
+        p = cands[0]
+    _model_files[model_id] = p
+    return p
+
+
+def _load(model_id: str):
+    global _resident_id, _resident_net
+    if _resident_id == model_id and _resident_net is not None:
+        return _resident_net
+    path = _model_file(model_id)
+    logger.info("Loading recognition model {} from {} on {}", model_id, path, DEVICE)
+    _resident_net = models.load_any(str(path), device=DEVICE)
+    _resident_id = model_id
+    return _resident_net
+
+
+def _read_image(data: bytes) -> Image.Image:
     try:
-        path = kraken_get(model_id, model_dir=str(CACHE_DIR))
-        return Path(path)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"failed to download model {model_id}: {exc}")
+        return Image.open(BytesIO(data)).convert("RGB")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"unsupported image: {exc}") from exc
 
 
-def _load_recognition_model(model_id: str):
-    """Load (or return cached) kraken recognition model."""
-    global _resident_model_id, _resident_model
-    if _resident_model_id == model_id and _resident_model is not None:
-        return _resident_model
-    model_file = _resolve_model_file(model_id)
-    logger.info("loading recognition model {model_id} from {model_file}", model_id=model_id, model_file=model_file)
-    try:
-        _resident_model = kraken_get(model_id, model_dir=str(CACHE_DIR))
-        _resident_model_id = model_id
-        return _resident_model
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"failed to load model {model_id}: {exc}")
+def _geom(line) -> tuple[list[list[float]] | None, list[float] | None]:
+    baseline = getattr(line, "baseline", None)
+    pts = getattr(line, "boundary", None) or baseline or []
+    bbox = None
+    if pts:
+        xs = [float(p[0]) for p in pts]
+        ys = [float(p[1]) for p in pts]
+        bbox = [min(xs), min(ys), max(xs), max(ys)]
+    bl = [[float(p[0]), float(p[1])] for p in baseline] if baseline else None
+    return bl, bbox
 
 
-def _available_models() -> list[str]:
-    """List kraken model IDs currently cached on disk."""
-    return [p.stem for p in CACHE_DIR.glob("*.mlmodel")]
+def _record_text(rec) -> str:
+    return getattr(rec, "prediction", None) or str(rec)
 
 
-def _read_image(file: UploadFile) -> Image.Image:
-    """Decode an uploaded image file, handling JPEG2000 via kraken's decoder."""
-    content = file.file.read()
-    try:
-        # Try PIL first
-        img = Image.open(file.file)
-        return img.convert("RGB")
-    except Exception:
-        pass
-    # Fall back to kraken's JP2K decoder
-    try:
-        return jp2k.open(content)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"unsupported image format: {exc}")
+def _record_conf(rec) -> float | None:
+    c = getattr(rec, "confidences", None)
+    return (sum(c) / len(c)) if c else None
 
-
-# ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    """Return service health with loaded-model info."""
     return JSONResponse({
-        "status": "ok",
-        "model_loaded": _resident_model is not None,
-        "model_id": _resident_model_id,
+        "status": "ok", "device": DEVICE, "kraken": KRAKEN_VERSION,
+        "resident_model": _resident_id,
     })
 
 
 @app.get("/models")
 async def list_models():
-    """Return available kraken model IDs cached on disk."""
-    return {"models": _available_models()}
+    return {"models": list(_model_files)}
 
 
 @app.post("/segment", response_model=SegmentResponse)
-async def segment(
-    image: UploadFile = File(...),
-    mode: str = Form(default="blla"),
-):
-    """
-    Segment an image using kraken's blla segmenter.
-
-    Parameters
-    ----------
-    image : uploaded image file (JPEG, PNG, JPEG2000, …)
-    mode  : segmentation mode, default "blla"
-    """
-    logger.info("segment request: mode={mode}, file={file}", mode=mode, file=image.filename)
-    start = time.monotonic()
-
+async def segment(image: UploadFile = File(...), mode: str = Form(default="baseline")):
+    img = _read_image(await image.read())
     try:
-        img = _read_image(image)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"failed to read image: {exc}")
-
-    try:
-        if mode == "blla":
-            seg_result = blla.segment(img, mode=mode)
-        else:
-            seg_result = blla.segment(img, mode=mode)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"segmentation failed: {exc}")
-
-    # Build response lines
-    lines: list[Line] = []
-    for idx, (baseline, box) in enumerate(zip(seg_result["scriptio_direction"], seg_result["boxes"])):
-        order = idx
-        baseline_coords = [list(pt) for pt in baseline] if baseline else None
-        lines.append(Line(
-            order=order,
-            baseline=baseline_coords,
-            bbox=box.tolist() if hasattr(box, "tolist") else list(box),
-        ))
-
-    elapsed_ms = int((time.monotonic() - start) * 1000)
-    logger.info("segment done in {elapsed_ms}ms, {n} lines", elapsed_ms=elapsed_ms, n=len(lines))
-
-    return SegmentResponse(
-        lines=lines,
-        segmented_by=f"kraken/{mode}",
-    )
+        seg = blla.segment(img, device=DEVICE)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"segmentation failed: {exc}") from exc
+    lines = []
+    for idx, ln in enumerate(seg.lines):
+        bl, bbox = _geom(ln)
+        lines.append(Line(order=idx, baseline=bl, bbox=bbox))
+    return SegmentResponse(lines=lines, segmented_by="kraken-blla")
 
 
 @app.post("/recognize", response_model=RecognitionResult)
 async def recognize(
     image: UploadFile = File(...),
     model: str = Form(...),
-    lines: str | None = Form(default=None),
+    lines: str | None = Form(default=None),  # accepted for API compat; kraken segments internally
 ):
-    """
-    Run OCR/HTR on an image using a kraken recognition model.
-
-    Parameters
-    ----------
-    image : uploaded image file
-    model : kraken model id (zenodo id, e.g. "e98f01b0-ef78-4759-8f76-1ed5c3e8a74a")
-    lines : optional JSON list of {"baseline":[[x,y],…], "bbox":[x0,y0,x1,y1]} dicts to
-            constrain recognition to specific lines
-    """
-    logger.info("recognize request: model={model}, file={file}", model=model, file=image.filename)
-    start = time.monotonic()
-
+    t0 = time.perf_counter()
+    img = _read_image(await image.read())
+    net = _load(model)
     try:
-        img = _read_image(image)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"failed to read image: {exc}")
+        seg = blla.segment(img, device=DEVICE)
+        records = list(rpred.rpred(net, img, seg))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"recognition failed: {exc}") from exc
 
-    # Lazy-load model
-    rec_model = _load_recognition_model(model)
-
-    # Parse line constraints if provided
-    line_constraints = None
-    if lines:
-        import json as _json
-        try:
-            line_constraints = _json.loads(lines)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"invalid lines JSON: {exc}")
-
-    try:
-        pred = rec_model.recpredict(
-            img,
-            lines=line_constraints,
-            pad=[16, 16, 16, 16],
-            bidi_rtl=False,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"recognition failed: {exc}")
-
-    elapsed_ms = int((time.monotonic() - start) * 1000)
-
-    # Build Line objects
-    result_lines: list[Line] = []
-    for idx, seg in enumerate(pred["scriptio_direction"]):
-        result_lines.append(Line(
-            order=idx,
-            baseline=[list(pt) for pt in seg["baseline"]] if seg.get("baseline") else None,
-            bbox=seg.get("bbox"),
-            text=seg.get("text"),
-            confidence=seg.get("confidence"),
-        ))
-
-    full_text = " ".join(l.text or "" for l in result_lines).strip()
-
-    logger.info(
-        "recognize done in {elapsed_ms}ms, model={model}, chars={chars}",
-        elapsed_ms=elapsed_ms, model=model, chars=len(full_text),
-    )
+    out: list[Line] = []
+    texts: list[str] = []
+    confs: list[float] = []
+    for idx, (ln, rec) in enumerate(zip(seg.lines, records)):
+        text = _record_text(rec)
+        conf = _record_conf(rec)
+        if conf is not None:
+            confs.append(conf)
+        bl, bbox = _geom(ln)
+        out.append(Line(order=idx, baseline=bl, bbox=bbox, text=text, confidence=conf))
+        texts.append(text)
 
     return RecognitionResult(
-        model=model,
-        engine="kraken",
-        text=full_text,
-        lines=result_lines,
-        confidence=pred.get("confidence"),
-        timing_ms=elapsed_ms,
-        segmented_by="kraken/blla",
-        version=kraken.__version__,
+        model=model, engine="kraken", text="\n".join(texts), lines=out,
+        confidence=(sum(confs) / len(confs)) if confs else None,
+        timing_ms=int((time.perf_counter() - t0) * 1000),
+        segmented_by="kraken-blla", version=KRAKEN_VERSION,
     )
 
 
@@ -240,16 +159,11 @@ async def recognize(
 async def ocr(
     image: UploadFile = File(...),
     model: str = Form(...),
+    seg_mode: str = Form(default="baseline"),
     lines: str | None = Form(default=None),
 ):
-    """
-    Legacy alias for /recognize — exposed for compatibility with
-    agentic_historian's KrakenHTTPClient.
-    """
     return await recognize(image=image, model=model, lines=lines)
 
-
-# ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
