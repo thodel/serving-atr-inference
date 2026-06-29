@@ -23,7 +23,7 @@ from kraken.lib import models
 from loguru import logger
 from PIL import Image
 
-from atr_serving.api.schemas import Line, RecognitionResult
+from atr_serving.contracts import Line, RecognitionResult
 
 __version__ = "0.1.0"
 MODEL_ID = "10.5281/zenodo.20642057"

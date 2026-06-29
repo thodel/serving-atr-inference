@@ -25,7 +25,7 @@ from kraken.lib import models
 from loguru import logger
 from PIL import Image
 
-from atr_serving.api.schemas import Line, RecognitionResult, SegmentResponse
+from atr_serving.contracts import Line, RecognitionResult, SegmentResponse
 
 KRAKEN_VERSION = _pkg_version("kraken")
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"

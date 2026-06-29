@@ -1,22 +1,30 @@
 """Pydantic response/request schemas for the public API.
 
-Phase 0 implements only the read endpoints (/health, /models). The recognition
-schemas are defined here too so engine implementers in later phases code against
-a fixed contract.
+The recognition wire contracts (Line, SegmentResponse, RecognitionResult,
+OcrResponse) live in the dependency-light ``atr_serving.contracts`` so the engine
+services can share them without pulling in the registry/yaml. They're re-exported
+here for backward compatibility. The meta schemas below depend on the registry
+and are gateway-only.
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from atr_serving.contracts import Line, OcrResponse, RecognitionResult, SegmentResponse
 from atr_serving.registry import ModelSpec
+
+__all__ = [
+    "Line", "OcrResponse", "RecognitionResult", "SegmentResponse",
+    "EngineStatus", "HealthResponse", "ModelInfo", "ModelsResponse",
+]
 
 
 # ── /health ───────────────────────────────────────────────────────────────
 class EngineStatus(BaseModel):
     name: str
     url: str
-    reachable: bool | None = None  # None = not probed yet (Phase 0)
+    reachable: bool | None = None  # None = not probed yet
 
 
 class HealthResponse(BaseModel):
@@ -31,47 +39,8 @@ class HealthResponse(BaseModel):
 class ModelInfo(ModelSpec):
     """Registry spec plus runtime state."""
 
-    resident: bool = False  # set by ModelManager (Phase 3); False in Phase 0
+    resident: bool = False
 
 
 class ModelsResponse(BaseModel):
     models: list[ModelInfo]
-
-
-# ── /segment & /recognize (contract for later phases) ──────────────────────
-class Line(BaseModel):
-    order: int
-    baseline: list[list[float]] | None = None  # [[x0,y0],[x1,y1],...]
-    bbox: list[float] | None = None            # [x0,y0,x1,y1]
-    text: str | None = None
-    confidence: float | None = None
-
-
-class SegmentResponse(BaseModel):
-    lines: list[Line]
-    segmented_by: str
-
-
-class RecognitionResult(BaseModel):
-    model: str
-    engine: str
-    text: str
-    lines: list[Line] = Field(default_factory=list)
-    confidence: float | None = None
-    timing_ms: int = 0
-    segmented_by: str | None = None
-    version: str
-
-
-# ── /ocr (legacy alias) ────────────────────────────────────────────────────
-class OcrResponse(BaseModel):
-    """Shape consumed by agentic_historian's ``KrakenResult`` (kraken_client.py).
-
-    Deliberately minimal: ``{text, confidence, model, version}``. New clients
-    should call ``/recognize`` for the richer ``RecognitionResult``.
-    """
-
-    text: str
-    confidence: float = 0.0
-    model: str
-    version: str

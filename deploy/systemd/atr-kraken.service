@@ -10,6 +10,7 @@ Type=simple
 WorkingDirectory=%h/Repo/serving-atr-inference/engines
 EnvironmentFile=%h/Repo/serving-atr-inference/.env
 Environment=CUDA_VISIBLE_DEVICES=1
+Environment=PYTHONPATH=%h/Repo/serving-atr-inference/src
 ExecStart=%h/Repo/serving-atr-inference/.venvs/kraken/bin/python -m uvicorn kraken_svc.app:app --host 127.0.0.1 --port 8201
 Restart=on-failure
 RestartSec=5
