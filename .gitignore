@@ -225,3 +225,6 @@ weights/
 
 # agent worktrees
 .claude/
+
+# eval run outputs
+eval/outputs/
