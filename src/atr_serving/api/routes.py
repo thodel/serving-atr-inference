@@ -161,12 +161,21 @@ async def recognize(
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
 
+    # Each engine wants a different model reference: kraken/party download by
+    # Zenodo DOI, trocr loads by HF repo, vllm uses the registry id (= its
+    # --served-model-name). If the model isn't in the registry (spec is None),
+    # the caller already passed a raw ref (e.g. a DOI), so use it verbatim.
+    kraken_ref = (spec.zenodo_id or spec.id) if spec else model
+    trocr_ref = (spec.hf_repo or spec.id) if spec else model
+
     try:
         # kraken & party segment internally → one engine call.
         if engine == "kraken":
-            return await _kraken_client(request).recognize(
-                raw, filename, ctype, model=model, lines=_parse_lines(lines)
+            res = await _kraken_client(request).recognize(
+                raw, filename, ctype, model=kraken_ref, lines=_parse_lines(lines)
             )
+            res.model = model  # echo the id the caller requested
+            return res
         if engine == "party":
             return await _engine_client(request, "party").recognize(
                 raw, filename, ctype, model=model
@@ -177,7 +186,7 @@ async def recognize(
             tro = _engine_client(request, "trocr")
 
             async def _trocr_line(line_img: bytes, line_ct: str) -> str:
-                res = await tro.recognize(line_img, "line.png", line_ct, model=model)
+                res = await tro.recognize(line_img, "line.png", line_ct, model=trocr_ref)
                 return res.text
 
             return await recognize_lines(
@@ -221,20 +230,21 @@ async def ocr(
 ) -> OcrResponse:
     """Legacy alias for agentic_historian's ``KrakenHTTPClient`` — kraken only,
     projected down to the minimal ``{text, confidence, model, version}`` shape."""
-    engine, _ = _resolve_spec(request, model)
+    engine, spec = _resolve_spec(request, model)
     if engine != "kraken":
         raise HTTPException(status_code=400, detail="/ocr is kraken-only; use /recognize")
+    kraken_ref = (spec.zenodo_id or spec.id) if spec else model  # DOI for htrmopo
     raw = await image.read()
     try:
         result = await _kraken_client(request).recognize(
             raw, image.filename or "image", image.content_type or "application/octet-stream",
-            model=model, lines=None,
+            model=kraken_ref, lines=None,
         )
     except EngineError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return OcrResponse(
         text=result.text, confidence=result.confidence or 0.0,
-        model=result.model, version=result.version,
+        model=model, version=result.version,
     )
 
 

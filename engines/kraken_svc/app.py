@@ -40,15 +40,27 @@ _resident_net = None
 
 
 def _model_file(model_id: str) -> Path:
-    """Download (once) a kraken model by DOI and return its .mlmodel path."""
+    """Download (once) a kraken model by Zenodo DOI and return its .mlmodel path.
+
+    Each model gets its own cache subdir (htrmopo.get_model drops the .mlmodel +
+    metadata.json directly into ``path``, so a shared dir would mix models).
+    """
     if model_id in _model_files:
         return _model_files[model_id]
-    logger.info("Fetching kraken model {} via htrmopo", model_id)
-    p = Path(htrmopo.get_model(model_id, path=str(CACHE_DIR)))
-    if p.is_dir():
-        cands = sorted(p.rglob("*.mlmodel")) or [f for f in p.rglob("*") if f.is_file()]
+    dest = CACHE_DIR / model_id.replace("/", "_")
+    existing = sorted(dest.glob("*.mlmodel")) if dest.is_dir() else []
+    if existing:
+        p = existing[0]
+    else:
+        dest.mkdir(parents=True, exist_ok=True)
+        logger.info("Fetching kraken model {} via htrmopo -> {}", model_id, dest)
+        got = Path(htrmopo.get_model(model_id, path=str(dest)))
+        cands = (
+            sorted(got.rglob("*.mlmodel")) or [f for f in got.rglob("*") if f.is_file()]
+            if got.is_dir() else [got]
+        )
         if not cands:
-            raise RuntimeError(f"no model file found under downloaded path {p}")
+            raise RuntimeError(f"no model file found under {got}")
         p = cands[0]
     _model_files[model_id] = p
     return p
