@@ -1,15 +1,18 @@
+# User unit (systemctl --user) — asterAIx has no passwordless sudo / Linger=no.
+# Install: scripts/install_user_units.sh  (copies to ~/.config/systemd/user/)
 [Unit]
 Description=ATR Kraken Engine Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=dh
-WorkingDirectory=/home/dh/serving-atr-inference
-ExecStart=/home/dh/serving-atr-inference/.venvs/kraken/bin/python -m uvicorn kraken_svc.app:app --host 127.0.0.1 --port 8201
+WorkingDirectory=%h/Repo/serving-atr-inference/engines
+EnvironmentFile=%h/Repo/serving-atr-inference/.env
+Environment=CUDA_VISIBLE_DEVICES=1
+ExecStart=%h/Repo/serving-atr-inference/.venvs/kraken/bin/python -m uvicorn kraken_svc.app:app --host 127.0.0.1 --port 8201
 Restart=on-failure
 RestartSec=5
-Environment="CUDA_VISIBLE_DEVICES=1"
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

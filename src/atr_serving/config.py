@@ -17,6 +17,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Sentinel default key — safe only for local dev. Override via ATR_API_KEY.
+DEFAULT_INSECURE_KEY = "dev-insecure-change-me"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ATR_", env_file=".env", extra="ignore")
@@ -30,7 +33,7 @@ class Settings(BaseSettings):
     # ── Auth ──────────────────────────────────────────────────────────────
     # Static shared key. Sent by clients in the `X-API-Key` header.
     # Default is dev-only; ALWAYS override on the server via ATR_API_KEY.
-    api_key: str = "dev-insecure-change-me"
+    api_key: str = DEFAULT_INSECURE_KEY
     # When False, /models and /recognize are open (dev convenience only).
     require_auth: bool = True
 

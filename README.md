@@ -72,7 +72,8 @@ bash scripts/probe_host.sh | tee asteraix-probe.txt
   `engines/vllm/requirements.txt`.
 - kraken / trocr / party: separate venvs, separate pins; small models on GPU 1.
 
-Provisioning + final pins + firewall are tracked in the deploy issue (#9).
+Provisioning is documented in [`docs/DEPLOY.md`](docs/DEPLOY.md) (clone → venvs →
+`.env` → prefetch → `systemctl --user` units → ufw). Final vLLM pins land with #5.
 
 ## Security
 
