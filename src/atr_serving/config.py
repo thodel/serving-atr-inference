@@ -63,8 +63,12 @@ class Settings(BaseSettings):
     vllm_gpu_memory_utilization: float = 0.45
     vllm_trust_remote_code: bool = True
     vllm_max_model_len: int | None = None
-    vllm_startup_timeout_s: int = 180
+    vllm_startup_timeout_s: int = 300  # 8B load + CUDA graph capture can exceed 180s
     vllm_max_new_tokens: int = 512
+    # The Qwen3-VL / LightOnOCR models are LoRA adapters whose adaptation includes
+    # the vision tower, which vLLM can't serve as a runtime LoRA. scripts/merge_loras.py
+    # bakes each adapter into its base here; the launcher serves the merged dir if present.
+    vllm_merged_dir: Path = Path.home() / "atr-cache" / "vllm-merged"
 
 
 _settings: Settings | None = None

@@ -12,3 +12,6 @@ vllm==0.11.0
 # removed in transformers 5.x -> AttributeError). Pin a 4.x that still supports
 # Qwen3-VL (added in transformers 4.57).
 transformers>=4.57,<5
+# peft is used by scripts/merge_loras.py to bake LoRA adapters into their base
+# (vLLM can't serve LoRA that adapts the vision tower).
+peft>=0.17

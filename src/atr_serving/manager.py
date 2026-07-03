@@ -66,12 +66,22 @@ class Launcher(Protocol):
     def start(self, spec: ModelSpec, port: int, gpu: int, settings: Settings) -> VllmHandle: ...
 
 
+def resolve_model_path(spec: ModelSpec, settings: Settings) -> str:
+    """Serve a locally-merged full model if present (LoRA adapters get baked into
+    their base by scripts/merge_loras.py — vLLM can't serve vision-tower LoRA),
+    otherwise the HF repo id."""
+    merged = settings.vllm_merged_dir / spec.id
+    if merged.is_dir() and any(merged.glob("config.json")):
+        return str(merged)
+    return spec.hf_repo or spec.id
+
+
 class VllmLauncher:
     """Default launcher: spawn ``vllm serve`` pinned to one GPU."""
 
     def start(self, spec: ModelSpec, port: int, gpu: int, settings: Settings) -> VllmHandle:
         cmd = [
-            str(settings.vllm_python), "serve", spec.hf_repo or spec.id,
+            str(settings.vllm_python), "serve", resolve_model_path(spec, settings),
             "--host", "127.0.0.1", "--port", str(port),
             "--served-model-name", spec.id,
             "--gpu-memory-utilization", str(settings.vllm_gpu_memory_utilization),
