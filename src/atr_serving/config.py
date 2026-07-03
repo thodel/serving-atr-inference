@@ -60,7 +60,10 @@ class Settings(BaseSettings):
     # pinned) + one 8B (18 GB) co-reside while leaving headroom for the small
     # engine services that also sit on GPU 1. A 2nd 8B is evicted (LRU).
     vllm_vram_budget_mb: int = 30000
-    vllm_gpu_memory_utilization: float = 0.55
+    # GPU 1 is essentially free (~45 GB). At 0.45, weights (16.6 GB) + Qwen3-VL's
+    # profiling overhead left NEGATIVE KV cache. 0.70 (~32 GB) leaves ~8 GB for KV
+    # and still ~14 GB for the small engines (kraken/trocr) on GPU 1.
+    vllm_gpu_memory_utilization: float = 0.70
     vllm_trust_remote_code: bool = True
     # Qwen3-VL defaults to 262k context; the KV cache for that won't fit alongside
     # 17 GB of weights on GPU 1. Cap it — OCR/HTR needs nothing close.
