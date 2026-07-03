@@ -60,9 +60,11 @@ class Settings(BaseSettings):
     # pinned) + one 8B (18 GB) co-reside while leaving headroom for the small
     # engine services that also sit on GPU 1. A 2nd 8B is evicted (LRU).
     vllm_vram_budget_mb: int = 30000
-    vllm_gpu_memory_utilization: float = 0.45
+    vllm_gpu_memory_utilization: float = 0.55
     vllm_trust_remote_code: bool = True
-    vllm_max_model_len: int | None = None
+    # Qwen3-VL defaults to 262k context; the KV cache for that won't fit alongside
+    # 17 GB of weights on GPU 1. Cap it — OCR/HTR needs nothing close.
+    vllm_max_model_len: int | None = 16384
     vllm_startup_timeout_s: int = 300  # 8B load + CUDA graph capture can exceed 180s
     vllm_max_new_tokens: int = 512
     # The Qwen3-VL / LightOnOCR models are LoRA adapters whose adaptation includes

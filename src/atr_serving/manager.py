@@ -209,6 +209,13 @@ class ModelManager:
         while time.monotonic() < deadline:
             if handle.is_healthy():
                 return
+            # Fail fast if the subprocess already died (don't wait out the timeout).
+            proc = getattr(handle, "proc", None)
+            if proc is not None and proc.poll() is not None:
+                raise ManagerError(
+                    f"vLLM process exited (code {proc.returncode}) during startup; "
+                    "see the gateway journal for the vLLM traceback"
+                )
             self._sleep(2)
         handle.terminate()
         raise ManagerError("vLLM instance did not become healthy in time")
