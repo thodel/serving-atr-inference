@@ -53,12 +53,25 @@ Set in `.env`:
 - `HF_HOME=/home/tobias/atr-cache/hf` — keep weights off the 80%-full root default
   and somewhere you can monitor.
 
-## 4. Prefetch model weights
+## 4. Prefetch model weights + merge vLLM LoRA adapters
 
 ```bash
-python scripts/download_models.py            # all engines; honors HF_HOME
-# or per engine: python scripts/download_models.py --engine kraken party
+set -a; . ./.env; set +a                     # HF_HOME
+python scripts/download_models.py            # HF adapters + bases; honors HF_HOME
 ```
+
+The vLLM models are **LoRA adapters** (Qwen3-VL / LightOnOCR) whose adaptation
+includes the vision tower, which vLLM can't serve as a runtime LoRA. Bake each into
+its base (needs the vLLM venv; also downloads the bases if missing):
+
+```bash
+.venvs/vllm/bin/python scripts/merge_loras.py    # -> ~/atr-cache/vllm-merged/<id>
+```
+
+The gateway's ModelManager serves the merged full model automatically (config
+`vllm_merged_dir`). Note the pinned vLLM knobs in `Settings`: `max_model_len=16384`
+(Qwen3-VL's 262k default OOMs the KV cache) and `gpu_memory_utilization≈0.70`.
+kraken/party download their Zenodo models on demand via htrmopo.
 
 ## 5. Install + start the user services
 
