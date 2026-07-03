@@ -8,3 +8,7 @@
 # NOTE: LightOnOCR-2 (a Jan-2026 model) may be too new for 0.11.0 and not load;
 # revisit if that model is needed (would require the driver upgrade / cuda-compat).
 vllm==0.11.0
+# vLLM 0.11.0 uses transformers 4.x tokenizer APIs (e.g. all_special_tokens_extended,
+# removed in transformers 5.x -> AttributeError). Pin a 4.x that still supports
+# Qwen3-VL (added in transformers 4.57).
+transformers>=4.57,<5
