@@ -34,12 +34,13 @@ echo "== trocr venv =="
 "${VENVS}/trocr/bin/pip" install -r "${ROOT}/engines/trocr_svc/requirements.txt"
 
 echo "== vllm venv =="
-# Driver 565 / CUDA 12.7: vLLM's default torch is cu130 (needs driver >=580) and
-# fails on this box. Install a cu128 torch first (confirmed working); vLLM 0.23.0
-# pins torch==2.11.0 so pip keeps the cu128 build. See docs/asteraix-environment.md.
+# Driver 565 / CUDA 12.7: current vLLM (0.2x) is a CUDA-13 build (needs libcudart.so.13
+# / driver >=580) and fails on this box. vLLM 0.11.0 is the last CUDA-12.8 build that
+# still supports Qwen3-VL — it pins torch==2.8.0, which we install from the cu128 index
+# first so pip keeps the CUDA-12.8 wheel. See docs/asteraix-environment.md.
 "${PY}" -m venv "${VENVS}/vllm"
 "${VENVS}/vllm/bin/pip" install -U pip wheel
-"${VENVS}/vllm/bin/pip" install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+"${VENVS}/vllm/bin/pip" install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 "${VENVS}/vllm/bin/pip" install -r "${ROOT}/engines/vllm/requirements.txt"
 
 echo "Done."

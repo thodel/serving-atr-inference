@@ -69,14 +69,17 @@ Re-run the probe and update this file if the box changes.
 | party | kraken-based (`party_svc` uses `kraken.rpred`); covered by the kraken install |
 | vllm | **0.23.0** — OK, but see the torch/CUDA pin below |
 
-**vLLM torch pin (important).** `pip install vllm` pulls **torch 2.11.0+cu130**
-(CUDA 13.0), which **fails** here — driver 565 only supports CUDA 12.7
-(`RuntimeError: NVIDIA driver too old, found 12070`). **torch 2.11.0+cu128**
-works (`cuda.is_available() == True`, matmul OK) via minor-version compatibility.
-So `make_venvs.sh` installs `torch==2.11.0` from the **cu128** index *before*
-`vllm==0.23.0` (which pins torch==2.11.0, preserving the cu128 build). Do **not**
-let vLLM pull its default torch. (Avoided the alternative — upgrading the driver
-to ≥580 — to not disturb the RAG service on GPU 0.)
+**vLLM pin (important).** Current vLLM (0.2x, e.g. 0.23.0) ships a **CUDA-13 build**
+of the compiled `vllm._C` extension — it needs `libcudart.so.13` and fails on this
+driver (`ImportError: libcudart.so.13`); driver 565 tops out at CUDA 12.7 and would
+need ≥580 for CUDA 13. Fixing *torch* to cu128 isn't enough — vLLM's own native code
+is the problem. **vLLM 0.11.0** is the last **CUDA-12.8** build that still supports
+Qwen3-VL (Qwen3-VL requires vLLM ≥ 0.11.0). Verified on the box: `vllm 0.11.0`,
+`torch 2.8.0+cu128`, `vllm._C` imports, `cuda.is_available() == True`. So
+`make_venvs.sh` installs `torch==2.8.0` from the **cu128** index *before*
+`vllm==0.11.0`. Chosen over the driver upgrade (≥580, reboot + RAG downtime) and
+cuda-compat (fiddly). **Caveat:** LightOnOCR-2 (Jan 2026) may be too new for vLLM
+0.11.0 — revisit (driver upgrade / cuda-compat) if that model is required.
 
 ## Open confirmations (need admin / info)
 - Two-server topology: **asterAIx** (`srv`, `130.92.59.240`) runs this stack; the

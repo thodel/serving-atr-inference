@@ -1,8 +1,10 @@
 # vLLM venv. asterAIx: Python 3.12, driver 565.57.01 / CUDA 12.7.
 #
-# IMPORTANT: torch is installed SEPARATELY as 2.11.0+cu128 by make_venvs.sh.
-# `pip install vllm` defaults to a cu130 torch (CUDA 13) which fails on this
-# driver ("driver too old, found 12070"). cu128 runs via CUDA minor-version
-# compatibility (confirmed: torch.cuda.is_available() == True). vLLM 0.23.0 pins
-# torch==2.11.0, so the pre-installed cu128 build is preserved.
-vllm==0.23.0
+# IMPORTANT: torch is installed SEPARATELY as 2.8.0+cu128 by make_venvs.sh.
+# Current vLLM (0.2x) ships a CUDA-13 build of vllm._C (needs libcudart.so.13 /
+# driver >=580) and fails on this driver. vLLM 0.11.0 is the last CUDA-12.8 build
+# that still supports Qwen3-VL (Qwen3-VL requires vLLM >= 0.11.0); it pins
+# torch==2.8.0, so the pre-installed cu128 build is preserved.
+# NOTE: LightOnOCR-2 (a Jan-2026 model) may be too new for 0.11.0 and not load;
+# revisit if that model is needed (would require the driver upgrade / cuda-compat).
+vllm==0.11.0
