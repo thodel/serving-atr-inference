@@ -1,0 +1,20 @@
+[
+  {
+    "id": "example/kraken-new-model",
+    "downloads": 1500,
+    "lastModified": "2025-03-01T12:00:00Z",
+    "tags": ["kraken", "htr", "handwritten"]
+  },
+  {
+    "id": "example/trocr-fine-tune",
+    "downloads": 3200,
+    "lastModified": "2025-02-20T08:00:00Z",
+    "tags": ["trocr", "ocr", "transformers"]
+  },
+  {
+    "id": "wjbmattingly/LightOnOCR-2-1B-catmus-caroline",
+    "downloads": 9999,
+    "lastModified": "2025-01-15T00:00:00Z",
+    "tags": ["ocr", "lighton", "caroline"]
+  }
+]
