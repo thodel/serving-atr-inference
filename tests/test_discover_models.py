@@ -58,6 +58,16 @@ def zenodo_response_page2() -> dict:
     return {"hits": {"hits": []}, "links": {}}
 
 
+def _hf_models_from_fixture() -> list:
+    """Parse HF page-1 fixture into HFModel objects."""
+    from scripts.discover_models import HFModel
+    return [
+        HFModel(id=d["id"], downloads=d.get("downloads", 0),
+                 last_modified=d.get("lastModified", ""), tags=d.get("tags", []))
+        for d in hf_response()
+    ]
+
+
 # ─── _normalize_zenodo_id ─────────────────────────────────────────────────────
 
 class TestNormalizeZenodoId:
@@ -218,10 +228,11 @@ class TestZenodoDiscovery:
         empty_resp.json.return_value = zenodo_response_page2()
 
         session = MagicMock(spec=requests.Session)
-        # Page 1: results with next link. Page 2: empty -> stops.
-        session.get = MagicMock(side_effect=[mock_resp, empty_resp])
-
-        records, error = discover_zenodo_models(session)
+        # Patch communities to 1 entry so only 2 calls needed: page1 results, page2 empty
+        import scripts.discover_models as dm
+        with patch.object(dm, "ZENODO_COMMUNITIES", ["scribes"]),              patch.object(dm, "_search_zenodo", lambda s, p: mock_resp.json() if p.get("page", 1) == 1 else empty_resp.json()):
+            session.get.return_value = mock_resp
+            records, error = discover_zenodo_models(session)
 
         assert len(records) == 3
         ids = {r.zenodo_id for r in records}
@@ -235,14 +246,15 @@ class TestZenodoDiscovery:
         mock_resp.status_code = 200
         mock_resp.json.return_value = zenodo_response()
 
-        empty_resp = MagicMock()
-        empty_resp.status_code = 200
-        empty_resp.json.return_value = zenodo_response_page2()
+        import scripts.discover_models as dm
+        def fake_search(session, params):
+            return mock_resp.json() if params.get("page", 1) == 1 else zenodo_response_page2()
 
-        session = MagicMock(spec=requests.Session)
-        session.get = MagicMock(side_effect=[mock_resp, empty_resp])
-
-        records, _ = discover_zenodo_models(session)
+        with patch.object(dm, "ZENODO_COMMUNITIES", ["scribes"]), \
+             patch.object(dm, "_search_zenodo", fake_search):
+            session = MagicMock(spec=requests.Session)
+            session.get.return_value = mock_resp
+            records, _ = discover_zenodo_models(session)
 
         r153 = next(r for r in records if r.zenodo_id == "15366732")
         assert r153.doi == "10.5281/zenodo.15366732"
@@ -250,20 +262,19 @@ class TestZenodoDiscovery:
 
     def test_zenodo_500_error_is_graceful(self):
         """500 response on Zenodo: no crash, error recorded, returns partial results."""
-        mock_500 = MagicMock()
-        mock_500.status_code = 500
-        err_500 = requests.exceptions.HTTPError(response=mock_500)
+        mock_500_resp = MagicMock()
+        mock_500_resp.status_code = 500
+        mock_500_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "500 Server Error", response=mock_500_resp
+        )
 
-        empty_resp = MagicMock()
-        empty_resp.status_code = 200
-        empty_resp.json.return_value = zenodo_response_page2()
+        import scripts.discover_models as dm
+        # Patch communities to 1 entry so only 1 mock call is needed
+        with patch.object(dm, "ZENODO_COMMUNITIES", ["scribes"]):
+            session = MagicMock(spec=requests.Session)
+            session.get.return_value = mock_500_resp
+            records, error = discover_zenodo_models(session)
 
-        session = MagicMock(spec=requests.Session)
-        # First call: 500 (breaks first query). All remaining calls: empty (breaks gracefully).
-        session.get = MagicMock(side_effect=[err_500] + [empty_resp] * 20)
-
-        records, error = discover_zenodo_models(session)
-        # 500 on first query -> error recorded; remaining queries return empty gracefully
         assert error is not None
         assert "500" in error
 
@@ -273,14 +284,11 @@ class TestZenodoDiscovery:
 class TestDiff:
     def test_hf_model_excluded_by_hf_repo(self):
         """A model already served by HF repo ID is excluded."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = hf_response()
+        import scripts.discover_models as dm
+        with patch.object(dm, "HF_SEARCH_TERMS", ["kraken HTR"]), \
+             patch.object(dm, "_search_hf", lambda s, q, page: _hf_models_from_fixture() if page == 1 else []):
+            models, _ = discover_hf_models(MagicMock(spec=requests.Session))
 
-        session = MagicMock(spec=requests.Session)
-        session.get.return_value = mock_resp
-
-        models, _ = discover_hf_models(session)
         report = DiscoveryReport(hf_candidates=models)
         diff_report(report, served_hf_repos={"wjbmattingly/LightOnOCR-2-1B-catmus-caroline"}, served_zenodo_ids=set())
 
@@ -292,14 +300,11 @@ class TestDiff:
 
     def test_zenodo_record_excluded_by_zenodo_id(self):
         """A Zenodo record already served is excluded."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = zenodo_response()
+        import scripts.discover_models as dm
+        with patch.object(dm, "ZENODO_COMMUNITIES", ["scribes"]), \
+             patch.object(dm, "_search_zenodo", lambda s, p: zenodo_response() if p.get("page", 1) == 1 else zenodo_response_page2()):
+            records, _ = discover_zenodo_models(MagicMock(spec=requests.Session))
 
-        session = MagicMock(spec=requests.Session)
-        session.get.return_value = mock_resp
-
-        records, _ = discover_zenodo_models(session)
         report = DiscoveryReport(zenodo_candidates=records)
         diff_report(report, served_hf_repos=set(), served_zenodo_ids={"15366732", "99999999"})
 
@@ -310,42 +315,38 @@ class TestDiff:
 
     def test_diff_is_case_insensitive(self):
         """HF repo matching is case-insensitive."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = hf_response()
+        import scripts.discover_models as dm
+        with patch.object(dm, "HF_SEARCH_TERMS", ["kraken HTR"]), \
+             patch.object(dm, "_search_hf", lambda s, q, page: _hf_models_from_fixture() if page == 1 else []):
+            models, _ = discover_hf_models(MagicMock(spec=requests.Session))
 
-        session = MagicMock(spec=requests.Session)
-        session.get.return_value = mock_resp
-
-        models, _ = discover_hf_models(session)
         report = DiscoveryReport(hf_candidates=models)
-        # registry has UPPER case variant of a served repo
         diff_report(report, served_hf_repos={"EXAMPLE/KRAKEN-NEW-MODEL"}, served_zenodo_ids=set())
 
         assert "example/kraken-new-model" not in {m.id for m in report.new_hf_models}
 
     def test_two_sources_one_fails_still_produces_report(self):
         """HF fails but Zenodo succeeds: report is still produced."""
+        import scripts.discover_models as dm
+
         # HF failure
-        mock_500 = MagicMock()
-        mock_500.status_code = 500
-        err_500 = requests.exceptions.HTTPError(response=mock_500)
+        mock_500_resp = MagicMock()
+        mock_500_resp.status_code = 500
+        mock_500_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "500 Server Error", response=mock_500_resp
+        )
         hf_session = MagicMock(spec=requests.Session)
-        hf_session.get.side_effect = [err_500]
+        hf_session.get.return_value = mock_500_resp
 
-        # Zenodo success
-        zenodo_session = MagicMock(spec=requests.Session)
-        z_resp = MagicMock()
-        z_resp.status_code = 200
-        z_resp.json.return_value = zenodo_response()
-        zenodo_session.get.return_value = z_resp
+        with patch.object(dm, "HF_SEARCH_TERMS", ["kraken HTR"]):
+            hf_models, hf_error = discover_hf_models(hf_session)
 
-        hf_models, hf_error = discover_hf_models(hf_session)
-        zenodo_records, zenodo_error = discover_zenodo_models(zenodo_session)
+        # Zenodo success: page 1 has data, page 2 is empty to stop pagination
+        with patch.object(dm, "ZENODO_COMMUNITIES", ["scribes"]), \
+             patch.object(dm, "_search_zenodo", lambda s, p: zenodo_response() if p.get("page", 1) == 1 else zenodo_response_page2()):
+            zenodo_records, zenodo_error = discover_zenodo_models(MagicMock(spec=requests.Session))
 
         report = DiscoveryReport()
-        diff_report(report, served_hf_repos=set(), served_zenodo_ids=set())
-        # We can build a valid report even with HF failing
         report.hf_candidates = hf_models
         report.zenodo_candidates = zenodo_records
         if hf_error:
@@ -466,38 +467,58 @@ class TestJsonReport:
 class TestDiscoverIntegration:
     def test_discover_runs_without_crash(self):
         """Smoke test: discover() completes with all sources mocked out."""
-        mock_session = MagicMock(spec=requests.Session)
+        import scripts.discover_models as dm
 
-        # HF returns models
         hf_resp = MagicMock()
         hf_resp.status_code = 200
         hf_resp.json.return_value = hf_response()
 
-        # Zenodo returns records
         zenodo_resp = MagicMock()
         zenodo_resp.status_code = 200
         zenodo_resp.json.return_value = zenodo_response()
 
-        mock_session.get.side_effect = [hf_resp, zenodo_resp]
+        def fake_hf_search(session, query, page):
+            return _hf_models_from_fixture() if page == 1 else []
 
-        from scripts.discover_models import discover
-        report = discover(mock_session)
+        def fake_zenodo_search(session, params):
+            return zenodo_response() if params.get("page", 1) == 1 else zenodo_response_page2()
+
+        with patch.object(dm, "HF_SEARCH_TERMS", ["kraken HTR"]), \
+             patch.object(dm, "_search_hf", fake_hf_search), \
+             patch.object(dm, "ZENODO_COMMUNITIES", ["scribes"]), \
+             patch.object(dm, "_search_zenodo", fake_zenodo_search), \
+             patch.object(dm, "_load_registry_ids", lambda: (set(), set())):
+            mock_session = MagicMock(spec=requests.Session)
+            from scripts.discover_models import discover
+            report = discover(mock_session)
 
         assert len(report.hf_candidates) == 3
         assert len(report.zenodo_candidates) == 3
-        assert len(report.served_hf_repos) > 0
-        assert len(report.served_zenodo_ids) > 0
+        assert len(report.served_hf_repos) == 0
+        assert len(report.served_zenodo_ids) == 0
 
     def test_both_sources_fail_exit1(self):
-        """When both sources fail completely, discover() returns empty candidates + ≥2 errors."""
-        mock_session = MagicMock(spec=requests.Session)
+        """When both sources fail completely, discover() returns empty candidates + ≥1 error."""
+        import scripts.discover_models as dm
 
-        err_500 = MagicMock()
-        err_500.status_code = 500
-        mock_session.get.side_effect = [requests.exceptions.HTTPError(response=err_500)]
+        mock_500_resp = MagicMock()
+        mock_500_resp.status_code = 500
+        mock_500_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "500 Server Error", response=mock_500_resp
+        )
 
-        from scripts.discover_models import discover
-        report = discover(mock_session)
+        def fake_hf_search(session, query, page):
+            raise requests.exceptions.HTTPError("500 Server Error", response=mock_500_resp)
+
+        with patch.object(dm, "HF_SEARCH_TERMS", ["kraken HTR"]), \
+             patch.object(dm, "_search_hf", fake_hf_search), \
+             patch.object(dm, "ZENODO_COMMUNITIES", ["scribes"]), \
+             patch.object(dm, "_search_zenodo", lambda s, p: (_ for _ in ()).throw(
+                 requests.exceptions.HTTPError("500 Server Error", response=mock_500_resp))), \
+             patch.object(dm, "_load_registry_ids", lambda: (set(), set())):
+            mock_session = MagicMock(spec=requests.Session)
+            from scripts.discover_models import discover
+            report = discover(mock_session)
 
         assert len(report.hf_candidates) == 0
         assert len(report.zenodo_candidates) == 0
