@@ -1,0 +1,33 @@
+{
+  "hits": {
+    "hits": [
+      {
+        "id": "15366732",
+        "metadata": {
+          "title": "Kraken late medieval german model",
+          "doi": "10.5281/zenodo.15366732",
+          "keywords": ["kraken", "HTR", "medieval", "german", "text recognition"]
+        }
+      },
+      {
+        "id": "https://zenodo.org/record/20000001",
+        "metadata": {
+          "title": "New kraken medieval model",
+          "doi": "10.5281/zenodo.20000001",
+          "keywords": ["kraken", "HTR", "model"]
+        }
+      },
+      {
+        "id": "https://zenodo.org/records/99999999",
+        "metadata": {
+          "title": "Agnosic kraken model",
+          "doi": "10.5281/zenodo.99999999",
+          "keywords": ["kraken", "handwritten", "text recognition"]
+        }
+      }
+    ]
+  },
+  "links": {
+    "next": "https://zenodo.org/api/records?q=kraken&page=2"
+  }
+}
