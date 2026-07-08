@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from atr_serving.registry import ModelSpec
 
 
-# ── /health ───────────────────────────────────────────────────────────────
+# ── /health ───────────────────────────────────────────────────────────────────
 class EngineStatus(BaseModel):
     name: str
     url: str
@@ -27,7 +27,7 @@ class HealthResponse(BaseModel):
     engines: list[EngineStatus] = Field(default_factory=list)
 
 
-# ── /models ───────────────────────────────────────────────────────────────
+# ── /models ───────────────────────────────────────────────────────────────────
 class ModelInfo(ModelSpec):
     """Registry spec plus runtime state."""
 
@@ -38,10 +38,11 @@ class ModelsResponse(BaseModel):
     models: list[ModelInfo]
 
 
-# ── /segment & /recognize (contract for later phases) ──────────────────────
+# ── /segment & /recognize (contract for later phases) ─────────────────────────
 class Line(BaseModel):
     order: int
     baseline: list[list[float]] | None = None  # [[x0,y0],[x1,y1],...]
+    boundary: list[list[float]] | None = None  # [[x0,y0],[x1,y1],...]
     bbox: list[float] | None = None            # [x0,y0,x1,y1]
     text: str | None = None
     confidence: float | None = None
@@ -50,9 +51,32 @@ class Line(BaseModel):
 class SegmentResponse(BaseModel):
     lines: list[Line]
     segmented_by: str
+    text_direction: str = "horizontal-lr"
 
 
 class RecognitionResult(BaseModel):
+    model: str
+    engine: str
+    text: str
+    lines: list[Line] = Field(default_factory=list)
+    confidence: float | None = None
+    timing_ms: int = 0
+    segmented_by: str | None = None
+    version: str
+
+
+# ── /ocr (Phase 1 — auto-segment for line-level engines) ──────────────────────
+class OcrRequest(BaseModel):
+    """Request body for POST /ocr (JSON, optional; multipart/form-data also ok)."""
+    model: str
+    lines: list[Line] | None = None  # pre-computed lines (skip auto-segment)
+    auto_segment: bool = Field(default=True, description=(
+        "If True and model is line-level, segment via kraken first. "
+        "If False, only use provided lines (error if none)."
+    ))
+
+
+class OcrResponse(BaseModel):
     model: str
     engine: str
     text: str

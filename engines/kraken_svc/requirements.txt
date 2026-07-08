@@ -1,0 +1,9 @@
+# kraken-svc — kraken OCR/segmentation engine
+kraken-webmodel @ git+https://github.com/mittagessen/kraken.git
+torch
+numpy
+Pillow
+fastapi
+uvicorn[standard]
+python-multipart
+loguru

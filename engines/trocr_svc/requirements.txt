@@ -1,0 +1,8 @@
+# trocr-svc — TrOCR line-level recognition engine
+transformers[torch]>=4.39.0
+torch
+Pillow
+fastapi
+uvicorn[standard]
+python-multipart
+loguru
