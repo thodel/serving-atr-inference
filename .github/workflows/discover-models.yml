@@ -1,0 +1,44 @@
+name: Model Discovery
+
+on:
+  schedule:
+    # Weekly every Monday at 08:00 UTC
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (skip GitHub issue update)"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  issues: write  # needed to create/update the rolling report issue
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Discover models
+        env:
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: >
+          python scripts/discover_models.py
+          --dry-run
+          --out discovery_report.json
+          --md discovery_report.md
+
+      - name: Update GitHub issue
+        if: inputs.dry_run != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          python scripts/discover_models.py
+          --github-issue
+          --report-path discovery_report.json
+          --md-path discovery_report.md

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -432,6 +433,132 @@ def discover(session: requests.Session) -> DiscoveryReport:
     return report
 
 
+
+# ─── GitHub Issue ───────────────────────────────────────────────────────────
+
+GITHUB_ISSUE_TITLE = "Model Discovery Report"
+# HTML comment that uniquely identifies the body so we can update in-place
+GITHUB_ISSUE_MARKER = "<!-- model-discovery-report-v1 -->"
+
+
+def _github_headers() -> dict[str, str]:
+    token = os.environ.get("GITHUB_TOKEN", "")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _repo_info() -> tuple[str, str]:
+    """Extract owner/repo from $GITHUB_REPOSITORY."""
+    repo = os.environ.get("GITHUB_REPOSITORY", "thodel/serving-atr-inference")
+    owner, name = repo.split("/", 1)
+    return owner, name
+
+
+def _find_existing_issue(session: requests.Session) -> int | None:
+    """
+    Search for an open issue titled GITHUB_ISSUE_TITLE created by the action bot.
+    Returns the issue number, or None if not found.
+    """
+    owner, name = _repo_info()
+    url = f"https://api.github.com/repos/{owner}/{name}/issues"
+    params = {"state": "open", "creator": "app/github-actions", "per_page": 50}
+    resp = session.get(url, headers=_github_headers(), params=params, timeout=15)
+    resp.raise_for_status()
+    for issue in resp.json():
+        if issue.get("title", "").strip() == GITHUB_ISSUE_TITLE:
+            return issue["number"]
+    return None
+
+
+def _build_checklist(report_json_path: Path | None) -> str:
+    """Build a markdown checklist for all candidates in the report."""
+    path = report_json_path or (REPO_ROOT / "discovery_report.json")
+    if not path.exists():
+        return "_(Run the discover step first to generate candidates.)_"
+
+    report_data = json.loads(path.read_text(encoding="utf-8"))
+    lines: list[str] = []
+
+    for m in report_data.get("new_hf_models", []):
+        lines.append(
+            f'- [ ] **{m["id"]}** — {m["downloads"]:,} downloads — '
+            f'[HF](https://huggingface.co/{m["id"]})'
+        )
+
+    if report_data.get("new_hf_models") and report_data.get("new_zenodo_models"):
+        lines.append("")  # blank separator
+
+    for r in report_data.get("new_zenodo_models", []):
+        lines.append(
+            f'- [ ] **{r["title"]}** — '
+            f'[Zenodo](https://zenodo.org/records/{r["zenodo_id"]})'
+        )
+
+    if not report_data.get("new_hf_models") and not report_data.get("new_zenodo_models"):
+        lines.append("_No new candidates this week._")
+
+    return "\n".join(lines)
+
+
+def _build_issue_body(md_report: str, report_json_path: Path | None) -> str:
+    """Wrap the markdown report with the HTML marker so it is findable on update."""
+    checklist = _build_checklist(report_json_path)
+    return (
+        f"{GITHUB_ISSUE_MARKER}\n\n"
+        f"_Auto-generated weekly by the Model Discovery Action._\n\n"
+        f"---\n\n"
+        f"{md_report}\n\n"
+        f"---\n\n"
+        f"## Onboarding Checklist\n\n{checklist}\n"
+    )
+
+
+def _update_or_create_issue(session: requests.Session, md_report: str,
+                             report_json_path: Path | None = None) -> int:
+    """
+    Find the existing issue (by marker/title) or create a new one.
+    Returns the issue number.
+
+    If the report contains no new candidates, this is a no-op
+    (no HTTP requests, no issue update).
+    """
+    # Guard: skip issue write when there are no candidates
+    path = report_json_path or (REPO_ROOT / "discovery_report.json")
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not data.get("new_hf_models") and not data.get("new_zenodo_models"):
+            print("No new candidates — skipping issue update.")
+            return -1  # sentinel; caller can distinguish from valid issue numbers
+
+    owner, name = _repo_info()
+    base_url = f"https://api.github.com/repos/{owner}/{name}"
+    headers = _github_headers()
+    headers["Content-Type"] = "application/json"
+
+    issue_number = _find_existing_issue(session)
+    body = _build_issue_body(md_report, report_json_path)
+
+    if issue_number is not None:
+        update_url = f"{base_url}/issues/{issue_number}"
+        resp = session.patch(update_url, headers=headers, json={"body": body}, timeout=15)
+        resp.raise_for_status()
+        print(f"Updated existing issue #{issue_number}")
+        return issue_number
+    else:
+        create_url = f"{base_url}/issues"
+        resp = session.post(create_url, headers=headers,
+                            json={"title": GITHUB_ISSUE_TITLE, "body": body}, timeout=15)
+        resp.raise_for_status()
+        new_issue = resp.json()
+        print(f"Created new issue #{new_issue['number']}: {GITHUB_ISSUE_TITLE}")
+        return new_issue["number"]
+
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -451,6 +578,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--md", type=Path,
         help="Write markdown report to this path (default: discovery_report.md)",
+    )
+    p.add_argument(
+        "--github-issue",
+        action="store_true",
+        help="Load a JSON report and create or update the rolling GitHub issue",
+    )
+    p.add_argument(
+        "--report-path", type=Path,
+        default=REPO_ROOT / "discovery_report.json",
+        help="Path to the JSON report (default: discovery_report.json)",
+    )
+    p.add_argument(
+        "--md-path", type=Path,
+        default=REPO_ROOT / "discovery_report.md",
+        help="Path to the markdown report (default: discovery_report.md)",
     )
     return p
 
@@ -492,6 +634,19 @@ def main() -> None:
     if both_failed:
         print("ERROR: Both HF and Zenodo failed. No report written.", file=sys.stderr)
         sys.exit(1)
+
+    # ── GitHub issue update (unit-testable, driven by --github-issue) ──
+    if args.github_issue:
+        if not os.environ.get("GITHUB_TOKEN"):
+            print("ERROR: GITHUB_TOKEN is not set.", file=sys.stderr)
+            sys.exit(1)
+        if not report.new_hf_models and not report.new_zenodo_models:
+            print("No new candidates — skipping issue update.")
+            return
+        session2 = requests.Session()
+        session2.headers["User-Agent"] = "serving-atr-inference/discover-models"
+        _update_or_create_issue(session2, md_text, json_path)
+        return
 
 
 if __name__ == "__main__":
