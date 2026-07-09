@@ -461,15 +461,25 @@ def _repo_info() -> tuple[str, str]:
 
 def _find_existing_issue(session: requests.Session) -> int | None:
     """
-    Search for an open issue titled GITHUB_ISSUE_TITLE created by the action bot.
-    Returns the issue number, or None if not found.
+    Search for the open rolling report issue. Returns its number, or None.
+
+    Identity is the HTML marker we embed in the body (``GITHUB_ISSUE_MARKER``),
+    with the title as a fallback — deliberately NOT the ``creator`` filter: the
+    creator login depends on the token (``github-actions[bot]`` under
+    GITHUB_TOKEN, a user login under a PAT), so filtering on it would silently
+    match nothing and open a fresh duplicate issue every run.
     """
     owner, name = _repo_info()
     url = f"https://api.github.com/repos/{owner}/{name}/issues"
-    params = {"state": "open", "creator": "app/github-actions", "per_page": 50}
+    params = {"state": "open", "per_page": 100}
     resp = session.get(url, headers=_github_headers(), params=params, timeout=15)
     resp.raise_for_status()
-    for issue in resp.json():
+    issues = resp.json()
+    # Prefer a marker match (survives title edits); fall back to the exact title.
+    for issue in issues:
+        if GITHUB_ISSUE_MARKER in (issue.get("body") or ""):
+            return issue["number"]
+    for issue in issues:
         if issue.get("title", "").strip() == GITHUB_ISSUE_TITLE:
             return issue["number"]
     return None

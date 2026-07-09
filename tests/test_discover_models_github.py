@@ -302,5 +302,42 @@ class TestWorkflowYaml:
         assert "GITHUB_TOKEN" in content
 
 
+class TestFindExistingIssue:
+    """Dedup identity must not depend on the fragile `creator` login."""
+
+    def _session_returning(self, issues):
+        session = MagicMock(spec=requests.Session)
+        resp = MagicMock()
+        resp.json.return_value = issues
+        session.get.return_value = resp
+        return session
+
+    def test_no_creator_filter_is_sent(self):
+        # A `creator` server-side filter would silently match nothing under
+        # GITHUB_TOKEN (creator == "github-actions[bot]") → duplicate issues.
+        session = self._session_returning([])
+        _find_existing_issue(session)
+        _, kwargs = session.get.call_args
+        assert "creator" not in (kwargs.get("params") or {})
+
+    def test_found_by_marker_even_when_title_differs(self):
+        # The rolling issue is identified by the body marker, so a human retitle
+        # of the report issue must not spawn a duplicate.
+        issues = [
+            {"number": 7, "title": "unrelated", "body": "nope"},
+            {"number": 42, "title": "Renamed by a human",
+             "body": f"{GITHUB_ISSUE_MARKER}\nreport"},
+        ]
+        assert _find_existing_issue(self._session_returning(issues)) == 42
+
+    def test_falls_back_to_title_when_no_marker(self):
+        issues = [{"number": 5, "title": GITHUB_ISSUE_TITLE, "body": "legacy body"}]
+        assert _find_existing_issue(self._session_returning(issues)) == 5
+
+    def test_returns_none_when_absent(self):
+        issues = [{"number": 1, "title": "something else", "body": "x"}]
+        assert _find_existing_issue(self._session_returning(issues)) is None
+
+
 import os
 import requests  # noqa: F401
