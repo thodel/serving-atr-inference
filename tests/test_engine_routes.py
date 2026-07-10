@@ -82,6 +82,33 @@ def test_trocr_line_pipeline(client: TestClient):
     assert client.app.state.engine_clients["trocr"].calls == 2
 
 
+def _ocr(client, model):
+    return client.post(
+        "/ocr",
+        headers={"X-API-Key": KEY},
+        files={"image": ("p.png", _png(), "image/png")},
+        data={"model": model},
+    )
+
+
+def test_ocr_trocr_auto_segments_to_page_text(client: TestClient):
+    # /ocr with a trocr-* model auto-segments (kraken baseline → per-line TrOCR →
+    # reassembled) and projects to the legacy {text, confidence, model, version} (#25).
+    r = _ocr(client, "trocr-kurrent-xvi-xvii")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["text"] == "T\nT"                       # one line per segmented baseline
+    assert body["model"] == "trocr-kurrent-xvi-xvii"
+    assert "version" in body and "confidence" in body
+    assert client.app.state.engine_clients["trocr"].calls == 2   # one call per line
+
+
+def test_ocr_rejects_non_kraken_non_trocr_engine(client: TestClient):
+    r = _ocr(client, "party")
+    assert r.status_code == 400
+    assert "recognize" in r.json()["detail"]
+
+
 def test_coerce_handles_trocr_divergent_line_schema():
     # trocr returns baseline as a BBox dict + polygon; coercion must not blow up
     data = {

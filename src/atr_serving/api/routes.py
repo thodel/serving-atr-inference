@@ -75,6 +75,22 @@ def _parse_lines(lines: str | None) -> list[Line] | None:
         raise HTTPException(status_code=400, detail=f"invalid lines JSON: {exc}") from exc
 
 
+async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
+                                ctype: str, model: str, trocr_ref: str) -> RecognitionResult:
+    """Full-page TrOCR (#25): TrOCR is line-level, so the gateway auto-segments —
+    kraken baseline segmentation → per-line crops → TrOCR per line → reassembled
+    top-to-bottom. Shared by /recognize and the /ocr convenience alias."""
+    tro = _engine_client(request, "trocr")
+
+    async def _trocr_line(line_img: bytes, line_ct: str) -> str:
+        res = await tro.recognize(line_img, "line.png", line_ct, model=trocr_ref)
+        return res.text
+
+    return await recognize_lines(
+        raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line
+    )
+
+
 @router.get("/health", response_model=HealthResponse, tags=["meta"])
 async def health(request: Request) -> HealthResponse:
     registry = _registry(request)
@@ -183,15 +199,7 @@ async def recognize(
 
         # trocr is line-level (engine handles one line) → gateway segments + crops.
         if engine == "trocr":
-            tro = _engine_client(request, "trocr")
-
-            async def _trocr_line(line_img: bytes, line_ct: str) -> str:
-                res = await tro.recognize(line_img, "line.png", line_ct, model=trocr_ref)
-                return res.text
-
-            return await recognize_lines(
-                raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line
-            )
+            return await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref)
 
         # vLLM: page = one call; line = segment + per-line chat.
         if engine == "vllm":
@@ -228,18 +236,34 @@ async def ocr(
     model: str = Form(...),
     seg_mode: str = Form("baseline"),
 ) -> OcrResponse:
-    """Legacy alias for agentic_historian's ``KrakenHTTPClient`` — kraken only,
-    projected down to the minimal ``{text, confidence, model, version}`` shape."""
+    """Page-level convenience for agentic_historian's ``KrakenHTTPClient``,
+    projected down to the minimal ``{text, confidence, model, version}`` shape.
+
+    Auto-segmenting page OCR:
+      * ``kraken`` — the engine transcribes the page directly.
+      * ``trocr`` (#25) — TrOCR is line-level, so the gateway auto-segments
+        internally (kraken baseline → line crops → TrOCR per line → reassembled
+        top-to-bottom), matching the kraken page-level UX.
+    Other engines: use ``/recognize`` (which returns the full per-line result).
+    """
     engine, spec = _resolve_spec(request, model)
-    if engine != "kraken":
-        raise HTTPException(status_code=400, detail="/ocr is kraken-only; use /recognize")
-    kraken_ref = (spec.zenodo_id or spec.id) if spec else model  # DOI for htrmopo
     raw = await image.read()
+    filename = image.filename or "image"
+    ctype = image.content_type or "application/octet-stream"
     try:
-        result = await _kraken_client(request).recognize(
-            raw, image.filename or "image", image.content_type or "application/octet-stream",
-            model=kraken_ref, lines=None,
-        )
+        if engine == "kraken":
+            kraken_ref = (spec.zenodo_id or spec.id) if spec else model  # DOI for htrmopo
+            result = await _kraken_client(request).recognize(
+                raw, filename, ctype, model=kraken_ref, lines=None,
+            )
+        elif engine == "trocr":
+            trocr_ref = (spec.hf_repo or spec.id) if spec else model
+            result = await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"/ocr supports kraken + trocr (auto-segment); use /recognize for '{engine}'",
+            )
     except EngineError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return OcrResponse(
