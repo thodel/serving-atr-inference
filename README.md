@@ -75,6 +75,45 @@ bash scripts/probe_host.sh | tee asteraix-probe.txt
 Provisioning is documented in [`docs/DEPLOY.md`](docs/DEPLOY.md) (clone → venvs →
 `.env` → prefetch → `systemctl --user` units → ufw). Final vLLM pins land with #5.
 
+## Recognition API — page-level & line-level
+
+All recognition endpoints require the `X-API-Key` header and take the page as a
+multipart `image` field.
+
+| Endpoint | Returns | Use |
+|---|---|---|
+| `POST /ocr` | `{text, confidence, model, version}` | Full-page transcription, minimal shape (the `agentic_historian` `KrakenHTTPClient` UX). |
+| `POST /recognize` | full `RecognitionResult` (`text`, per-line `lines[]`, `segmented_by`, `timing_ms`, `version`) | Full-page transcription with per-line detail. |
+| `POST /segment` | `{lines: [{order, bbox, baseline, …}], segmented_by}` | Baselines/polygons only (kraken) — for client-side orchestration. |
+
+### Full-page TrOCR — auto-segment (the supported path)
+
+TrOCR models are **line-level**, but you do **not** segment yourself. Pass a
+`trocr-*` model to `POST /ocr` **or** `POST /recognize` and the gateway
+auto-segments internally:
+
+> kraken baseline segmentation → crop each line → TrOCR per line → reassemble
+> lines top-to-bottom (by `order`), joined with `\n`.
+
+So a full-page TrOCR transcription is one call:
+
+```
+curl -H "X-API-Key: $ATR_API_KEY" \
+     -F image=@page.jpg -F model=trocr-kurrent-xvi-xvii \
+     https://<gateway>/ocr
+```
+
+`/ocr` supports **kraken** (the engine transcribes the page) and **trocr** (the
+gateway auto-segments). Other engines (party, line-level vLLM) return `400` — use
+`/recognize`, which auto-segments those too and returns the full per-line result.
+
+### Manual line-level (optional)
+
+To own segmentation/cropping yourself: `POST /segment` for ordered baselines,
+crop the lines, then send each line image to `POST /recognize` with the `trocr-*`
+model. `/segment` returns lines in reading order (`order` ascending) — preserve
+that order when reassembling.
+
 ## Security
 
 Two VMs on the same private university network, behind the same firewall, no TLS.
