@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
@@ -130,6 +131,35 @@ def _resolve_spec(request: Request, model: str) -> tuple[str, ModelSpec | None]:
     return (spec.engine if spec else "kraken"), spec
 
 
+# A raw kraken model reference the legacy client may pass without it being
+# enumerated in the registry: a Zenodo DOI ("10.5281/zenodo.7516057") or a bare
+# Zenodo record id. Anything else that isn't registered is a typo/bad id.
+_RAW_KRAKEN_REF = re.compile(r"^(10\.\d{4,9}/\S+|\d{6,})$")
+
+
+def _resolve_spec_strict(request: Request, model: str) -> tuple[str, ModelSpec | None]:
+    """Like :func:`_resolve_spec`, but **fails loudly** on a model the gateway
+    cannot run (#21).
+
+    A registered id resolves normally. An *unregistered* id is accepted only when
+    it looks like a raw kraken ref (Zenodo DOI / bare record id). Anything else
+    raises 404 naming the model and listing the known ids — instead of silently
+    routing to kraken and returning ``200 {"text": ""}``, which downstream reads
+    as a real (empty) transcription.
+    """
+    spec = _registry(request).get(model)
+    if spec is not None:
+        return spec.engine, spec
+    if model and _RAW_KRAKEN_REF.match(model):
+        return "kraken", None
+    known = sorted(m.id for m in _registry(request).all())
+    raise HTTPException(
+        status_code=404,
+        detail=(f"unknown model {model!r}. Pass a registered id (see GET /models) "
+                f"or a raw Zenodo ref (10.xxxx/zenodo.NNNN). Known ids: {known}"),
+    )
+
+
 async def _ensure_vllm_port(request: Request, model: str) -> int:
     """Make a vLLM model resident (may launch/evict) and return its port."""
     try:
@@ -172,7 +202,7 @@ async def recognize(
     model: str = Form(...),
     lines: str | None = Form(None),
 ) -> RecognitionResult:
-    engine, spec = _resolve_spec(request, model)
+    engine, spec = _resolve_spec_strict(request, model)   # 404 on an unrunnable id (#21)
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
@@ -245,8 +275,12 @@ async def ocr(
         internally (kraken baseline → line crops → TrOCR per line → reassembled
         top-to-bottom), matching the kraken page-level UX.
     Other engines: use ``/recognize`` (which returns the full per-line result).
+
+    Fails loudly (#21): an unknown model id is a 404 (never ``200 {"text": ""}``)
+    and an engine failure a 502, so an empty ``text`` with ``lines == 0`` means the
+    page genuinely had no detected lines.
     """
-    engine, spec = _resolve_spec(request, model)
+    engine, spec = _resolve_spec_strict(request, model)   # 404 on an unrunnable id (#21)
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
@@ -268,7 +302,7 @@ async def ocr(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return OcrResponse(
         text=result.text, confidence=result.confidence or 0.0,
-        model=model, version=result.version,
+        model=model, version=result.version, lines=len(result.lines),
     )
 
 
