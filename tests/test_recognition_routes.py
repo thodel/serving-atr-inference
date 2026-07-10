@@ -25,6 +25,7 @@ class FakeKrakenClient:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.raise_engine_error = False
+        self.empty_page = False        # simulate a page with no detected lines (#21)
 
     async def segment(self, image, filename, content_type, mode="baseline"):
         self.calls.append(("segment", mode, filename, content_type))
@@ -39,6 +40,11 @@ class FakeKrakenClient:
         self.calls.append(("recognize", model, lines))
         if self.raise_engine_error:
             raise EngineError("boom")
+        if self.empty_page:
+            return RecognitionResult(
+                model=model, engine="kraken", text="", lines=[],
+                timing_ms=1, segmented_by="kraken-blla", version="0.1.0",
+            )
         return RecognitionResult(
             model=model,
             engine="kraken",
@@ -141,12 +147,61 @@ def test_ocr_alias_projects_legacy_shape(client: TestClient, fake: FakeKrakenCli
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # exactly the keys KrakenResult parses
-    assert set(body) == {"text", "confidence", "model", "version"}
+    # the keys KrakenResult parses, plus `lines` (#21; KrakenResult ignores extras)
+    assert set(body) == {"text", "confidence", "model", "version", "lines"}
     assert body["text"] == "hello\nworld"
     assert body["confidence"] == 0.88
     assert body["model"] == "10.5281/zenodo.7516057"
     assert body["version"] == "0.1.0"
+    assert body["lines"] == 1
+
+
+# ── #21: fail loudly on a model the gateway cannot run ────────────────────────
+
+def test_ocr_unknown_model_404_not_empty_text(client: TestClient, fake: FakeKrakenClient):
+    """A bogus id must 404 — never 200 with an empty transcription."""
+    resp = client.post(
+        "/ocr", headers=HEADERS, files={"image": IMG}, data={"model": "kraken-does-not-exist"},
+    )
+    assert resp.status_code == 404, resp.text
+    detail = resp.json()["detail"]
+    assert "kraken-does-not-exist" in detail and "GET /models" in detail
+    assert fake.calls == []                      # engine never touched
+
+
+def test_recognize_unknown_model_404(client: TestClient, fake: FakeKrakenClient):
+    resp = client.post(
+        "/recognize", headers=HEADERS, files={"image": IMG}, data={"model": "nope"},
+    )
+    assert resp.status_code == 404
+    assert fake.calls == []
+
+
+def test_ocr_raw_zenodo_ref_still_routes_to_kraken(client: TestClient, fake: FakeKrakenClient):
+    """The legacy raw-DOI path must keep working (not caught by the 404 guard)."""
+    resp = client.post(
+        "/ocr", headers=HEADERS, files={"image": IMG}, data={"model": "10.5281/zenodo.7516057"},
+    )
+    assert resp.status_code == 200
+    assert fake.calls[0][1] == "10.5281/zenodo.7516057"
+
+
+def test_ocr_bare_zenodo_record_id_accepted(client: TestClient, fake: FakeKrakenClient):
+    resp = client.post(
+        "/ocr", headers=HEADERS, files={"image": IMG}, data={"model": "20642057"},
+    )
+    assert resp.status_code == 200
+
+
+def test_ocr_empty_page_is_200_with_zero_lines(client: TestClient, fake: FakeKrakenClient):
+    """A genuinely blank page stays a 200 — distinguishable via lines == 0."""
+    fake.empty_page = True
+    resp = client.post(
+        "/ocr", headers=HEADERS, files={"image": IMG}, data={"model": "10.5281/zenodo.7516057"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["text"] == "" and body["lines"] == 0     # empty page, not a failure
 
 
 def test_ocr_requires_key(client: TestClient):

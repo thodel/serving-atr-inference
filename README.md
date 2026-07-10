@@ -114,6 +114,20 @@ crop the lines, then send each line image to `POST /recognize` with the `trocr-*
 model. `/segment` returns lines in reading order (`order` ascending) — preserve
 that order when reassembling.
 
+### Error semantics — fail loudly
+
+| Situation | Response |
+|---|---|
+| Unknown model id (not registered, not a raw Zenodo ref) | `404`, naming the model and listing known ids |
+| Engine unreachable / failed to load the model | `502`, with the engine's reason |
+| Wrong engine for `/ocr` (party, line-level vLLM) | `400` → use `/recognize` |
+| Page with no detected lines | `200`, `text: ""`, **`lines: 0`** |
+
+`/ocr` never answers `200 {"text": ""}` because a model could not be run — an
+empty `text` with `lines: 0` means the page genuinely had no detected lines. A
+registered id (see `GET /models`) or a raw Zenodo ref (`10.xxxx/zenodo.NNNN`,
+or a bare record id) is accepted; anything else is a `404`.
+
 ## Security
 
 Two VMs on the same private university network, behind the same firewall, no TLS.
