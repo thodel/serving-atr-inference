@@ -7,7 +7,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from PIL import Image
 import torch
-from transformers import VisionEncoderDecoderModel, AutoProcessor
+from transformers import VisionEncoderDecoderModel, TrOCRProcessor
 from loguru import logger
 from io import BytesIO
 from typing import Any
@@ -36,7 +36,13 @@ def _resolve_model(hf_repo: str) -> tuple[VisionEncoderDecoderModel, Any]:
     model = VisionEncoderDecoderModel.from_pretrained(
         hf_repo, cache_dir=CACHE_DIR
     )
-    processor = AutoProcessor.from_pretrained(hf_repo, cache_dir=CACHE_DIR)
+    # TrOCRProcessor, not AutoProcessor: AutoProcessor infers the class from the
+    # repo's config.json `processor_class`, and falls back to a bare tokenizer when
+    # that key is absent. dh-unibe/trocr-essoins-middle-latin omits it, so it
+    # resolved to RobertaTokenizer and every request died in processor(images=…)
+    # with "You need to specify either `text` or `text_target`". This service only
+    # ever serves TrOCR models, so name the class instead of letting it be guessed.
+    processor = TrOCRProcessor.from_pretrained(hf_repo, cache_dir=CACHE_DIR)
     if torch.cuda.is_available():
         model = model.cuda()
         logger.info("Model moved to CUDA")

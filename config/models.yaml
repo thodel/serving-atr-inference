@@ -170,16 +170,13 @@ models:
     vram_mb: 500
     residency: lazy
     gpu_affinity: 1
-  # Early Medieval Latin (9th–12th c.)
-  - id: kraken-early_medieval_latin
-    engine: kraken
-    zenodo_id: "10.5281/zenodo.19222213"
-    task: htr
-    level: page
-    languages: [la]
-    scripts: [Caroline minuscule]
-    centuries: [9, 10, 11, 12]
-    vram_mb: 500
+  # Early Medieval Latin (9th-12th c.) — REMOVED, see issue #30.
+  # zenodo.19222213 is RP_Segmenter.mlmodel: model_type=segmentation, no codec.
+  # It is a layout segmenter, not a Latin recognition model — the DOI was wrong.
+  # Every /recognize against it 500s with
+  #   AttributeError: 'TorchVGSLModel' object has no attribute 'codec'
+  # Advertising it costs each consumer a full round trip to rediscover that.
+  # Re-add with the CORRECT recognition DOI once identified.
     residency: lazy
     gpu_affinity: 1
   # Medieval Charters — Latin
