@@ -6,6 +6,8 @@ from atr_serving.training.contracts import DatasetSpec
 from atr_serving.training.hf_source import (
     DatasetSelectionError,
     data_files_for,
+    dataset_dir_name,
+    local_files_for,
     page_stem,
     project_glob,
     row_to_page,
@@ -88,3 +90,36 @@ def test_row_without_inline_bytes_is_an_error():
 def test_row_without_xml_is_an_error():
     with pytest.raises(DatasetSelectionError, match="xml_content"):
         row_to_page(0, {"image": b"x", "xml_content": "  "})
+
+
+# ── persistent dataset copies (one directory per dataset) ───────────────────
+def test_dataset_dir_name_is_stable_and_flat():
+    """Same dataset -> same directory, so a second job reuses the copy."""
+    assert dataset_dir_name(REPO) == "dh-unibe__image-text_medieval-scripts_xiv-xv-xvi"
+    assert dataset_dir_name(REPO) == dataset_dir_name(REPO)
+
+
+@pytest.mark.parametrize("bad", ["../escape", "a/b/c", " owner/name", "own*er/name"])
+def test_dataset_dir_name_rejects_unsafe_ids(bad):
+    with pytest.raises(DatasetSelectionError):
+        dataset_dir_name(bad)
+
+
+def test_local_files_resolve_against_a_copy(tmp_path):
+    root = tmp_path / "dh-unibe__x"
+    for project in (THUN_TRAIN, THUN_TEST):
+        d = root / "data" / "train" / project
+        d.mkdir(parents=True)
+        (d / "20260112-0000.parquet").write_bytes(b"P")
+        (d / "20260112-0001.parquet").write_bytes(b"P")
+    files = local_files_for(root, [project_glob("train", THUN_TRAIN)])
+    assert len(files) == 2
+    assert files == sorted(files)  # deterministic page order
+    assert all(THUN_TRAIN in f for f in files)
+
+
+def test_a_pattern_matching_nothing_is_an_error(tmp_path):
+    """An empty file list would surface three stages later as 'no usable page'."""
+    (tmp_path / "data").mkdir()
+    with pytest.raises(DatasetSelectionError, match="no file matches"):
+        local_files_for(tmp_path, [project_glob("train", THUN_TRAIN)])

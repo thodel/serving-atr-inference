@@ -156,8 +156,30 @@ Run it from `engines/` with `src` on the path — the same layout the unit uses:
 cd engines && PYTHONPATH=../src ../.venvs/kraken-train/bin/python -m kraken_train_svc.vgsl_preflight
 ```
 
+### Where training data lives
+
+The root partition is the wrong home for this (it hit 100 % full on 2026-08-06), so
+point the three training paths at the research share in `.env` — see `.env.example`:
+
+```
+ATR_TRAIN_HF_DATASETS_ROOT=/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/hf-datasets
+ATR_TRAIN_JOBS_ROOT=/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/jobs
+ATR_TRAIN_TRAINED_ROOT=/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/trained
+```
+
+With `ATR_TRAIN_HF_DATASETS_ROOT` set, the selected parquet shards are mirrored **once**
+into `hf-datasets/<owner>__<name>/` and reused by every later job — the same dataset id
+always maps to the same directory, so re-running a job costs no download. Leave it unset
+to stream from the hub each time without keeping a copy.
+
+The share is CIFS (`//resstore.unibe.ch/wbkolleg_dh_1`), which has two consequences:
+`snapshot_download(local_dir=…)` is used so no symlinked blob cache is involved, and the
+compiled `.arrow` datasets are read over the network every epoch. If training turns out
+to be I/O-bound rather than GPU-bound, copy `data/*.arrow` to a local disk and retrain
+from there — the arrow files hold extracted line crops and are far smaller than the pages.
+
 Submit a job (see `docs/TRAINING_PLAN.md` §4 for the body); jobs and trained weights
-land in `~/atr-cache/training/<job_id>/` and `~/atr-cache/trained/<model_id>/`:
+land under the paths above:
 
 ```bash
 curl -s -X POST localhost:8204/jobs -H 'Content-Type: application/json' \

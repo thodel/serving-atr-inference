@@ -22,7 +22,11 @@ from typing import Callable, Iterable, Iterator, Protocol
 
 from loguru import logger
 
-from atr_serving.training.hf_source import row_to_page
+from atr_serving.training.hf_source import (
+    dataset_dir_name,
+    local_files_for,
+    row_to_page,
+)
 from atr_serving.training.pagexml import page_stats, rewrite_image_filename
 
 from kraken_train_svc.preflight import PreflightError, free_disk_gb
@@ -39,17 +43,52 @@ class PageSource(Protocol):
 
 
 class HFPageSource:
-    """Streams parquet shards straight from the hub.
+    """Reads the selected parquet shards, optionally through a persistent copy.
 
-    ``streaming=True`` is not an optimisation here, it is the only way this fits:
-    the repo is ~6.6 TB and the box has ~356 GB free. Only the selected shards are
-    fetched, and only row group by row group.
+    Two modes, both of which only ever touch the **selected** shards — the repo is
+    ~6.6 TB, so a full download is never on the table:
+
+    * ``cache_root=None`` — stream straight from the hub. Nothing lands on disk;
+      re-running a job re-fetches.
+    * ``cache_root=<dir>`` — mirror the selected shards into
+      ``<cache_root>/<owner>__<name>/`` once and read from there. The same dataset
+      always maps to the same directory, so a second job (or a colleague's) reuses
+      the copy instead of re-downloading. ``snapshot_download(local_dir=…)`` writes
+      files directly, without the symlinked blob cache — which matters because the
+      intended home is a CIFS share, where symlinks are not reliable.
     """
+
+    def __init__(self, cache_root: Path | None = None) -> None:
+        self.cache_root = Path(cache_root) if cache_root else None
+
+    def _ensure_local(self, hf_repo: str, data_files: list[str],
+                      revision: str | None) -> list[str]:
+        from huggingface_hub import snapshot_download  # heavy; trainer venv only
+
+        dest = self.cache_root / dataset_dir_name(hf_repo)
+        logger.info("Syncing {} patterns={} -> {}", hf_repo, data_files, dest)
+        snapshot_download(
+            repo_id=hf_repo,
+            repo_type="dataset",
+            allow_patterns=list(data_files),
+            local_dir=str(dest),
+            revision=revision,
+        )
+        files = local_files_for(dest, data_files)
+        size = sum(Path(f).stat().st_size for f in files)
+        logger.info("{} local shard(s), {:.1f} MB", len(files), size / 1e6)
+        return files
 
     def stream(
         self, hf_repo: str, data_files: list[str], revision: str | None = None
     ) -> Iterator[dict]:
         from datasets import load_dataset  # heavy; trainer venv only
+
+        if self.cache_root is not None:
+            files = self._ensure_local(hf_repo, data_files, revision)
+            ds = load_dataset("parquet", data_files={"train": files}, split="train",
+                              streaming=True)
+            return iter(ds)
 
         logger.info("Streaming {} data_files={} revision={}", hf_repo, data_files, revision)
         # The dict key is just the split label for the explicit file list; the
