@@ -151,21 +151,26 @@ streaming=True)`:
 **Stage `compile`**
 
 ```bash
-ketos -d cuda:0 --workers 8 compile -f page -F pages_train.lst -o train.arrow
-ketos -d cuda:0 --workers 8 compile -f page -F pages_val.lst   -o val.arrow
+ketos --device cuda:0 --workers 8 compile --format-type page --files pages_train.lst --output train.arrow --skip-empty-lines
+ketos --device cuda:0 --workers 8 compile --format-type page --files pages_val.lst --output val.arrow --skip-empty-lines
 printf '%s\n' "$PWD/train.arrow" > train_bin.lst
 printf '%s\n' "$PWD/val.arrow"   > val_bin.lst
 ```
 
 > Device convention: the unit sets `Environment=CUDA_VISIBLE_DEVICES=1` (as the other
 > engine units do), so the physical GPU 1 is addressed as `cuda:0` inside the process.
+>
+> Long option names throughout: they are self-documenting in `journalctl`, and `-s` means
+> `--seed` on the `ketos` group but `--spec` on `train`. `atr_serving.training.ketos_cmd`
+> emits exactly these commands (#33).
 
 **Stage `train`** — see §3a for the architecture and hyperparameters.
 
 **Stage `test`**
 
 ```bash
-ketos -d cuda:0 test -m model/<model_id>.mlmodel -e val_bin.lst -f binary
+ketos --device cuda:0 --workers 8 test --model model/<model_id>.mlmodel \
+  --test-data val_bin.lst --format-type binary --normalization NFD
 ```
 
 CER/WER are parsed from the report and written into `job.json`; a run that produces no
@@ -183,13 +188,20 @@ schedule    1cycle (cyclical), lrate 1e-4
 ```
 
 ```bash
-ketos -d cuda:0 --workers 8 --seed 42 train \
-  -f binary -t train_bin.lst -e val_bin.lst \
-  -o checkpoints --weights-format coreml \
-  -s '[256,64,0,1 Cr4,2,8,4,2 Cr4,2,32,1,1 Mp4,2,4,2 Cr3,3,64,1,1 Mp1,2,1,2 S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]' \
-  -B 256 --schedule 1cycle -r 0.0001 \
-  -q fixed -N 50 --augment -u NFD
+ketos --device cuda:0 --workers 8 --seed 42 train \
+  --format-type binary --training-data train_bin.lst --evaluation-data val_bin.lst \
+  --output checkpoints --weights-format coreml \
+  --batch-size 256 --schedule 1cycle --lrate 0.0001 --quit fixed --epochs 50 \
+  --spec '[256,64,0,1 Cr4,2,8,4,2 Cr4,2,32,1,1 Mp4,2,4,2 Cr3,3,64,1,1 Mp1,2,1,2 S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]' \
+  --normalization NFD --normalize-whitespace --augment
 ```
+
+kraken writes the converted best model next to the checkpoints as
+`best_<val_metric>.<format>` — and its CoreML writer **forces** a `.mlmodel` suffix
+("coreml refuses to serialize into a path that doesn't have a '.mlmodel' suffix"), so
+with `--weights-format coreml` the artifact is `checkpoints/best_0.9312.mlmodel`.
+Checkpoints are `checkpoint_<NN>-<val_metric>.ckpt` (top 10 kept), plus
+`checkpoint_abort.ckpt` on an unhandled exception.
 
 Four things about how kraken 7.0.2 actually consumes this (read off
 `kraken/train/vgsl.py`, `kraken/configs/vgsl.py`), which the runner must encode:

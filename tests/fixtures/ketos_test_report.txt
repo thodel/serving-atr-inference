@@ -1,0 +1,20 @@
+Loading model best_0.9312.mlmodel.
+Evaluating best_0.9312.mlmodel	━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+=== report best_0.9312.mlmodel ===
+
+24680	Characters
+1234	Errors
+95.00%	Character Accuracy
+95.42%	Character Accuracy (Case-insensitive)
+81.25%	Word Accuracy
+
+210	Insertions
+418	Deletions
+606	Substitutions
+
+Count	Missed	%Right
+24680	1234	95.00%	Latin
+
+Errors	Correct-Generated
+94	{ n } - { u }
+71	{ e } - { c }

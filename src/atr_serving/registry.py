@@ -21,6 +21,14 @@ class ModelSpec(BaseModel):
     engine: Engine
     hf_repo: str | None = None
     zenodo_id: str | None = None
+    # Weights on this box (a model we trained ourselves). Third accepted source
+    # alongside hf_repo/zenodo_id; written to the gitignored overlay registry, see
+    # atr_serving.training.overlay. The engine-side loading is #36.
+    local_path: str | None = None
+    # False = registered but not yet proven servable. The promotion gate (#36)
+    # flips it after one successful recognition, so /models never advertises a
+    # model the host cannot actually run (cf. #30/#31).
+    enabled: bool = True
     base_model: str | None = None
     task: Literal["ocr", "htr"] = "ocr"
     level: Literal["page", "line"] = "page"
@@ -34,8 +42,10 @@ class ModelSpec(BaseModel):
 
     @model_validator(mode="after")
     def _check_source(self) -> "ModelSpec":
-        if not self.hf_repo and not self.zenodo_id:
-            raise ValueError(f"model '{self.id}': needs either hf_repo or zenodo_id")
+        if not self.hf_repo and not self.zenodo_id and not self.local_path:
+            raise ValueError(
+                f"model '{self.id}': needs one of hf_repo, zenodo_id or local_path"
+            )
         return self
 
 

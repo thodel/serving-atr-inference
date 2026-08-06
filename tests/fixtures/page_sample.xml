@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15">
+    <Metadata>
+        <Creator>CITlab</Creator>
+    </Metadata>
+    <Page imageFilename="023499_0012_623887.jpg" imageWidth="1600" imageHeight="1067">
+        <TextRegion id="r1">
+            <Coords points="10,10 100,10 100,50 10,50"/>
+            <TextLine id="r1l1" custom="readingOrder {index:0;}">
+                <Coords points="12,12 98,12 98,30 12,30"/>
+                <Baseline points="12,28 98,28"/>
+                <TextEquiv><Unicode>Item ontfaen van Janne</Unicode></TextEquiv>
+            </TextLine>
+            <TextLine id="r1l2">
+                <Coords points="12,32 98,32 98,48 12,48"/>
+                <Baseline points="12,46 98,46"/>
+                <TextEquiv><Unicode>van der Straten &amp; sinen sone</Unicode></TextEquiv>
+            </TextLine>
+            <TextLine id="r1l3">
+                <Coords points="12,52 98,52 98,68 12,68"/>
+                <Baseline points="12,66 98,66"/>
+                <TextEquiv><Unicode></Unicode></TextEquiv>
+            </TextLine>
+        </TextRegion>
+        <TextEquiv><Unicode>page level text that is not a line</Unicode></TextEquiv>
+    </Page>
+</PcGts>

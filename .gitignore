@@ -228,3 +228,10 @@ weights/
 
 # eval run outputs
 eval/outputs/
+
+# Locally trained models — the overlay registry is machine-written, never reviewed
+config/models.local.yaml
+
+# Training jobs + trained weights (default: ~/atr-cache/..., these cover a local root)
+training_jobs/
+trained/
