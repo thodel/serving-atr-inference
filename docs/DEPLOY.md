@@ -138,12 +138,15 @@ box**, it would rebuild the serving engines' venvs from ranged requirements:
 bash scripts/make_venvs.sh kraken-train
 ```
 
-It needs ~8 GB free (torch + CUDA wheels). pip unpacks through `$TMPDIR`, which is
-`/tmp` on the same 80 %-full root partition, so on a tight box point it somewhere
-with room and skip the cache:
+It needs ~6 GB free (torch + CUDA wheels). asterAIx has a **single partition** — `/`
+and `/tmp` are the same filesystem — so redirecting `TMPDIR` buys nothing; the only
+lever is free space. Check first, and skip pip's cache so the download is not stored
+twice:
 
 ```bash
-TMPDIR=$HOME/atr-cache/tmp bash scripts/make_venvs.sh kraken-train   # mkdir it first
+df -h /                                   # 2026-08-06: this hit 100 % full
+pip cache purge                           # ~17 GB of downloaded wheels, safe to drop
+PIP_NO_CACHE_DIR=1 bash scripts/make_venvs.sh kraken-train
 ```
 
 Before the first long run, check the network builds (seconds, no data needed).

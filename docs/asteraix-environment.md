@@ -12,7 +12,7 @@ Re-run the probe and update this file if the box changes.
 | IP | `130.92.59.240` (Uni Bern public range — firewall + API key matter) |
 | OS | **Ubuntu 24.04.3 LTS** (noble), kernel 6.8 |
 | CPU / RAM | Threadripper PRO 5965WX, 48 threads / **251 GB** |
-| Disk | single `/` partition, 1.8 T, **80 % used, ~356 G free** |
+| Disk | single `/` partition, 1.8 T — **100 % FULL, 0 B free (2026-08-06)**; was 80 % used / ~356 G free at the June probe |
 | GPUs | **2× NVIDIA A40, 46068 MiB (~45 GB) each**, compute **8.6** (bf16 OK) |
 | Driver / CUDA | **565.57.01 / CUDA 12.7** capability; toolkits 12.1/12.4/12.6 installed, `nvcc` 12.6 |
 | **GPU 0** | **shared** — ~10 GB used by an existing `rag-change/venv` service |
@@ -55,8 +55,19 @@ Re-run the probe and update this file if the box changes.
    (needs admin once), or reverse-proxy via the existing nginx. API key is mandatory
    regardless. → ISSUE #9; confirm the VM's IP and `ufw status` (needs sudo).
 7. **HF cache / disk.** Set `HF_HOME` explicitly (e.g. `/home/tobias/atr-cache/hf`) and
-   monitor — `/` is 80 % full with ~356 G free, enough for the planned models
-   (~80 G total incl. the Qwen3-VL base) but shared with everything else.
+   monitor — `/` is a single partition shared with everything else on the box.
+
+   **Update 2026-08-06: `/` reached 100 % full (0 B free)**, which broke a pip install
+   and puts every running service at risk. Our own footprint at that point was ~78 GB:
+   `~/.cache/pip` 17 G (pure cache, safe to purge), `~/atr-cache/hf` 26 G (bases),
+   `~/atr-cache/vllm-merged` 35 G (what vLLM actually serves). The remaining ~1.6 TB
+   belongs to the box's other tenants (RAG service, Ollama, docker) — check with
+   `sudo du -xh --max-depth=2 / | sort -h | tail -20` before deleting anything of ours.
+
+   Consequence for training: the trainer's disk guard (`ATR_TRAIN_MIN_FREE_DISK_GB`,
+   default 50) refuses to start a job on a box this full — correctly. A small job like
+   the Thun test case needs well under 1 GB of materialized pages, so lower the guard
+   explicitly for it rather than pretending the headroom exists.
 8. **Coexistence.** Ollama (`:11434`), nginx (`:80`), docker and the RAG service are
    already running. Our stack must not grab their ports or GPU 0 memory.
 
