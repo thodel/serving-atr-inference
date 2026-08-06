@@ -131,10 +131,26 @@ plus the HuggingFace data stack) and `install_user_units.sh` installs
 **detached** child, so restarting the unit reconciles job records rather than killing
 a run.
 
-Before the first long run, check the network builds (seconds, no data needed):
+Build just this venv — **never re-run `make_venvs.sh` with no arguments on a live
+box**, it would rebuild the serving engines' venvs from ranged requirements:
 
 ```bash
-.venvs/kraken-train/bin/python -m kraken_train_svc.vgsl_preflight
+bash scripts/make_venvs.sh kraken-train
+```
+
+It needs ~8 GB free (torch + CUDA wheels). pip unpacks through `$TMPDIR`, which is
+`/tmp` on the same 80 %-full root partition, so on a tight box point it somewhere
+with room and skip the cache:
+
+```bash
+TMPDIR=$HOME/atr-cache/tmp bash scripts/make_venvs.sh kraken-train   # mkdir it first
+```
+
+Before the first long run, check the network builds (seconds, no data needed).
+Run it from `engines/` with `src` on the path — the same layout the unit uses:
+
+```bash
+cd engines && PYTHONPATH=../src ../.venvs/kraken-train/bin/python -m kraken_train_svc.vgsl_preflight
 ```
 
 Submit a job (see `docs/TRAINING_PLAN.md` §4 for the body); jobs and trained weights

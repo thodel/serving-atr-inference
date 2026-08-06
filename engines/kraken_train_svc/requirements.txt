@@ -10,10 +10,20 @@ httpx>=0.27
 # read off the 7.0.2 sources, and 7.1 both adds flags (--linetype, --arch) and
 # changes defaults. A silent upgrade here would build invalid command lines.
 kraken==7.0.2
-torch>=2.2.0
-torchvision>=0.17.0
+# torch/torchvision are PINNED and installed from the cu128 index by
+# make_venvs.sh BEFORE this file. Do not loosen:
+#   * `torch>=2.2.0` resolves to the newest release (2.13 at the time of writing),
+#     which drags in CUDA 12.9 wheels — multiple GB of download on a box whose
+#     root partition is the binding constraint, and an untested CUDA level for
+#     driver 565 / CUDA 12.7.
+#   * 2.8.0+cu128 is the build already proven on this driver by the vLLM venv
+#     (docs/asteraix-environment.md), so the trainer reuses it.
+#   * torchvision 0.23.0 is the release paired with torch 2.8.0.
+torch==2.8.0
+torchvision==0.23.0
 # Ground truth comes from the HuggingFace hub as streamed parquet — never a full
-# repo download (dh-unibe/image-text_medieval-scripts_xiv-xv-xvi is ~6.6 TB and
-# the box has ~356 GB free).
-datasets>=3.0
+# repo download (dh-unibe/image-text_medieval-scripts_xiv-xv-xvi is ~6.6 TB).
+# Upper bound because datasets 4.x/5.x tighten dill/multiprocess/pyarrow ranges
+# against kraken's, which sends pip into minutes of backtracking.
+datasets>=3.0,<4
 huggingface_hub>=0.25
