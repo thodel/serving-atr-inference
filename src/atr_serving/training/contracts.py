@@ -203,6 +203,9 @@ class TrainJob(BaseModel):
     finished_at: datetime | None = None
     #: PID of the detached runner process group leader.
     pid: int | None = None
+    #: Why a queued job has not started yet (e.g. another job is running, or the
+    #: GPU is busy). Never a failure — a queued job is still going to run.
+    queued_reason: str | None = None
     progress: Progress = Field(default_factory=Progress)
     metrics: Metrics | None = None
     stages: list[StageRecord] = Field(default_factory=list)

@@ -33,6 +33,14 @@ echo "== trocr venv =="
 "${VENVS}/trocr/bin/pip" install -U pip wheel
 "${VENVS}/trocr/bin/pip" install -r "${ROOT}/engines/trocr_svc/requirements.txt"
 
+echo "== kraken-train venv =="
+# Training gets its OWN venv: it adds the HuggingFace data stack on top of kraken
+# and pins kraken EXACTLY (7.0.2), so a training dependency can never move the
+# serving engine's versions under it. See docs/TRAINING_PLAN.md §2.
+"${PY}" -m venv "${VENVS}/kraken-train"
+"${VENVS}/kraken-train/bin/pip" install -U pip wheel
+"${VENVS}/kraken-train/bin/pip" install -r "${ROOT}/engines/kraken_train_svc/requirements.txt"
+
 echo "== vllm venv =="
 # Driver 565 / CUDA 12.7: current vLLM (0.2x) is a CUDA-13 build (needs libcudart.so.13
 # / driver >=580) and fails on this box. vLLM 0.11.0 is the last CUDA-12.8 build that
@@ -48,4 +56,5 @@ echo "  Gateway: ${VENVS}/gateway/bin/uvicorn atr_serving.app:app --host 0.0.0.0
 echo "  Kraken:  ${VENVS}/kraken/bin/python -m uvicorn kraken_svc.app:app --host 127.0.0.1 --port 8201"
 echo "  Party:   ${VENVS}/party/bin/python -m uvicorn party_svc.app:app --host 127.0.0.1 --port 8203"
 echo "  TrOCR:   ${VENVS}/trocr/bin/python -m uvicorn trocr_svc.app:app --host 127.0.0.1 --port 8202"
+echo "  Train:   ${VENVS}/kraken-train/bin/python -m uvicorn kraken_train_svc.app:app --host 127.0.0.1 --port 8204"
 echo "  vLLM:    spawned on demand by the gateway's ModelManager (ports 8210+)"

@@ -1,0 +1,19 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+pydantic-settings>=2.2
+loguru>=0.7
+pyyaml>=6.0
+httpx>=0.27
+# Training runs ketos out of this venv. Pinned EXACTLY, unlike the serving
+# engine's loose `kraken>=5.0`: every flag in atr_serving.training.ketos_cmd was
+# read off the 7.0.2 sources, and 7.1 both adds flags (--linetype, --arch) and
+# changes defaults. A silent upgrade here would build invalid command lines.
+kraken==7.0.2
+torch>=2.2.0
+torchvision>=0.17.0
+# Ground truth comes from the HuggingFace hub as streamed parquet — never a full
+# repo download (dh-unibe/image-text_medieval-scripts_xiv-xv-xvi is ~6.6 TB and
+# the box has ~356 GB free).
+datasets>=3.0
+huggingface_hub>=0.25

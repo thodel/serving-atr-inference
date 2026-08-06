@@ -16,7 +16,7 @@ START=1
 
 # Engines + gateway. vLLM is NOT a unit — the ModelManager spawns it as a
 # subprocess (see docs/asteraix-environment.md / IMPLEMENTATION_PLAN.md §8).
-UNITS=(atr-kraken atr-trocr atr-party atr-gateway)
+UNITS=(atr-kraken atr-trocr atr-party atr-train atr-gateway)
 
 mkdir -p "${UNIT_DST}"
 for u in "${UNITS[@]}"; do
@@ -37,7 +37,7 @@ done
 
 if [ "${START}" -eq 1 ]; then
   # Start engines first, gateway last.
-  for u in atr-kraken atr-trocr atr-party atr-gateway; do
+  for u in atr-kraken atr-trocr atr-party atr-train atr-gateway; do
     systemctl --user start "${u}.service" || echo "  (start failed: ${u} — check the venv exists)"
   done
 fi

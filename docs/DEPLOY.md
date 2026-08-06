@@ -123,6 +123,32 @@ curl -s -H "X-API-Key: <shared-key>" http://130.92.59.240:8200/health
 Then point `KRAKEN_SERVICE_URL` (agentic_historian) at `http://130.92.59.240:8200`;
 its existing `KrakenHTTPClient` uses the legacy `/ocr` alias unchanged.
 
+## 8. Training service (optional, #34)
+
+`scripts/make_venvs.sh` also builds `.venvs/kraken-train` (kraken **pinned to 7.0.2**
+plus the HuggingFace data stack) and `install_user_units.sh` installs
+`atr-train.service` on `:8204`. It supervises training only — each job runs as a
+**detached** child, so restarting the unit reconciles job records rather than killing
+a run.
+
+Before the first long run, check the network builds (seconds, no data needed):
+
+```bash
+.venvs/kraken-train/bin/python -m kraken_train_svc.vgsl_preflight
+```
+
+Submit a job (see `docs/TRAINING_PLAN.md` §4 for the body); jobs and trained weights
+land in `~/atr-cache/training/<job_id>/` and `~/atr-cache/trained/<model_id>/`:
+
+```bash
+curl -s -X POST localhost:8204/jobs -H 'Content-Type: application/json' \
+  -d '{"model_id":"kraken-thun-missiven-v1","dataset":{"hf_repo":"dh-unibe/image-text_medieval-scripts_xiv-xv-xvi","train_projects":["GT_Thun-Training_(TEST-DEMO)"],"eval_projects":["GT_Thun-Test_(DEMO_TEST)"]}}'
+```
+
+Trained models are registered **disabled** in the gitignored `config/models.local.yaml`
+until #36 wires the loader and the promotion gate — nothing is served automatically.
+The full runbook is #37.
+
 ## Notes / known follow-ups
 - vLLM units/subprocess + ModelManager land in #5/#6.
 - Prometheus metrics (latency/VRAM/evictions) are a follow-up; logs are structured
