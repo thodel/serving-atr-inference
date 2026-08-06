@@ -320,11 +320,11 @@ advertise what the host cannot run"):
 
 | # | milestone | content | verification |
 |---|---|---|---|
-| M1 | training contracts + pure logic | `src/atr_serving/training/*` (contracts, pagexml, hf_source, manifests, ketos_cmd, jobstore, overlay) | unit tests in the repo venv; exact-argv assertions; PageXML rewrite round-trip; split determinism |
-| M2 | kraken trainer service | `engines/kraken_train_svc/` (kraken **7.0.2**, same pin as the serving engine), `.venvs/kraken-train`, `deploy/systemd/atr-train.service`, `make_venvs.sh` + `install_user_units.sh` updates, VGSL preflight (§3a) | on the box: submit the Thun job, watch `journalctl --user -u atr-train`, get a CER |
-| M3 | gateway `/train/*` | proxy routes, auth, schemas, README section | route tests with a faked trainer client |
-| M4 | serve trained models (+ closes #32) | `local_path` in `ModelSpec`, `load_models` in `kraken_svc`, overlay registry, promotion gate | `/models` shows the trained id; `/ocr` returns text |
-| M5 | docs + eval | `docs/TRAINING.md` runbook, hook the trained model into `eval/run_eval.py` for a CER comparison against the served kraken models | eval report old vs new |
+| M1 (#33) | training contracts + pure logic | `src/atr_serving/training/*` (contracts, pagexml, hf_source, manifests, ketos_cmd, jobstore, overlay) | unit tests in the repo venv; exact-argv assertions; PageXML rewrite round-trip; split determinism |
+| M2 (#34) | kraken trainer service | `engines/kraken_train_svc/` (kraken **7.0.2**, same pin as the serving engine), `.venvs/kraken-train`, `deploy/systemd/atr-train.service`, `make_venvs.sh` + `install_user_units.sh` updates, VGSL preflight (§3a) | on the box: submit the Thun job, watch `journalctl --user -u atr-train`, get a CER |
+| M3 (#35) | gateway `/train/*` | proxy routes, auth, schemas, README section | route tests with a faked trainer client |
+| M4 (#36) | serve trained models (+ closes #32) | `local_path` in `ModelSpec`, `load_models` in `kraken_svc`, overlay registry, promotion gate | `/models` shows the trained id; `/ocr` returns text |
+| M5 (#37) | docs + eval | `docs/TRAINING.md` runbook, hook the trained model into `eval/run_eval.py` for a CER comparison against the served kraken models | eval report old vs new |
 
 Follow-ups, deliberately out of M1–M5: TrOCR fine-tuning backend; VLM LoRA fine-tuning
 (reusing `scripts/merge_loras.py` for the serve step); `ketos publish` / HF upload of a
