@@ -116,9 +116,14 @@ src/atr_serving/training/          # pure, dependency-light (pydantic + stdlib +
   ketos_cmd.py     argv builders for compile/train/test  +  log/metric parsers
   jobstore.py      job dir layout, atomic job.json writes, state machine, PID reconcile
   overlay.py       config/models.local.yaml — trained models as ModelSpecs
+  settings.py      TrainerSettings — paths, guards, per-engine interpreters
+  preflight.py     disk / VRAM / TMPDIR guards
+  prepare.py       HF rows → pages/*.{jpg,xml} (the `datasets` import is lazy)
+  runner_base.py   BasePipeline — the lifecycle and the shared `prepare` stage
+  backends.py      engine → runner module + venv
 engines/kraken_train_svc/
   app.py           FastAPI :8204 — POST /jobs, GET /jobs[/{id}], /{id}/log, /{id}/cancel
-  runner.py        the stage pipeline; the only place that imports `datasets`/kraken
+  runner.py        the kraken stage bodies; the only place that imports kraken
   requirements.txt
 src/atr_serving/api/train_routes.py   # gateway proxy
 deploy/systemd/atr-train.service
@@ -126,6 +131,11 @@ deploy/systemd/atr-train.service
 
 Everything above the `engines/` line is importable and unit-testable in the repo venv;
 `runner.py` is thin glue around it.
+
+> The five modules after `overlay.py` arrived with the VLM backend (§7): they are the
+> pieces that were never kraken-specific, moved up out of `engines/kraken_train_svc/` so
+> a second backend could share them rather than import across venvs. `app.py` stayed
+> where it is — the package name is historical, the service is engine-agnostic.
 
 ---
 
@@ -362,9 +372,37 @@ advertise what the host cannot run"):
 | M4 (#36) | serve trained models (+ closes #32) | `local_path` in `ModelSpec`, `load_models` in `kraken_svc`, overlay registry, promotion gate | `/models` shows the trained id; `/ocr` returns text |
 | M5 (#37) | docs + eval | `docs/TRAINING.md` runbook, hook the trained model into `eval/run_eval.py` for a CER comparison against the served kraken models | eval report old vs new |
 
-Follow-ups, deliberately out of M1–M5: TrOCR fine-tuning backend; VLM LoRA fine-tuning
-(reusing `scripts/merge_loras.py` for the serve step); `ketos publish` / HF upload of a
-trained model; `agentic_historian` client wiring; multi-GPU or queued overnight runs.
+Follow-ups, deliberately out of M1–M5: TrOCR fine-tuning backend; `ketos publish`
+(Zenodo); `agentic_historian` client wiring; multi-GPU or queued overnight runs.
+
+**Publishing to HuggingFace has since landed** — `src/atr_serving/training/publish.py`
+and `scripts/publish_to_hub.py` push every registered model directory under
+`trained_root` to `<org>/<model_id>`, with a model card generated from that model's
+`metadata.json` (CER/WER, dataset selection, hyperparameters, job id). It is a
+manually invoked step rather than a sixth pipeline stage, for the same reason the
+overlay entry is written disabled: a run that produced a CER has not thereby earned a
+published artifact. Repos are private unless `--public`, no licence is invented, and a
+directory without `metadata.json` is reported and skipped — weights whose provenance
+and error rate cannot be stated do not go on the hub.
+
+**VLM LoRA fine-tuning has since landed** — see [`docs/VLM_TRAINING.md`](VLM_TRAINING.md).
+It took exactly the route this document anticipated: the same job envelope, store, API,
+guards and `prepare` stage, with only `params` and the stage commands differing. Three
+things about it are worth knowing here, because they changed shared code:
+
+1. **One service, two venvs.** `atr-train` supervises both backends and imports neither;
+   it spawns each job as a detached child of that engine's interpreter
+   (`src/atr_serving/training/backends.py`). One service because there is one GPU — two
+   would each enforce `max_concurrent=1` against their own job list and start two runs
+   into the same card. Two venvs because kraken 7.0.2 and a transformers new enough for
+   Qwen3-VL cannot share a dependency tree.
+2. **The lifecycle moved up** into `runner_base.BasePipeline`, which now owns the stage
+   bookkeeping, the `execute` sequence and the whole `prepare` stage for both backends.
+   `TrainerSettings`, `preflight` and `prepare` moved from `engines/kraken_train_svc/`
+   into `src/atr_serving/training/` for the same reason — they were never kraken-specific.
+3. **Serving a trained VLM needs a merge step.** vLLM 0.11 refuses a LoRA that touches
+   the vision tower, so `scripts/merge_loras.py` bakes the adapter into its base before
+   the promotion gate of §6 applies. The overlay entry stays `enabled: false` until then.
 
 ---
 

@@ -14,8 +14,8 @@ from atr_serving.training.contracts import DatasetSpec, Metrics, TrainRequest
 from atr_serving.training.jobstore import JobStore
 
 from kraken_train_svc import app as app_module
-from kraken_train_svc.preflight import GpuInfo, PreflightError
-from kraken_train_svc.settings import TrainerSettings
+from atr_serving.training.preflight import GpuInfo, PreflightError
+from atr_serving.training.settings import TrainerSettings
 
 REPO = "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi"
 BODY = {
@@ -55,11 +55,27 @@ def busy_gpu(gpu, min_free_mb):
 
 
 @pytest.fixture
-def settings(tmp_path: Path) -> TrainerSettings:
+def venvs(tmp_path: Path) -> Path:
+    """Stand-in interpreters for both backends.
+
+    Pointed at tmp_path rather than the real ``.venvs/``: submit refuses an engine
+    whose venv is not built, and a test suite that only passes on a machine which
+    happens to have provisioned the engines is not a test suite.
+    """
+    root = tmp_path / "venvs"
+    for name in ("kraken-train", "vlm-train"):
+        (root / name / "bin").mkdir(parents=True)
+        (root / name / "bin" / "python").touch()
+    return root
+
+
+@pytest.fixture
+def settings(tmp_path: Path, venvs: Path) -> TrainerSettings:
     return TrainerSettings(
         jobs_root=tmp_path / "training",
         trained_root=tmp_path / "trained",
         overlay_path=tmp_path / "models.local.yaml",
+        venvs_root=venvs,
         min_free_disk_gb=0.0,
     )
 
@@ -263,12 +279,142 @@ def test_reconcile_frees_the_queue_for_the_next_job(client, spawn):
     job = store.advance(store.load(dead), "preparing")
     job.pid = PID_NEVER
     store.save(job)
+    # Submitting schedules straight away, so this is where the dead job is
+    # reconciled and the next one starts — no second pass needed.
     nxt = client.post("/jobs", json={**BODY, "model_id": "second-model"}).json()["job_id"]
 
-    started = app_module.schedule_once(store, client.app.state.settings, spawn=spawn,
-                                       vram_check=free_gpu)
     assert store.load(dead).status == "failed"
-    assert started.id == nxt
+    assert spawn.calls == [dead, nxt]
+
+
+# ── two backends, one supervisor ────────────────────────────────────────────
+VLM_BODY = {
+    "engine": "vllm",
+    "model_id": "qwen3vl-thun-v1",
+    "dataset": {"hf_repo": REPO, "train_projects": ["GT_Thun-Training_(TEST-DEMO)"]},
+}
+
+
+def test_a_vlm_job_is_accepted_by_the_same_endpoint(client, spawn):
+    resp = client.post("/jobs", json=VLM_BODY)
+    assert resp.status_code == 202
+    job = store_of(client).load(resp.json()["job_id"])
+    assert job.request.engine == "vllm"
+    assert job.request.params.granularity == "line"
+    assert job.request.base_model == "Qwen/Qwen3-VL-8B-Instruct"
+
+
+def test_both_backends_share_one_queue(client, spawn):
+    """One GPU, so one job at a time — regardless of which engine each job is for.
+    Two services would each think they were the only one training."""
+    kraken = client.post("/jobs", json=BODY).json()["job_id"]
+    store = store_of(client)
+    store.advance(store.load(kraken), "preparing")
+
+    vlm = client.post("/jobs", json=VLM_BODY).json()
+    assert vlm["status"] == "queued"
+    assert kraken in vlm["queued_reason"]
+    assert spawn.calls == [kraken]
+
+
+def test_a_vlm_job_needs_more_free_vram_than_a_kraken_job(client, settings):
+    """A card with room for a kraken run has not necessarily got room for a
+    QLoRA fine-tune of an 8B; the gate is per engine."""
+    seen = []
+
+    def record(gpu, min_free_mb):
+        seen.append(min_free_mb)
+        return GpuInfo(index=gpu, free_mb=40000, total_mb=46068)
+
+    client.app.state.vram_check = record
+    client.post("/jobs", json=VLM_BODY)
+    assert seen == [settings.vlm_min_free_vram_mb]
+    assert settings.vlm_min_free_vram_mb > settings.min_free_vram_mb
+
+
+def test_a_job_is_spawned_with_its_own_engine_s_interpreter(client, settings, monkeypatch):
+    """kraken and the VLM trainer cannot share a dependency tree, so they must not
+    share an interpreter — the supervisor imports neither."""
+    launched: list[list[str]] = []
+
+    class FakeProc:
+        pid = 4242
+
+    monkeypatch.setattr(app_module.subprocess, "Popen",
+                        lambda cmd, **kw: launched.append(cmd) or FakeProc())
+    delattr(client.app.state, "spawn")  # exercise the real _spawn
+
+    store = store_of(client)
+    vlm = client.post("/jobs", json=VLM_BODY).json()["job_id"]
+    assert launched[0][0] == str(settings.venvs_root / "vlm-train" / "bin" / "python")
+    assert launched[0][2] == "vlm_train_svc.runner"
+
+    store.fail(store.load(vlm), "make room for the next one")
+    client.post("/jobs", json=BODY)
+    assert launched[1][0] == str(settings.venvs_root / "kraken-train" / "bin" / "python")
+    assert launched[1][2] == "kraken_train_svc.runner"
+
+
+def test_a_spawned_job_is_not_spawned_again_before_its_runner_reports(client, settings, spawn):
+    """A job stays 'queued' until the detached runner writes its first status;
+    scheduling again in that window would put two runners on one GPU."""
+    store = store_of(client)
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    assert spawn.calls == [job_id]
+    assert store.load(job_id).status == "queued" and store.load(job_id).pid is not None
+
+    app_module.schedule_once(store, settings, spawn=spawn, vram_check=free_gpu)
+    assert spawn.calls == [job_id]  # not started twice
+
+
+def test_a_runner_that_died_before_reporting_does_not_block_the_queue(client, settings, spawn):
+    """The other half of the same rule: 'queued with a pid' means spawned, so a
+    dead pid there is a dead run, not a job politely waiting its turn."""
+    store = store_of(client)
+    dead = client.post("/jobs", json=BODY).json()["job_id"]
+    job = store.load(dead)
+    job.pid = PID_NEVER
+    store.save(job)
+    nxt = client.post("/jobs", json={**BODY, "model_id": "second-model"}).json()["job_id"]
+
+    assert store.load(dead).status == "failed"
+    assert spawn.calls == [dead, nxt]
+
+
+def test_a_backend_whose_venv_is_missing_is_refused_at_submit(client, settings):
+    """Named now, with the command that fixes it — not as a traceback inside a
+    detached child two ticks later."""
+    (settings.venvs_root / "vlm-train" / "bin" / "python").unlink()
+    resp = client.post("/jobs", json=VLM_BODY)
+    assert resp.status_code == 503
+    assert "make_venvs.sh vlm-train" in resp.json()["detail"]
+    assert client.post("/jobs", json=BODY).status_code == 202  # kraken unaffected
+
+
+def test_health_reports_which_backends_this_box_can_actually_run(client, settings):
+    (settings.venvs_root / "vlm-train" / "bin" / "python").unlink()
+    backends = client.get("/health").json()["backends"]
+    assert backends["kraken"]["available"] is True
+    assert backends["vllm"]["available"] is False
+    assert backends["vllm"]["runner"] == "vlm_train_svc.runner"
+
+
+def test_a_job_that_cannot_be_spawned_fails_instead_of_queueing_forever(client, settings):
+    """The scheduler would otherwise log the same error every 10 s while the
+    record still claimed the job was queued."""
+    store = store_of(client)
+    job_id = client.post("/jobs", json=VLM_BODY).json()["job_id"]
+    store.advance(store.load(job_id), "preparing")  # occupy the queue
+    second = client.post("/jobs", json={**VLM_BODY, "model_id": "second-vlm"}).json()["job_id"]
+
+    (settings.venvs_root / "vlm-train" / "bin" / "python").unlink()
+    delattr(client.app.state, "spawn")
+    store.fail(store.load(job_id), "make room")
+    app_module.schedule_once(store, settings, vram_check=free_gpu)
+
+    failed = store.load(second)
+    assert failed.status == "failed"
+    assert "could not start the vllm runner" in failed.error
 
 
 def test_request_defaults_survive_the_wire(client):

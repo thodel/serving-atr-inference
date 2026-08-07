@@ -20,7 +20,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENVS="${ROOT}/.venvs"
 # asterAIx ships Python 3.12 only (no 3.11) — see docs/asteraix-environment.md
 PY="${PYTHON:-python3.12}"
-ALL=(gateway kraken party trocr kraken-train vllm)
+ALL=(gateway kraken party trocr kraken-train vlm-train vllm)
 TARGETS=("$@")
 [ ${#TARGETS[@]} -eq 0 ] && TARGETS=("${ALL[@]}")
 
@@ -79,6 +79,19 @@ if wanted kraken-train; then
   "${VENVS}/kraken-train/bin/pip" install -r "${ROOT}/engines/kraken_train_svc/requirements.txt"
 fi
 
+if wanted vlm-train; then
+  # QLoRA fine-tuning of Qwen3-VL. Its OWN venv, not kraken-train's: kraken 7.0.2
+  # and a transformers new enough for Qwen3-VL cannot share a dependency tree.
+  # The supervising service (atr-train) imports neither, so it spawns each job
+  # with the right interpreter — see src/atr_serving/training/backends.py.
+  #
+  # torch first from the cu128 index, same as the other GPU venvs.
+  new_venv vlm-train
+  "${VENVS}/vlm-train/bin/pip" install torch==2.8.0 torchvision==0.23.0 \
+    --index-url https://download.pytorch.org/whl/cu128
+  "${VENVS}/vlm-train/bin/pip" install -r "${ROOT}/engines/vlm_train_svc/requirements.txt"
+fi
+
 if wanted vllm; then
   # Driver 565 / CUDA 12.7: current vLLM (0.2x) is a CUDA-13 build (needs libcudart.so.13
   # / driver >=580) and fails on this box. vLLM 0.11.0 is the last CUDA-12.8 build that
@@ -95,5 +108,6 @@ wanted kraken && echo "  Kraken:  ${VENVS}/kraken/bin/python -m uvicorn kraken_s
 wanted party && echo "  Party:   ${VENVS}/party/bin/python -m uvicorn party_svc.app:app --host 127.0.0.1 --port 8203"
 wanted trocr && echo "  TrOCR:   ${VENVS}/trocr/bin/python -m uvicorn trocr_svc.app:app --host 127.0.0.1 --port 8202"
 wanted kraken-train && echo "  Train:   ${VENVS}/kraken-train/bin/python -m uvicorn kraken_train_svc.app:app --host 127.0.0.1 --port 8204"
+wanted vlm-train && echo "  VLM train: no service of its own — atr-train (:8204) spawns jobs into this venv"
 wanted vllm && echo "  vLLM:    spawned on demand by the gateway's ModelManager (ports 8210+)"
 exit 0

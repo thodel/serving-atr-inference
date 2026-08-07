@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from kraken_train_svc.prepare import HFPageSource
+from atr_serving.training.prepare import HFPageSource
 
 REPO = "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi"
 GLOBS = ["data/train/GT_Thun-Training_(TEST-DEMO)/*.parquet"]

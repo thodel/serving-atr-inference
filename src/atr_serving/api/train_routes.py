@@ -23,16 +23,18 @@ from pydantic import ValidationError
 
 from atr_serving.api.auth import require_api_key
 from atr_serving.clients import EngineError, TrainerError, get_trainer_client
+from atr_serving.training.backends import BACKENDS
 from atr_serving.training.contracts import TrainRequest
 
 router = APIRouter(prefix="/train", tags=["training"],
                    dependencies=[Depends(require_api_key)])
 
-#: Engines that can be trained here today. The job envelope is engine-agnostic by
-#: design (TrOCR and VLM-LoRA backends reuse the store, API and prepare stage —
-#: docs/TRAINING_PLAN.md §7), but only kraken has a backend, and saying so beats
-#: accepting a job that will fail in the runner.
-SUPPORTED_ENGINES = ("kraken",)
+#: Engines with a training backend. Taken from the backend registry rather than
+#: written out here, so adding a backend cannot leave the proxy rejecting jobs the
+#: trainer would happily run. Whether a backend's venv is actually *built* on this
+#: box is the trainer's business — it answers 503 with the command that fixes it,
+#: and only it can know.
+SUPPORTED_ENGINES = tuple(sorted(BACKENDS))
 
 
 def _client(request: Request):
@@ -63,7 +65,7 @@ async def submit_job(request: Request, body: dict = Body(...)) -> dict:
         raise HTTPException(
             status_code=400,
             detail=(f"engine {engine!r} cannot be trained here. Supported: "
-                    f"{list(SUPPORTED_ENGINES)}. TrOCR and VLM backends are planned "
+                    f"{list(SUPPORTED_ENGINES)}. A TrOCR backend is planned "
                     "(docs/TRAINING_PLAN.md §7) but not wired."),
         )
     # Validate here as well as in the trainer: a malformed request should be

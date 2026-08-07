@@ -16,7 +16,7 @@ from atr_serving.training.jobstore import JobStore
 from atr_serving.training.overlay import load_overlay
 
 from kraken_train_svc.runner import Pipeline, StageFailed
-from kraken_train_svc.settings import TrainerSettings
+from atr_serving.training.settings import TrainerSettings
 
 REPO = "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi"
 THUN_TRAIN = "GT_Thun-Training_(TEST-DEMO)"

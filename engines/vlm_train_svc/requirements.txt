@@ -1,0 +1,34 @@
+# VLM QLoRA training venv (.venvs/vlm-train).
+#
+# Separate from kraken-train for the usual reason (IMPLEMENTATION_PLAN §3): kraken
+# 7.0.2 pins its own transformers/datasets range, and Qwen3-VL needs a much newer
+# transformers. They cannot share a tree, so they do not share a venv — and the
+# supervising service imports neither.
+pydantic>=2.6
+pydantic-settings>=2.2
+loguru>=0.7
+pyyaml>=6.0
+Pillow>=10.0
+
+# Qwen3-VL support landed in transformers 4.57. Below that, AutoProcessor raises
+# "Unrecognized model ... qwen3_vl" and the run dies before the first batch.
+transformers>=4.57
+# The vision tower's video/image processors are torchvision-backed; without it
+# Qwen3VLVideoProcessor refuses to instantiate.
+torchvision==0.23.0
+# torch is PINNED and installed from the cu128 index by make_venvs.sh BEFORE this
+# file, exactly as the kraken-train and vllm venvs do. 2.8.0+cu128 is the build
+# proven on driver 565 / CUDA 12.7 (docs/asteraix-environment.md); an unpinned
+# torch resolves to a CUDA 12.9 wheel — GBs of download on a box whose root
+# partition is the binding constraint, at an untested CUDA level.
+torch==2.8.0
+accelerate>=1.3.0
+peft>=0.14.0
+bitsandbytes>=0.45.0   # 4-bit NF4 + paged 8-bit Adam
+# Ground truth comes from the hub as streamed parquet — never a full repo
+# download. Same upper bound as kraken-train: datasets 4.x/5.x tighten the
+# dill/multiprocess/pyarrow ranges and send pip into minutes of backtracking.
+datasets>=3.0,<4
+huggingface_hub>=0.25
+# Optional: only imported when a job sets params.wandb_run.
+wandb

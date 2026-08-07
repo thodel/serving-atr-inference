@@ -25,7 +25,7 @@ from loguru import logger
 from atr_serving.training.hf_source import hub_cache_dir, row_to_page
 from atr_serving.training.pagexml import page_stats, rewrite_image_filename
 
-from kraken_train_svc.preflight import PreflightError, free_disk_gb
+from atr_serving.training.preflight import PreflightError, free_disk_gb
 
 __all__ = ["PageSource", "HFPageSource", "PreparedSet", "materialize"]
 

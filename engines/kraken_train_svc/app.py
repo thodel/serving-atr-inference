@@ -1,9 +1,15 @@
-"""Kraken training service (:8204).
+"""Training service (:8204) — supervises every training backend.
 
-Supervision only: it never trains in-process. Submitting a job writes a record,
-and a scheduler loop starts it as a **detached** child when the GPU is free and
+Supervision only: it never trains in-process, and never imports an engine
+package. Submitting a job writes a record, and a scheduler loop starts it as a
+**detached** child *of that engine's interpreter* when the GPU is free and
 nothing else is running. State lives in the job directory, so a restart of this
 service reconciles against reality instead of losing (or killing) a run.
+
+One service for both backends is a deliberate choice about the GPU rather than
+about tidiness — see :mod:`atr_serving.training.backends`. The package is still
+named ``kraken_train_svc`` because kraken was the first backend; the service is
+``atr-train`` and the API is engine-agnostic.
 
 Endpoints mirror what the gateway proxies in #35:
 
@@ -31,18 +37,19 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from atr_serving.training.backends import BACKENDS, UnknownBackend, backend_for
 from atr_serving.training.contracts import TrainJob, TrainRequest
 from atr_serving.training.jobstore import JobStore, JobStoreError
 
-from kraken_train_svc.preflight import (
+from atr_serving.training.preflight import (
     PreflightError,
     check_disk,
     check_tmpdir,
     check_vram,
     query_gpus,
 )
-from kraken_train_svc.runner import tail
-from kraken_train_svc.settings import TrainerSettings, get_settings
+from atr_serving.training.runner_base import tail
+from atr_serving.training.settings import TrainerSettings, get_settings
 
 RUNNING_STATUSES = ("preparing", "compiling", "training", "testing", "registering")
 
@@ -61,13 +68,23 @@ def _store() -> JobStore:
 
 
 def _spawn(settings: TrainerSettings, job: TrainJob) -> int:
-    """Start the runner detached and return its pid.
+    """Start the job's runner detached, in its engine's venv, and return its pid.
 
     ``start_new_session=True`` puts it in its own process group: it survives a
-    restart of this service, and cancelling it kills the group (runner + ketos)
-    rather than orphaning the child.
+    restart of this service, and cancelling it kills the group (runner + the
+    trainer subprocess it drives) rather than orphaning the child.
     """
-    cmd = [str(settings.python), "-m", "kraken_train_svc.runner",
+    backend = backend_for(job.request.engine)
+    python = settings.runner_python(job.request.engine)
+    if not python.exists():
+        # Better here than as a traceback inside a detached child: a box that only
+        # trains kraken has no reason to have built the VLM venv, and the fix is
+        # one documented command.
+        raise PreflightError(
+            f"no interpreter at {python} — the {backend.venv} venv has not been "
+            f"built on this box. Run:  bash scripts/make_venvs.sh {backend.venv}"
+        )
+    cmd = [str(python), "-m", backend.runner_module,
            "--root", str(settings.jobs_root), "--job-id", job.id]
     env = {**os.environ, **settings.env_for_child()}
     log = _store().paths(job.id).logs / "runner.out"
@@ -91,8 +108,15 @@ def schedule_once(
     caller deserves to know whether it is waiting on the GPU or on another run.
     """
     jobs = [store.reconcile(j) for j in store.list()]
-    running = [j for j in jobs if j.status in RUNNING_STATUSES]
-    queued = sorted([j for j in jobs if j.status == "queued"], key=lambda j: j.created_at)
+    # A job stays "queued" from the moment it is spawned until its detached runner
+    # writes the first status — a window that a second submit lands in easily,
+    # since submitting schedules immediately. A queued job with a live pid has
+    # therefore already been started, and starting it again would put two runners
+    # on one job directory and one GPU.
+    running = [j for j in jobs
+               if j.status in RUNNING_STATUSES or (j.status == "queued" and j.pid is not None)]
+    queued = sorted([j for j in jobs if j.status == "queued" and j.pid is None],
+                    key=lambda j: j.created_at)
     if not queued:
         return None
 
@@ -105,16 +129,28 @@ def schedule_once(
     if len(running) >= settings.max_concurrent:
         hold(f"waiting for {running[0].id} ({running[0].status})")
         return None
+
+    # The oldest queued job goes first — no reordering to fit a smaller job into
+    # the free VRAM, which would starve exactly the expensive runs the queue
+    # exists for. How much VRAM is "enough" depends on the engine.
+    job = queued[0]
     try:
-        gpu = vram_check(settings.gpu, settings.min_free_vram_mb)
+        gpu = vram_check(settings.gpu, settings.min_free_vram_for(job.request.engine))
     except PreflightError as exc:
         hold(str(exc))
         return None
 
-    job = queued[0]
-    logger.info("starting {} (GPU {} has {} MB free)", job.id, gpu.index, gpu.free_mb)
+    logger.info("starting {} ({} job; GPU {} has {} MB free)",
+                job.id, job.request.engine, gpu.index, gpu.free_mb)
     job.queued_reason = None
-    job.pid = spawn(settings, job)
+    try:
+        job.pid = spawn(settings, job)
+    except (PreflightError, UnknownBackend, OSError) as exc:
+        # A job that cannot be spawned will not spawn on the next tick either.
+        # Failing it names the reason once, instead of logging it every 10 s
+        # forever while the record still says "queued".
+        logger.error("cannot start {}: {}", job.id, exc)
+        return store.fail(job, f"could not start the {job.request.engine} runner: {exc}")
     return store.save(job)
 
 
@@ -172,6 +208,19 @@ async def health() -> JSONResponse:
         "gpu": settings.gpu,
         "gpus": gpus,
         "jobs_root": str(settings.jobs_root),
+        # Which backends this box can actually run, not which ones exist in code:
+        # a venv that was never built is the difference between a job that trains
+        # and a job that fails at spawn (cf. #30/#31 — never advertise what the
+        # host cannot run).
+        "backends": {
+            engine: {
+                "runner": backend.runner_module,
+                "venv": str(settings.runner_python(engine).parents[1]),
+                "available": settings.runner_python(engine).exists(),
+                "min_free_vram_mb": settings.min_free_vram_for(engine),
+            }
+            for engine, backend in BACKENDS.items()
+        },
         "jobs": {"total": len(jobs),
                  "running": len([j for j in jobs if j.status in RUNNING_STATUSES]),
                  "queued": len([j for j in jobs if j.status == "queued"])},
@@ -182,6 +231,17 @@ async def health() -> JSONResponse:
 async def submit(request: TrainRequest) -> dict:
     settings = _settings()
     store = _store()
+    # Same rule as disk below: a venv that was never built will not build itself
+    # while the job sits in the queue, so refuse now with the command that fixes
+    # it rather than accepting a job that can only fail at spawn.
+    python = settings.runner_python(request.engine)
+    if not python.exists():
+        backend = backend_for(request.engine)
+        raise HTTPException(
+            status_code=503,
+            detail=(f"the {backend.venv} venv is not built on this box, so {request.engine} "
+                    f"jobs cannot run. Build it:  bash scripts/make_venvs.sh {backend.venv}"),
+        )
     # Disk is checked here because it will not fix itself; VRAM is checked when
     # the scheduler starts the job, because a busy GPU is what the queue is for.
     try:

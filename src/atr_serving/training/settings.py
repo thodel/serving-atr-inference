@@ -7,16 +7,21 @@ runs in its own venv.
 Both classes use ``extra="ignore"``, which matters because the prefixes overlap —
 the gateway reads ``ATR_TRAIN_URL`` as its ``train_url`` (#35) and this class
 would otherwise see it as an unknown ``url``.
+
+One instance of this service supervises **every** training backend; which
+interpreter and runner module a job gets is looked up per engine in
+:mod:`atr_serving.training.backends`.
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from atr_serving.training.backends import runner_python
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class TrainerSettings(BaseSettings):
@@ -48,8 +53,14 @@ class TrainerSettings(BaseSettings):
 
     # ── executables ───────────────────────────────────────────────────────
     ketos: Path = REPO_ROOT / ".venvs" / "kraken-train" / "bin" / "ketos"
-    #: Interpreter used to spawn the detached runner — this venv's own by default.
-    python: Path = Path(sys.executable)
+    #: Where the per-engine venvs live. Each job is spawned with *its own*
+    #: engine's interpreter (see runner_python) — this service never imports an
+    #: engine package, so it does not matter which venv it happens to run in.
+    venvs_root: Path = REPO_ROOT / ".venvs"
+
+    def runner_python(self, engine: str) -> Path:
+        """Interpreter for ``engine``'s detached runner."""
+        return runner_python(engine, self.venvs_root)
 
     # ── guards (docs/TRAINING_PLAN.md §5) ─────────────────────────────────
     #: PHYSICAL GPU index. GPU 0 is the shared RAG GPU and stays untouched;
@@ -57,7 +68,13 @@ class TrainerSettings(BaseSettings):
     #: is the number preflight queries. The child gets CUDA_VISIBLE_DEVICES=<gpu>,
     #: which makes it cuda:0 inside the process.
     gpu: int = 1
+    #: Headroom a kraken run needs (batch 256 through 3× Lbx256).
     min_free_vram_mb: int = 12000
+    #: A QLoRA fine-tune of an 8B Qwen3-VL is a different order of appetite: ~6 GB
+    #: of 4-bit weights, plus activations for a 4 k-token page sample and paged
+    #: optimizer state. Checked instead of ``min_free_vram_mb`` for vllm jobs, so a
+    #: VLM job queues rather than OOMing on a card that would have fit a kraken run.
+    vlm_min_free_vram_mb: int = 24000
     #: `/` is ~80 % full on asterAIx — never materialize a dataset into the last
     #: of it.
     min_free_disk_gb: int = 50
@@ -67,6 +84,10 @@ class TrainerSettings(BaseSettings):
     poll_interval_s: int = 10
     #: Lines of a stage log kept on a failed job record.
     log_tail_lines: int = 50
+
+    def min_free_vram_for(self, engine: str) -> int:
+        """VRAM a job of this engine must find free before it may start."""
+        return self.vlm_min_free_vram_mb if engine == "vllm" else self.min_free_vram_mb
 
     def env_for_child(self) -> dict[str, str]:
         """Environment overrides for a spawned training process."""

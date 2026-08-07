@@ -1,46 +1,35 @@
-"""CER / WER and ground-truth loading for the eval harness.
+"""Ground-truth loading for the eval harness; CER/WER come from the trainer's.
 
-No external dependencies — a plain Levenshtein over characters (CER) or
-whitespace tokens (WER). Ground truth is read from ``.txt`` or PAGE-XML.
+The metrics themselves live in :mod:`atr_serving.training.textmetrics` and are
+re-exported here. One implementation, so a CER printed by an eval run and a CER
+recorded on a training job are the same number computed the same way — the whole
+point of `eval/run_eval.py` comparing a freshly trained model against the served
+ones. ``score_pairs`` there additionally aggregates corpus-level, which is what
+``ketos test`` reports.
+
+Ground truth is read from ``.txt`` or PAGE-XML.
 """
 
 from __future__ import annotations
 
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Sequence
 
+# eval/ is run from the repo root, where src/ is not automatically importable
+# unless the gateway venv has the package installed (it does, `pip install -e .`).
+# The fallback keeps `python eval/run_eval.py` working from a bare checkout.
+try:
+    from atr_serving.training.textmetrics import cer, levenshtein, score_pairs, wer
+except ModuleNotFoundError:  # pragma: no cover - only without an installed package
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from atr_serving.training.textmetrics import cer, levenshtein, score_pairs, wer
 
-def _levenshtein(a: Sequence, b: Sequence) -> int:
-    """Edit distance between two sequences (O(len(a)*len(b)) time, O(len(b)) space)."""
-    if a == b:
-        return 0
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
-        prev = cur
-    return prev[-1]
+#: Kept under its historical private name — eval code imported it directly.
+_levenshtein = levenshtein
 
-
-def cer(pred: str, ref: str) -> float:
-    """Character error rate = edits / len(ref). Empty ref → 0.0 if pred empty else 1.0."""
-    if not ref:
-        return 0.0 if not pred else 1.0
-    return _levenshtein(pred, ref) / len(ref)
-
-
-def wer(pred: str, ref: str) -> float:
-    """Word error rate over whitespace-split tokens."""
-    ref_tokens = ref.split()
-    if not ref_tokens:
-        return 0.0 if not pred.split() else 1.0
-    return _levenshtein(pred.split(), ref_tokens) / len(ref_tokens)
+__all__ = ["cer", "wer", "levenshtein", "score_pairs",
+           "parse_page_xml", "load_ground_truth", "find_ground_truth"]
 
 
 def _local(tag: str) -> str:

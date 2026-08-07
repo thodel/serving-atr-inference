@@ -27,6 +27,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from atr_serving.config import get_settings  # noqa: E402
 from atr_serving.registry import load_registry  # noqa: E402
+from atr_serving.training.overlay import OVERLAY_FILENAME, load_overlay, merge  # noqa: E402
+
+
+def adapter_of(spec) -> str:
+    """Where this model's LoRA adapter lives.
+
+    ``local_path`` first, so an adapter the training service produced here merges
+    exactly like one pulled from the hub — otherwise a model we trained could
+    never be served, which is the loop docs/VLM_TRAINING.md closes.
+    """
+    return spec.local_path or spec.hf_repo
 
 
 def merge_one(spec, out_dir: Path) -> None:
@@ -34,17 +45,18 @@ def merge_one(spec, out_dir: Path) -> None:
     from peft import PeftModel
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
-    print(f"[{spec.id}] base={spec.base_model} adapter={spec.hf_repo}")
+    adapter = adapter_of(spec)
+    print(f"[{spec.id}] base={spec.base_model} adapter={adapter}")
     print(f"[{spec.id}] loading base (bf16, CPU) …")
     base = AutoModelForImageTextToText.from_pretrained(
         spec.base_model, dtype=torch.bfloat16, low_cpu_mem_usage=True
     )
     print(f"[{spec.id}] applying + merging adapter …")
-    merged = PeftModel.from_pretrained(base, spec.hf_repo).merge_and_unload()
+    merged = PeftModel.from_pretrained(base, adapter).merge_and_unload()
     out_dir.mkdir(parents=True, exist_ok=True)
     merged.save_pretrained(out_dir, safe_serialization=True)
-    # tokenizer/processor from the adapter repo (it carries the chat template + added tokens)
-    AutoProcessor.from_pretrained(spec.hf_repo, trust_remote_code=True).save_pretrained(out_dir)
+    # tokenizer/processor from the adapter (it carries the chat template + added tokens)
+    AutoProcessor.from_pretrained(adapter, trust_remote_code=True).save_pretrained(out_dir)
     print(f"[{spec.id}] DONE -> {out_dir}")
 
 
@@ -57,11 +69,16 @@ def main() -> int:
 
     settings = get_settings()
     reg = load_registry(settings.models_config)
+    # Locally trained adapters are in the gitignored overlay, and they are written
+    # `enabled: false` precisely because they are not servable until merged — so
+    # include_disabled is not a loophole here, it is the whole point.
+    overlay_path = Path(settings.models_config).parent / OVERLAY_FILENAME
+    reg = merge(reg, load_overlay(overlay_path), include_disabled=True)
     lora_specs = [s for s in reg.by_engine("vllm") if s.base_model]
 
     if args.list:
         for s in lora_specs:
-            print(f"{s.id:40s} base={s.base_model}  adapter={s.hf_repo}")
+            print(f"{s.id:40s} base={s.base_model}  adapter={adapter_of(s)}")
         return 0
 
     root = Path(settings.vllm_merged_dir)

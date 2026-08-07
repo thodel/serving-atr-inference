@@ -113,6 +113,32 @@ Trained models are registered **disabled** in the gitignored
 `config/models.local.yaml` until the promotion gate (#36) proves the host can
 serve them, so nothing appears in `/models` on the strength of having been trained.
 
+### Publishing trained models to the HuggingFace Hub
+
+The register stage leaves each model's best-run weights and a `metadata.json`
+under `~/atr-cache/trained/<model_id>/`. `scripts/publish_to_hub.py` pushes those
+directories to `<org>/<model_id>`, generating the model card from that metadata —
+CER/WER, dataset selection, hyperparameters, job id.
+
+It needs `huggingface_hub`, which the gateway venv deliberately does not have, so
+run it from the trainer venv:
+
+```bash
+.venvs/kraken-train/bin/hf auth login
+.venvs/kraken-train/bin/python scripts/publish_to_hub.py --list
+.venvs/kraken-train/bin/python scripts/publish_to_hub.py --dry-run
+.venvs/kraken-train/bin/python scripts/publish_to_hub.py
+```
+
+`--only ID`, `--engine kraken vllm`, `--org`, `--prefix`, `--license` and `--force`
+narrow or adjust the run. Repos are created **private** unless `--public` is
+passed, and no licence is written into the card unless `--license` names one:
+making a model public, and under which terms, is not a decision the script takes.
+A successful push is recorded in the model's `metadata.json`, so a second run is a
+no-op — until that model is retrained, which rewrites the record and republishes.
+A model directory without `metadata.json` is reported and skipped, never uploaded:
+weights whose provenance and error rate cannot be stated do not belong on the hub.
+
 ## Recognition API — page-level & line-level
 
 All recognition endpoints require the `X-API-Key` header and take the page as a
@@ -166,6 +192,30 @@ empty `text` with `lines: 0` means the page genuinely had no detected lines. A
 registered id (see `GET /models`) or a raw Zenodo ref (`10.xxxx/zenodo.NNNN`,
 or a bare record id) is accepted; anything else is a `404`.
 
+## Training
+
+The box also trains. `atr-train` (`:8204`, proxied at `POST /train/jobs`) pulls ground
+truth from [dh-unibe](https://huggingface.co/dh-unibe), runs the job on GPU 1, and
+registers the result in the gitignored overlay registry — **disabled** until something
+has actually served it.
+
+Two backends, one service, one queue (there is one GPU):
+
+| `engine` | what it trains | venv | docs |
+|---|---|---|---|
+| `kraken` | kraken recognition models (`ketos`) | `.venvs/kraken-train` | [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) |
+| `vllm` | QLoRA fine-tunes of Qwen3-VL | `.venvs/vlm-train` | [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md) |
+
+Both share the job envelope, the store, the API, the resource guards and the whole
+`prepare` stage; only `params` and the stage commands differ. The service imports
+neither engine — it spawns each job as a detached child of that engine's interpreter, so
+the two dependency trees never meet.
+
+```bash
+bash scripts/make_venvs.sh vlm-train     # only needed for the vllm backend
+curl -s localhost:8204/health | jq .backends   # which backends this box can run
+```
+
 ## Security
 
 Two VMs on the same private university network, behind the same firewall, no TLS.
@@ -178,9 +228,12 @@ services bind `127.0.0.1`.
 ```
 config/models.yaml          model registry (single source of truth)
 src/atr_serving/            gateway (FastAPI, no ML deps)
+  training/                 training core — pure, testable without a GPU
 engines/                    per-engine services (filled in by issues)
+  kraken_train_svc/         the training service + the kraken backend
+  vlm_train_svc/            the VLM (QLoRA) backend
 deploy/systemd/             unit files
-scripts/                    venv builder, model prefetch
+scripts/                    venv builder, model prefetch, LoRA merge
 eval/                       evaluation harness (ported from os-vlm-tester)
 tests/
 ```

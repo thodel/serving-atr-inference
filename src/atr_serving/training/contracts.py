@@ -5,7 +5,10 @@ follows the same rule as :mod:`atr_serving.contracts`: no yaml, no httpx, no ML.
 
 The envelope is deliberately engine-agnostic (``engine`` + ``dataset`` + ``params``)
 so TrOCR and VLM-LoRA jobs can reuse the store, the API and the prepare stage —
-only ``params`` and the stage commands differ per engine.
+only ``params`` and the stage commands differ per engine. ``vllm`` (QLoRA
+fine-tuning of a Qwen3-VL base) is the second backend to take that route; it
+shares the job store, the state machine, the five stage names and the whole
+prepare stage with kraken.
 """
 
 from __future__ import annotations
@@ -28,13 +31,43 @@ KRAKEN_PLUS_SPEC = (
     "S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]"
 )
 
+# ── the VLM defaults ─────────────────────────────────────────────────────────
+# Qwen3-VL-8B is what this box already *serves* (three fine-tunes of it are in
+# config/models.yaml at 18 GB resident), and what scripts/merge_loras.py knows how
+# to bake an adapter into. Training the model we can serve keeps the loop closed;
+# the 30B-A3B MoE that lassberg/vlm_training targets is selectable but has nowhere
+# to run here — vLLM 0.11 would need the whole card.
+VLM_BASE_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+
+#: Instruction given to the VLM for every training and evaluation example. It is
+#: stored on the trained ModelSpec (``prompt``) so serving replays exactly the
+#: wording the model was tuned on — a different prompt at inference is a silent
+#: distribution shift.
+VLM_PROMPT = "Transcribe the handwritten text in this image exactly as written."
+
+#: Visual-token budget per sample kind, in pixels (the processor divides by 28²
+#: to get visual tokens). Same figures as lassberg/vlm_training's collator: a
+#: line crop needs a few hundred tokens, a full page needs thousands, and feeding
+#: both through one budget either starves the page or wastes the line.
+VLM_PIXEL_BUDGET: dict[str, int] = {"line": 256 * 28 * 28, "page": 2048 * 28 * 28}
+#: Token budget per sample kind (prompt + image + transcription).
+VLM_MAX_SEQ_LEN: dict[str, int] = {"line": 512, "page": 4096}
+
 # A model id doubles as a directory name and a registry id — keep it boring.
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+TrainEngine = Literal["kraken", "vllm"]
 
 JobStatus = Literal[
     "queued", "preparing", "compiling", "training", "testing", "registering",
     "completed", "failed", "cancelled",
 ]
+#: The five stages every backend goes through. ``compile`` is the point where a
+#: backend turns materialized pages into whatever its trainer eats: for kraken
+#: that is ``ketos compile`` → ``.arrow``; for the VLM backend it is line
+#: cropping / page assembly → ``.jsonl``. Deliberately the same name, because it
+#: is the same step in the same state machine — a job's status means the same
+#: thing whichever engine is running.
 JobStage = Literal["prepare", "compile", "train", "test", "register"]
 
 #: Stage → the status a job carries while that stage runs.
@@ -128,18 +161,136 @@ class KrakenTrainParams(BaseModel):
         return self.batch_size * self.accumulate_grad_batches
 
 
+class VlmTrainParams(BaseModel):
+    """Hyperparameters for a QLoRA fine-tune of a Qwen3-VL base.
+
+    Defaults follow ``lassberg/vlm_training`` (the pipeline these numbers were
+    tuned in) except where asterAIx forces a different choice — each such
+    deviation is noted on the field.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    #: ``line`` crops every transcribed ``TextLine`` out of the page by its
+    #: PageXML ``Coords``; ``page`` trains on whole pages with the lines joined by
+    #: newlines. Line is the default because it is what the CER is measured
+    #: against on the serving side for these models, and because a page sample
+    #: costs 8× the visual tokens for one training signal.
+    granularity: Literal["line", "page"] = "line"
+    prompt: str = VLM_PROMPT
+
+    # ── QLoRA ────────────────────────────────────────────────────────────────
+    #: 4-bit NF4 + double quant. False = LoRA on a bf16 base, which does not fit
+    #: an 8B alongside the serving engines on this box.
+    load_in_4bit: bool = True
+    lora_r: int = Field(default=64, ge=1)
+    lora_alpha: int = Field(default=128, ge=1)
+    lora_dropout: float = Field(default=0.05, ge=0.0, lt=1.0)
+    target_modules: list[str] = Field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj",
+                                 "gate_proj", "up_proj", "down_proj"]
+    )
+    #: lassberg trains ``lm_head`` as well, which helps when the ground truth has
+    #: characters the tokenizer rarely saw. It is off here by default: at Qwen3-VL's
+    #: 151 k vocab that single module is ~620 M trainable parameters, whose fp32
+    #: master weights and optimizer state add several GB on a card we share with
+    #: the serving engines. Turn it on for a run that owns the GPU.
+    modules_to_save: list[str] = Field(default_factory=list)
+
+    # ── optimisation ─────────────────────────────────────────────────────────
+    epochs: int = Field(default=3, ge=1)
+    #: Page samples can exceed 4 k tokens, so >1 risks OOM; scale with grad accum.
+    batch_size: int = Field(default=1, ge=1)
+    accumulate_grad_batches: int = Field(default=16, ge=1)
+    lrate: float = Field(default=2e-4, gt=0.0)
+    lr_scheduler: Literal["cosine", "linear", "constant"] = "cosine"
+    warmup_ratio: float = Field(default=0.05, ge=0.0, lt=1.0)
+    weight_decay: float = Field(default=0.0, ge=0.0)
+    max_grad_norm: float = Field(default=1.0, gt=0.0)
+    optim: str = "paged_adamw_8bit"
+    gradient_checkpointing: bool = True
+
+    # ── budgets ──────────────────────────────────────────────────────────────
+    #: None = the granularity's entry in VLM_PIXEL_BUDGET / VLM_MAX_SEQ_LEN.
+    max_pixels: int | None = Field(default=None, ge=28 * 28)
+    max_seq_len: int | None = Field(default=None, ge=32)
+
+    # ── evaluation ───────────────────────────────────────────────────────────
+    #: Generating a transcription per sample is ~1 s; a full validation split of
+    #: 20 k lines would take longer than the training. Capped, and the cap is
+    #: recorded in the report so a CER is never quietly measured on a subset the
+    #: reader did not know about.
+    eval_samples: int = Field(default=200, ge=1)
+    max_new_tokens: int = Field(default=256, ge=1)
+
+    # ── run ──────────────────────────────────────────────────────────────────
+    seed: int = 42
+    workers: int = Field(default=4, ge=0)
+    #: The unit sets CUDA_VISIBLE_DEVICES=1, so physical GPU 1 is cuda:0 here.
+    device: str = "cuda:0"
+    #: Weights & Biases run name; None = reporting off (the box has no wandb key).
+    wandb_run: str | None = None
+
+    @property
+    def effective_batch_size(self) -> int:
+        return self.batch_size * self.accumulate_grad_batches
+
+    def pixel_budget(self) -> int:
+        return self.max_pixels or VLM_PIXEL_BUDGET[self.granularity]
+
+    def sequence_budget(self) -> int:
+        return self.max_seq_len or VLM_MAX_SEQ_LEN[self.granularity]
+
+
+#: Which params model each engine's ``params`` block is parsed as.
+PARAMS_BY_ENGINE: dict[str, type[BaseModel]] = {
+    "kraken": KrakenTrainParams,
+    "vllm": VlmTrainParams,
+}
+
+
 class TrainRequest(BaseModel):
     """A submitted training job."""
 
     model_config = ConfigDict(protected_namespaces=())
 
-    engine: Literal["kraken"] = "kraken"
+    engine: TrainEngine = "kraken"
     model_id: str
     dataset: DatasetSpec
-    #: Registry id or raw Zenodo DOI to fine-tune from. None = train from scratch.
+    #: kraken: registry id or raw Zenodo DOI to fine-tune from, None = from
+    #: scratch. vllm: the HF base checkpoint the LoRA adapts — never None, since
+    #: there is no such thing as training a VLM from scratch here; it defaults to
+    #: :data:`VLM_BASE_MODEL`.
     base_model: str | None = None
-    params: KrakenTrainParams = Field(default_factory=KrakenTrainParams)
+    params: KrakenTrainParams | VlmTrainParams = Field(default_factory=KrakenTrainParams)
     notes: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _params_follow_the_engine(cls, data):
+        """Parse ``params`` as the model belonging to ``engine``.
+
+        Without this, pydantic's union would try each member in turn and a typo in
+        a VLM field could be silently accepted as a valid (all-default) kraken
+        params block — a job that runs the wrong trainer with none of the
+        hyperparameters the caller asked for.
+        """
+        if not isinstance(data, dict):
+            return data
+        engine = data.get("engine", "kraken")
+        model = PARAMS_BY_ENGINE.get(engine)
+        if model is None:
+            return data  # unknown engine: let the Literal produce the error
+        params = data.get("params")
+        if params is None:
+            return {**data, "params": model()}
+        if isinstance(params, dict):
+            return {**data, "params": model(**params)}
+        if not isinstance(params, model):
+            raise ValueError(
+                f"engine {engine!r} takes {model.__name__}, got {type(params).__name__}"
+            )
+        return data
 
     @model_validator(mode="after")
     def _check_model_id(self) -> "TrainRequest":
@@ -148,15 +299,21 @@ class TrainRequest(BaseModel):
                 f"model_id {self.model_id!r} must match {MODEL_ID_RE.pattern} "
                 "(it becomes a directory name and a registry id)"
             )
+        if self.engine == "vllm" and not self.base_model:
+            object.__setattr__(self, "base_model", VLM_BASE_MODEL)
         return self
 
 
 # ── job record ──────────────────────────────────────────────────────────────
 class Metrics(BaseModel):
-    """Parsed from the ``ketos test`` report.
+    """The evaluation result, whichever backend produced it.
 
-    kraken reports *accuracies*; ``cer``/``wer`` here are the error rates derived
-    from them (as fractions, not percent), so a lower number is always better.
+    kraken fills it from the ``ketos test`` report, which states *accuracies*;
+    ``cer``/``wer`` are the error rates derived from them (fractions, not
+    percent), so a lower number is always better. The VLM backend computes the
+    same two directly from generated vs. reference text and leaves kraken's
+    accuracy/edit-op fields empty — ``cer`` is the field both agree on, and the
+    one the job store insists on before a job may complete.
     """
 
     chars: int | None = None
@@ -169,6 +326,10 @@ class Metrics(BaseModel):
     insertions: int | None = None
     deletions: int | None = None
     substitutions: int | None = None
+    #: How many samples the score is over. The VLM backend caps evaluation
+    #: (``VlmTrainParams.eval_samples``), so a CER without this number would hide
+    #: that it was measured on a subset.
+    samples: int | None = None
 
 
 class Progress(BaseModel):
@@ -177,6 +338,11 @@ class Progress(BaseModel):
     val_accuracy: float | None = None
     pages_written: int | None = None
     lines_written: int | None = None
+    #: VLM backend: training examples built in ``compile`` (one per cropped line,
+    #: or one per page at ``granularity: page``). Distinct from ``lines_written``,
+    #: which counts transcribed lines found while materializing — the two differ
+    #: whenever a line is dropped for being unusable as a crop.
+    samples_written: int | None = None
 
 
 class StageRecord(BaseModel):

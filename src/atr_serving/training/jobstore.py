@@ -239,8 +239,14 @@ class JobStore:
         A non-terminal job whose runner process is gone did not finish — it was
         killed (OOM, reboot, ``systemctl restart`` of the wrong thing). Mark it
         failed rather than leaving it "training" forever.
+
+        A ``queued`` job is only reconciled once it has a **pid**: that is what
+        distinguishes "waiting its turn" (nothing to reconcile — it is supposed to
+        sit there) from "spawned, but the runner died before writing its first
+        status". The latter would otherwise stay queued forever while the
+        scheduler counted it as running.
         """
-        if job.is_terminal or job.status == "queued":
+        if job.is_terminal or (job.status == "queued" and job.pid is None):
             return job
         if job.pid is not None and is_alive(job.pid):
             return job

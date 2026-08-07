@@ -160,6 +160,32 @@ Run it from `engines/` with `src` on the path — the same layout the unit uses:
 cd engines && PYTHONPATH=../src ../.venvs/kraken-train/bin/python -m kraken_train_svc.vgsl_preflight
 ```
 
+### 8b. VLM training backend (optional)
+
+`atr-train` supervises a second backend — QLoRA fine-tuning of Qwen3-VL — and needs no
+new unit and no new port for it. It gets its **own** venv, because kraken 7.0.2 and a
+`transformers` new enough for Qwen3-VL cannot share a dependency tree; the service
+imports neither and spawns each job with the right interpreter.
+
+```bash
+PIP_NO_CACHE_DIR=1 bash scripts/make_venvs.sh vlm-train    # ~6 GB, same TMPDIR caveat
+systemctl --user restart atr-train
+curl -s localhost:8204/health | jq .backends               # available: true/false
+```
+
+Until that venv exists, `POST /train/jobs` with `"engine": "vllm"` answers **503** naming
+the command above — kraken jobs are unaffected. Full runbook:
+[`docs/VLM_TRAINING.md`](VLM_TRAINING.md).
+
+> **Upgrading an already-deployed trainer:** this change moved `TrainerSettings`,
+> `preflight` and `prepare` out of `engines/kraken_train_svc/` into
+> `src/atr_serving/training/`. A `git pull --ff-only` is enough — no venv rebuild, since
+> no dependency changed — but stale bytecode from the old module paths can linger:
+>
+> ```bash
+> find engines src -name __pycache__ -prune -exec rm -rf {} + && systemctl --user restart atr-train
+> ```
+
 ### Where training data lives
 
 The root partition is the wrong home for this (it hit 100 % full on 2026-08-06), so

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from kraken_train_svc import preflight
-from kraken_train_svc.preflight import (
+from atr_serving.training import preflight
+from atr_serving.training.preflight import (
     GpuInfo,
     PreflightError,
     check_disk,
@@ -92,7 +92,7 @@ def mounts(tmp_path: Path) -> Path:
 
 
 def test_mount_fstype_longest_prefix_wins(mounts):
-    from kraken_train_svc.preflight import mount_fstype
+    from atr_serving.training.preflight import mount_fstype
 
     assert mount_fstype("/mnt/wbkolleg_dh_1/x/y", mounts) == ("/mnt/wbkolleg_dh_1", "cifs")
     assert mount_fstype("/home/tobias", mounts) == ("/", "ext4")

@@ -22,11 +22,14 @@ from dataclasses import dataclass, field
 __all__ = [
     "PageXMLError",
     "PageStats",
+    "TextLineBox",
     "rewrite_image_filename",
     "image_filename",
     "line_texts",
+    "line_boxes",
     "page_stats",
     "has_transcription",
+    "parse_points",
 ]
 
 
@@ -105,6 +108,108 @@ def line_texts(xml_text: str) -> list[str]:
                 break
         out.append(text)
     return out
+
+
+def parse_points(points: str) -> list[tuple[int, int]]:
+    """``"10,40 200,40 200,80"`` → ``[(10, 40), (200, 40), (200, 80)]``.
+
+    Malformed pairs are skipped rather than raising: a single unparsable vertex in
+    one line of one page is not a reason to lose the page, and the caller checks
+    that enough points survived to form a box.
+    """
+    out: list[tuple[int, int]] = []
+    for pair in (points or "").split():
+        x, _, y = pair.partition(",")
+        try:
+            out.append((int(round(float(x))), int(round(float(y)))))
+        except ValueError:
+            continue
+    return out
+
+
+@dataclass(frozen=True)
+class TextLineBox:
+    """One transcribed ``TextLine`` and the axis-aligned box that contains it."""
+
+    index: int
+    text: str
+    left: int
+    top: int
+    right: int
+    bottom: int
+    line_id: str | None = None
+
+    @property
+    def width(self) -> int:
+        return self.right - self.left
+
+    @property
+    def height(self) -> int:
+        return self.bottom - self.top
+
+    def padded(self, pad: int, width: int | None = None, height: int | None = None) -> "TextLineBox":
+        """Grow the box by ``pad`` px, clamped to the page when its size is known.
+
+        Transkribus polygons hug the ink, and a crop flush against ascenders and
+        descenders is measurably harder to read — for a model and for a human
+        checking the output.
+        """
+        left, top = max(self.left - pad, 0), max(self.top - pad, 0)
+        right = self.right + pad if width is None else min(self.right + pad, width)
+        bottom = self.bottom + pad if height is None else min(self.bottom + pad, height)
+        return TextLineBox(self.index, self.text, left, top, right, bottom, self.line_id)
+
+
+def line_boxes(xml_text: str) -> list[TextLineBox]:
+    """Transcribed lines with their bounding boxes, in document order.
+
+    The box is the extent of the line's ``Coords`` polygon (falling back to its
+    ``Baseline`` when a line has no ``Coords``, which happens in baseline-only
+    exports). Lines without a transcription, without any usable geometry, or with
+    a degenerate box are **omitted** — the caller wants croppable training
+    samples, and a zero-width crop is not one.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise PageXMLError(f"unparsable PageXML: {exc}") from exc
+
+    boxes: list[TextLineBox] = []
+    for index, line in enumerate(_iter_local(root, "TextLine")):
+        text = ""
+        for uni in _iter_local(line, "Unicode"):
+            if uni.text and uni.text.strip():
+                text = uni.text.strip()
+                break
+        if not text:
+            continue
+
+        points: list[tuple[int, int]] = []
+        for name in ("Coords", "Baseline"):
+            for el in _iter_local(line, name):
+                points = parse_points(el.get("points", ""))
+                if points:
+                    break
+            if points:
+                break
+        if len(points) < 2:
+            continue
+
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        left, right = min(xs), max(xs)
+        top, bottom = min(ys), max(ys)
+        if right <= left:
+            continue
+        if bottom <= top:
+            # A baseline is a horizontal polyline with no height of its own. Give
+            # it one rather than dropping the line: half the box width, capped, is
+            # a serviceable x-height band for a crop.
+            top = max(top - min(max((right - left) // 12, 8), 120), 0)
+        if bottom <= top:
+            continue
+        boxes.append(TextLineBox(index, text, left, top, right, bottom, line.get("id")))
+    return boxes
 
 
 @dataclass
