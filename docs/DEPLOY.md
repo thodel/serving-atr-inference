@@ -50,8 +50,11 @@ python -c "import secrets; print('ATR_API_KEY=' + secrets.token_urlsafe(32))" >>
 Set in `.env`:
 - `ATR_API_KEY` — a strong shared secret. **The same value goes on the
   agentic_historian VM** (it sends it as `X-API-Key`).
-- `HF_HOME=/home/tobias/atr-cache/hf` — keep weights off the 80%-full root default
-  and somewhere you can monitor.
+- **Do NOT set `HF_HOME`** (older revisions of this file told you to point it at
+  `~/atr-cache/hf` — that is what put ~26 GB of weights on the root partition that
+  later filled up). On asterAIx `~/.cache/huggingface/hub` is a symlink to
+  `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub`, so the standard path already
+  resolves to the research share and is shared with `lassberg/vlm_training`.
 
 ## 4. Prefetch model weights + merge vLLM LoRA adapters
 
@@ -138,14 +141,15 @@ box**, it would rebuild the serving engines' venvs from ranged requirements:
 bash scripts/make_venvs.sh kraken-train
 ```
 
-It needs ~6 GB free (torch + CUDA wheels). asterAIx has a **single partition** — `/`
-and `/tmp` are the same filesystem — so redirecting `TMPDIR` buys nothing; the only
-lever is free space. Check first, and skip pip's cache so the download is not stored
-twice:
+It needs ~6 GB free (torch + CUDA wheels), and the venv itself has to live on `/`.
+`/tmp` is on that same partition, so redirect pip's scratch to the share and skip its
+cache — both matter when the root partition is tight:
 
 ```bash
 df -h /                                   # 2026-08-06: this hit 100 % full
 pip cache purge                           # ~17 GB of downloaded wheels, safe to drop
+export TMPDIR=/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/tmp
+mkdir -p "$TMPDIR"
 PIP_NO_CACHE_DIR=1 bash scripts/make_venvs.sh kraken-train
 ```
 
@@ -159,24 +163,34 @@ cd engines && PYTHONPATH=../src ../.venvs/kraken-train/bin/python -m kraken_trai
 ### Where training data lives
 
 The root partition is the wrong home for this (it hit 100 % full on 2026-08-06), so
-point the three training paths at the research share in `.env` — see `.env.example`:
+training uses the research share — **the same layout `lassberg/vlm_training` already
+established on this box**, so the two projects share a cache instead of duplicating it:
 
-```
-ATR_TRAIN_HF_DATASETS_ROOT=/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/hf-datasets
-ATR_TRAIN_JOBS_ROOT=/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/jobs
-ATR_TRAIN_TRAINED_ROOT=/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/trained
-```
+| what | path | set by |
+|---|---|---|
+| HF cache (models + datasets) | `~/.cache/huggingface/hub` → symlink → `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub` | nothing — it is the *standard* path |
+| scratch | `…/training_folder/tmp` | `TMPDIR` in `.env` |
+| jobs | `…/training_folder/jobs/<job_id>/` | `ATR_TRAIN_JOBS_ROOT` |
+| trained weights | `…/training_folder/trained/<model_id>/` | `ATR_TRAIN_TRAINED_ROOT` |
 
-With `ATR_TRAIN_HF_DATASETS_ROOT` set, the selected parquet shards are mirrored **once**
-into `hf-datasets/<owner>__<name>/` and reused by every later job — the same dataset id
-always maps to the same directory, so re-running a job costs no download. Leave it unset
-to stream from the hub each time without keeping a copy.
+Two rules that are easy to get wrong:
 
-The share is CIFS (`//resstore.unibe.ch/wbkolleg_dh_1`), which has two consequences:
-`snapshot_download(local_dir=…)` is used so no symlinked blob cache is involved, and the
-compiled `.arrow` datasets are read over the network every epoch. If training turns out
-to be I/O-bound rather than GPU-bound, copy `data/*.arrow` to a local disk and retrain
-from there — the arrow files hold extracted line crops and are far smaller than the pages.
+* **Do not set `HF_HOME`.** The symlink at the standard path is what puts the cache on
+  the share; setting `HF_HOME` overrides it and sends downloads back to the full root
+  partition. (`.env` used to set it — that is fixed, but check yours.) Ground truth is
+  then cached once per dataset as `hub/datasets--<owner>--<name>` and reused by both
+  projects, which is the same "same name = same dataset" check `data_prep.py` makes.
+* **`TMPDIR` must be set in `.env`, not a shell profile** — `dill` reads it at import
+  time, and a systemd service never sources `~/.bashrc`.
+
+Unlike `vlm_training`, which loads whole line-crop datasets, every load here is narrowed
+to the selected projects with `data_files`: this repo's ground truth is page scans, and
+the medieval-scripts repo is ~6.6 TB.
+
+The share is CIFS (`//resstore.unibe.ch/wbkolleg_dh_1`), so the compiled `.arrow`
+datasets are read over the network every epoch. If training turns out to be I/O-bound
+rather than GPU-bound, copy `data/*.arrow` to a local disk and retrain from there — they
+hold extracted line crops and are far smaller than the pages.
 
 Submit a job (see `docs/TRAINING_PLAN.md` §4 for the body); jobs and trained weights
 land under the paths above:

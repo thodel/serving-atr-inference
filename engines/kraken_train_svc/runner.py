@@ -101,7 +101,7 @@ class Pipeline:
         self.store = store
         self.settings = settings
         self.runner = runner or SubprocessRunner()
-        self.source = source or HFPageSource(settings.hf_datasets_root)
+        self.source = source or HFPageSource(settings.cache_datasets)
 
     # ── stage bookkeeping ───────────────────────────────────────────────────
     @contextmanager

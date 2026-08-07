@@ -32,10 +32,11 @@ class TrainerSettings(BaseSettings):
     trained_root: Path = Path.home() / "atr-cache" / "trained"
     #: The gitignored registry overlay trained models are registered in.
     overlay_path: Path = REPO_ROOT / "config" / "models.local.yaml"
-    #: Persistent home for downloaded ground-truth datasets, one directory per
-    #: dataset (``owner__name``), so the same dataset is fetched once and reused.
-    #: Unset = stream from the hub every run without keeping a copy.
-    hf_datasets_root: Path | None = None
+    #: Keep downloaded ground truth in the standard HF cache (whose ``hub/`` is
+    #: symlinked to the research share on asterAIx), so the same dataset is
+    #: fetched once and reused — by us and by lassberg/vlm_training alike.
+    #: False = stream from the hub every run, keeping nothing.
+    cache_datasets: bool = True
 
     # ── executables ───────────────────────────────────────────────────────
     ketos: Path = REPO_ROOT / ".venvs" / "kraken-train" / "bin" / "ketos"

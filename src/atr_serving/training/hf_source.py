@@ -25,8 +25,7 @@ __all__ = [
     "DatasetSelectionError",
     "PageRow",
     "data_files_for",
-    "dataset_dir_name",
-    "local_files_for",
+    "hub_cache_dir",
     "project_glob",
     "page_stem",
     "row_to_page",
@@ -83,42 +82,29 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
     return files
 
 
-def dataset_dir_name(hf_repo: str) -> str:
-    """Directory name for a cached dataset copy.
+def hub_cache_dir(hf_repo: str, hf_home=None):
+    """Where the standard HuggingFace cache keeps this dataset.
 
-    ``owner/name`` → ``owner__name``: one directory per dataset, so **the same
-    dataset always lands in the same place** and a second job reuses it instead of
-    re-fetching. Kept flat (no nested ``owner/`` directory) so a listing of the
-    cache root answers "what do we already have?" at a glance.
+    ``owner/name`` → ``<hf_home>/hub/datasets--owner--name``. This is the layout
+    the hub itself uses, and the one ``lassberg/vlm_training`` checks with
+    ``_repo_cache_dir`` — "same name = same dataset" is answered by the presence
+    of that directory. We follow it rather than inventing a parallel copy: on
+    asterAIx ``~/.cache/huggingface/hub`` is a symlink to
+    ``/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub``, so a dataset another
+    project already pulled is simply there.
     """
-    if not hf_repo or hf_repo.strip() != hf_repo or hf_repo.count("/") > 1:
-        raise DatasetSelectionError(f"not a hub dataset id: {hf_repo!r}")
-    name = hf_repo.replace("/", "__")
-    if _UNSAFE_PATH_RE.search(name) or _GLOB_META_RE.search(name):
-        raise DatasetSelectionError(f"unsafe dataset id: {hf_repo!r}")
-    return name
-
-
-def local_files_for(root, patterns: list[str]) -> list[str]:
-    """Resolve ``data_files`` globs against a local copy of the dataset.
-
-    Returns the matching parquet files, sorted for a deterministic page order.
-    Raises when a pattern matches nothing — a silently empty file list would
-    become "the projects contain no transcriptions" three stages later.
-    """
+    import os
     from pathlib import Path
 
-    root = Path(root)
-    files: list[str] = []
-    for pattern in patterns:
-        matched = sorted(str(p) for p in root.glob(pattern) if p.is_file())
-        if not matched:
-            raise DatasetSelectionError(
-                f"no file matches {pattern!r} under {root} — the local copy is "
-                "incomplete or the project name is wrong"
-            )
-        files.extend(matched)
-    return files
+    if not hf_repo or hf_repo.strip() != hf_repo or hf_repo.count("/") > 1:
+        raise DatasetSelectionError(f"not a hub dataset id: {hf_repo!r}")
+    name = f"datasets--{hf_repo.replace('/', '--')}"
+    if _UNSAFE_PATH_RE.search(name) or _GLOB_META_RE.search(name):
+        raise DatasetSelectionError(f"unsafe dataset id: {hf_repo!r}")
+    root = Path(hf_home) if hf_home else Path(
+        os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")
+    )
+    return root / "hub" / name
 
 
 def page_stem(index: int, filename: str | None) -> str:

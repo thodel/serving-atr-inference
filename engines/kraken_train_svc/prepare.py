@@ -22,11 +22,7 @@ from typing import Callable, Iterable, Iterator, Protocol
 
 from loguru import logger
 
-from atr_serving.training.hf_source import (
-    dataset_dir_name,
-    local_files_for,
-    row_to_page,
-)
+from atr_serving.training.hf_source import hub_cache_dir, row_to_page
 from atr_serving.training.pagexml import page_stats, rewrite_image_filename
 
 from kraken_train_svc.preflight import PreflightError, free_disk_gb
@@ -43,61 +39,47 @@ class PageSource(Protocol):
 
 
 class HFPageSource:
-    """Reads the selected parquet shards, optionally through a persistent copy.
+    """Reads the selected parquet shards through the **standard HF cache**.
 
-    Two modes, both of which only ever touch the **selected** shards — the repo is
-    ~6.6 TB, so a full download is never on the table:
+    Same convention as ``lassberg/vlm_training/src/data_prep.py``: the cache lives
+    at ``~/.cache/huggingface``, whose ``hub/`` is a symlink to
+    ``/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub`` on asterAIx. Nothing is
+    overridden here, so a dataset another project already pulled is reused, and
+    what we pull is reused by them — "same name = same dataset" is answered by
+    ``hub/datasets--owner--name`` existing, exactly as ``_repo_cache_dir`` checks
+    it there.
 
-    * ``cache_root=None`` — stream straight from the hub. Nothing lands on disk;
-      re-running a job re-fetches.
-    * ``cache_root=<dir>`` — mirror the selected shards into
-      ``<cache_root>/<owner>__<name>/`` once and read from there. The same dataset
-      always maps to the same directory, so a second job (or a colleague's) reuses
-      the copy instead of re-downloading. ``snapshot_download(local_dir=…)`` writes
-      files directly, without the symlinked blob cache — which matters because the
-      intended home is a CIFS share, where symlinks are not reliable.
+    What differs from lassberg is unavoidable rather than stylistic: it calls
+    ``load_dataset(repo_id)`` for whole datasets of line crops, while this repo's
+    ground truth is ~6.6 TB of page scans, so every load is narrowed to the
+    selected projects with ``data_files``.
+
+    * ``cache=True`` (default) — download only the selected shards into the
+      standard cache and read from there. A re-run costs no download.
+    * ``cache=False`` — stream from the hub, keeping nothing.
     """
 
-    def __init__(self, cache_root: Path | None = None) -> None:
-        self.cache_root = Path(cache_root) if cache_root else None
-
-    def _ensure_local(self, hf_repo: str, data_files: list[str],
-                      revision: str | None) -> list[str]:
-        from huggingface_hub import snapshot_download  # heavy; trainer venv only
-
-        dest = self.cache_root / dataset_dir_name(hf_repo)
-        logger.info("Syncing {} patterns={} -> {}", hf_repo, data_files, dest)
-        snapshot_download(
-            repo_id=hf_repo,
-            repo_type="dataset",
-            allow_patterns=list(data_files),
-            local_dir=str(dest),
-            revision=revision,
-        )
-        files = local_files_for(dest, data_files)
-        size = sum(Path(f).stat().st_size for f in files)
-        logger.info("{} local shard(s), {:.1f} MB", len(files), size / 1e6)
-        return files
+    def __init__(self, cache: bool = True) -> None:
+        self.cache = cache
 
     def stream(
         self, hf_repo: str, data_files: list[str], revision: str | None = None
     ) -> Iterator[dict]:
         from datasets import load_dataset  # heavy; trainer venv only
 
-        if self.cache_root is not None:
-            files = self._ensure_local(hf_repo, data_files, revision)
-            ds = load_dataset("parquet", data_files={"train": files}, split="train",
-                              streaming=True)
-            return iter(ds)
-
-        logger.info("Streaming {} data_files={} revision={}", hf_repo, data_files, revision)
+        cached = hub_cache_dir(hf_repo)
+        logger.info(
+            "{} {} data_files={} (hub cache {}: {})",
+            "Loading" if self.cache else "Streaming", hf_repo, data_files,
+            cached, "present" if cached.exists() else "not yet fetched",
+        )
         # The dict key is just the split label for the explicit file list; the
         # role (train/eval) is the caller's business.
         ds = load_dataset(
             hf_repo,
             data_files={"train": list(data_files)},
             split="train",
-            streaming=True,
+            streaming=not self.cache,
             revision=revision,
         )
         return iter(ds)
