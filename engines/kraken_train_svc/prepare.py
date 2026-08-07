@@ -75,12 +75,20 @@ class HFPageSource:
         )
         # The dict key is just the split label for the explicit file list; the
         # role (train/eval) is the caller's business.
+        #
+        # verification_mode="no_checks" is REQUIRED, not a shortcut. In
+        # non-streaming mode `datasets` compares what it loaded against the split
+        # sizes declared in the dataset card — for medieval-scripts that is
+        # 548,322 examples / 6.96 TB — and raises NonMatchingSplitsSizesError.
+        # Selecting a subset with data_files can never match those numbers, so the
+        # check is meaningless here and fails every job by construction.
         ds = load_dataset(
             hf_repo,
             data_files={"train": list(data_files)},
             split="train",
             streaming=not self.cache,
             revision=revision,
+            verification_mode="no_checks",
         )
         return iter(ds)
 
