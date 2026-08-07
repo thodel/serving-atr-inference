@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
 import signal
 import subprocess
 from contextlib import asynccontextmanager
@@ -259,7 +260,13 @@ async def delete_job(job_id: str) -> dict:
     # job.json is kept so the record (and its metrics) survives; the registered
     # model lives outside the job directory and is never touched here.
     store.delete(job_id, keep=["job.json"])
-    return {"job_id": job_id, "deleted": True, "record_kept": True}
+    # Checkpoints live on local scratch outside the job dir, so the store cannot
+    # reach them — clean them up here or they leak.
+    ckpt = Path(job.checkpoint_dir) if job.checkpoint_dir else None
+    if ckpt is not None and ckpt.is_dir():
+        shutil.rmtree(ckpt, ignore_errors=True)
+    return {"job_id": job_id, "deleted": True, "record_kept": True,
+            "checkpoints_removed": ckpt is not None}
 
 
 if __name__ == "__main__":  # pragma: no cover

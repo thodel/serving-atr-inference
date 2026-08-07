@@ -209,19 +209,24 @@ class Pipeline:
         return candidates[0]
 
     def _train(self, job: TrainJob, train_bin: Path, val_bin: Path, record: StageRecord) -> Path:
-        paths = self.store.paths(job.id)
         params = job.request.params
         load = self._resolve_base_model(job.request.base_model) if job.request.base_model else None
+        # Local scratch, NOT the job dir on the share: lightning's checkpoint save
+        # is a temp-file + rename, which is cross-device when the target is CIFS.
+        ckpt_dir = self.settings.checkpoint_root / job.id
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        job.checkpoint_dir = str(ckpt_dir)
+        self.store.save(job)
         self._run(job, "train",
                   train_cmd(self.settings.ketos, params=params,
                             training_manifest=train_bin, evaluation_manifest=val_bin,
-                            checkpoint_dir=paths.checkpoints, load=load),
+                            checkpoint_dir=ckpt_dir, load=load),
                   record)
-        weights = find_best_weights(paths.checkpoints, params.weights_format)
+        weights = find_best_weights(ckpt_dir, params.weights_format)
         if weights is None:
             raise StageFailed(
                 f"training exited 0 but wrote no best_*{weights_suffix(params.weights_format)} "
-                f"in {paths.checkpoints} — there is nothing to serve or evaluate"
+                f"in {ckpt_dir} — there is nothing to serve or evaluate"
             )
         logger.info("best weights: {}", weights)
         return weights

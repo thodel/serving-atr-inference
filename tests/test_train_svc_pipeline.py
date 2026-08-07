@@ -115,6 +115,7 @@ def settings(tmp_path: Path) -> TrainerSettings:
         jobs_root=tmp_path / "training",
         trained_root=tmp_path / "trained",
         overlay_path=tmp_path / "models.local.yaml",
+        checkpoint_root=tmp_path / "local-scratch" / "checkpoints",
         ketos=tmp_path / "ketos",
         min_free_disk_gb=0.0,
         gpu=1,
@@ -235,6 +236,22 @@ def test_binary_manifest_points_at_the_arrow_file(store, settings):
     job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
     data = store.paths(job.id).data
     assert data.joinpath("train_bin.lst").read_text().strip() == str(data / "train.arrow")
+
+
+def test_checkpoints_go_to_local_scratch_not_the_job_dir(store, settings):
+    """Lightning saves checkpoints via temp-file + rename, which is cross-device
+    when the job dir is on the CIFS share — and the fsspec datasets<4 pins cannot
+    fall back to a copy."""
+    runner = FakeRunner()
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), runner)
+    expected = settings.checkpoint_root / job.id
+
+    train = runner.commands_named("train")[0]
+    assert train[train.index("--output") + 1] == str(expected)
+    assert job.checkpoint_dir == str(expected)
+    assert (expected / "best_0.9550.mlmodel").exists()
+    # nothing heavy was written into the job directory on the share
+    assert not any(store.paths(job.id).checkpoints.iterdir())
 
 
 def test_child_env_pins_the_training_gpu(store, settings):

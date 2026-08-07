@@ -32,6 +32,14 @@ class TrainerSettings(BaseSettings):
     trained_root: Path = Path.home() / "atr-cache" / "trained"
     #: The gitignored registry overlay trained models are registered in.
     overlay_path: Path = REPO_ROOT / "config" / "models.local.yaml"
+    #: Checkpoints go to LOCAL disk, not the job directory on the share. Lightning
+    #: saves them via a temp file + rename; with the target on CIFS and the temp
+    #: local that rename is cross-device, and the fsspec version datasets<4 pins
+    #: (2025.3.0) cannot fall back to a copy — "Upgrade fsspec to enable
+    #: cross-device local checkpoints". Local is also plainly right: kraken keeps
+    #: the top 10 checkpoints and rewrites them every epoch, which is a lot of
+    #: traffic to push over SMB for files we discard once the best is converted.
+    checkpoint_root: Path = Path.home() / "atr-cache" / "checkpoints"
     #: Keep downloaded ground truth in the standard HF cache (whose ``hub/`` is
     #: symlinked to the research share on asterAIx), so the same dataset is
     #: fetched once and reused — by us and by lassberg/vlm_training alike.

@@ -215,6 +215,10 @@ class TrainJob(BaseModel):
     log_tail: list[str] = Field(default_factory=list)
     #: Populated by the register stage.
     model_path: str | None = None
+    #: Local scratch holding this run's checkpoints (outside the job directory —
+    #: see TrainerSettings.checkpoint_root). Recorded so it is discoverable and
+    #: can be cleaned up with the job.
+    checkpoint_dir: str | None = None
 
     @property
     def is_terminal(self) -> bool:

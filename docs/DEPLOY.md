@@ -171,6 +171,7 @@ established on this box**, so the two projects share a cache instead of duplicat
 | HF cache (models + datasets) | `~/.cache/huggingface/hub` → symlink → `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub` | nothing — it is the *standard* path |
 | scratch | `~/atr-cache/tmp` — **local disk, not the share** | `TMPDIR` in `.env` |
 | jobs | `…/training_folder/jobs/<job_id>/` | `ATR_TRAIN_JOBS_ROOT` |
+| checkpoints | `~/atr-cache/checkpoints/<job_id>/` — **local disk** | `ATR_TRAIN_CHECKPOINT_ROOT` |
 | trained weights | `…/training_folder/trained/<model_id>/` | `ATR_TRAIN_TRAINED_ROOT` |
 
 Two rules that are easy to get wrong:
@@ -195,6 +196,13 @@ Two rules that are easy to get wrong:
   ```
 * **`TMPDIR` must be set in `.env`, not a shell profile** — `dill` reads it at import
   time, and a systemd service never sources `~/.bashrc`.
+* **Checkpoints stay on local disk too**, for the same class of reason: lightning
+  saves them with a temp file + rename, which is cross-device when the target is the
+  CIFS job directory, and the `fsspec` version `datasets<4` pins (2025.3.0) cannot
+  fall back to a copy — it raises *"Upgrade fsspec to enable cross-device local
+  checkpoints"*. kraken also keeps the top 10 checkpoints and rewrites them every
+  epoch, which is a lot of SMB traffic for files discarded once the best one is
+  converted. Only the final weights are copied to the share.
 * **`TMPDIR` must point at LOCAL disk.** With it on the CIFS share, `ketos compile`
   fails ~3 minutes in with `OSError: [Errno 39] Directory not empty` from
   `shutil.rmtree`: SMB does not release directory entries promptly enough for the
