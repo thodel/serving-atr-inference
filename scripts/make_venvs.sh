@@ -40,7 +40,15 @@ wanted() {
 new_venv() {  # new_venv <name>
   echo "== $1 venv =="
   "${PY}" -m venv "${VENVS}/$1"
-  "${VENVS}/$1/bin/pip" install -U pip wheel
+  # Best-effort. `python -m venv` already installs a working pip, so upgrading it
+  # is a convenience — and on asterAIx (2026-08-07) it failed with
+  # "OSError: [Errno 1] Operation not permitted" while UNINSTALLING the bundled
+  # pip 24.0, on ext4 with 662 GB free. Under `set -e` that aborted the whole
+  # build before a single real dependency was installed. Whatever the cause, pip
+  # replacing itself must never be the thing that stops provisioning.
+  if ! "${VENVS}/$1/bin/pip" install -U pip wheel; then
+    echo "  WARNING: could not upgrade pip/wheel in $1; continuing with the bundled pip" >&2
+  fi
 }
 
 mkdir -p "${VENVS}"
