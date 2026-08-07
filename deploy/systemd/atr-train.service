@@ -2,8 +2,8 @@
 # Install: scripts/install_user_units.sh  (copies to ~/.config/systemd/user/)
 #
 # This service SUPERVISES training; it never trains in-process. Each job runs as
-# a detached child (start_new_session), so restarting this unit reconciles the
-# job records instead of killing a run in progress.
+# a detached child, so restarting this unit reconciles the job records instead of
+# killing a run in progress — but that only holds with KillMode=process below.
 [Unit]
 Description=ATR Kraken Training Service
 After=network-online.target
@@ -23,6 +23,19 @@ Environment=PYTHONPATH=%h/Repo/serving-atr-inference/src
 ExecStart=%h/Repo/serving-atr-inference/.venvs/kraken-train/bin/python -m uvicorn kraken_train_svc.app:app --host 127.0.0.1 --port 8204
 Restart=on-failure
 RestartSec=5
+# REQUIRED, and the reason is not obvious. The runner is spawned with
+# start_new_session=True, which gives it its own session and process group — but
+# a process group is NOT a cgroup. systemd's default KillMode=control-group kills
+# every process in the unit's cgroup on stop/restart, and setsid does not leave
+# that cgroup. So `systemctl --user restart atr-train` SIGTERMs the training run
+# too, the runner's signal handler marks the job `cancelled`, and hours of work
+# end with "cancelled on request" that nobody requested.
+#
+# That is exactly what happened on 2026-08-07: a deploy restarted this unit
+# 20 minutes into a compile and killed a run that had already spent 2.5 hours in
+# prepare. KillMode=process sends the signal to the main process only and leaves
+# the detached children running, which is what the whole design assumed.
+KillMode=process
 
 [Install]
 WantedBy=default.target
