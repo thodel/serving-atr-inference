@@ -224,14 +224,38 @@ Four things about how kraken 7.0.2 actually consumes this (read off
    and leave the LR mid-ramp. Hence `-q fixed -N <n>`; if early stopping is wanted
    anyway, pair it with `--min-epochs` ≈ `--epochs`.
 
-**Preflight before the first long run** (cheap, fails in seconds instead of hours):
-build `TorchVGSLModel(spec)` and log the resulting layer shapes and parameter count. Two
-points deserve a look at that output — a kernel height of 255 in `Cr255,1,85,1,1` acts on
-a tensor whose height is already 1 after `S1(1x0)1,3` (i.e. it sees mostly padding), and
-the stride chain `(4,2)·(4,2)·(1,2)` takes height 64 → 4 and width → ⅛ before the
-reshape folds height into depth (4 × 64 = 256 features, matching `Lbx256`). If the
-preflight shows something other than that, the spec is worth a second look before
-burning GPU hours.
+**Preflight measured on the box (2026-08-07)** — `kraken_train_svc.vgsl_preflight`
+builds the network in seconds and prints its shapes. Actual output, which corrects two
+guesses made when this plan was written:
+
+```
+input   (256, 1, 64, 0)
+C_0     (256,   8, 16, 0)     Cr4,2,8,4,2    height 64 → 16
+C_1     (256,  32, 15, 0)     Cr4,2,32,1,1   height 16 → 15
+Mp_2    (256,  32,  3, 0)     Mp4,2,4,2      height 15 → 3
+C_3     (256,  64,  3, 0)
+Mp_4    (256,  64,  3, 0)     Mp1,2,1,2      width /2
+S_5     (256, 192,  1, 1)     S1(1x0)1,3     3 × 64 = 192 features
+L_6..11 (256, 512,  1, 1)     3 × Lbx256 (bidirectional → 512) + dropout
+C_12    (256,  85,  1, 1)     Cr255,1,85,1,1
+parameters: 15,193,853
+```
+
+1. **The reshape yields 192 features, not the 256 predicted here.** Height goes
+   64 → 16 → 15 → 3 (not → 4), so `S1(1x0)1,3` folds 3 × 64. `Lbx256` accepts that
+   happily — the LSTM's input width is whatever precedes it — so this is a correction to
+   the note above, not a problem with the spec.
+2. **The trailing `Cr255,1,85,1,1` builds and runs, and holds 73 % of the model.**
+   255 × 1 × 512 × 85 = **11,097,600** of the 15,193,853 parameters. It sits after
+   `S1(1x0)1,3`, where the height is already 1, so with kraken's `same` padding each
+   output position sees **one real row and 254 rows of zero padding**. Those weights
+   multiply zeros, so they receive no gradient and stay at their initial values: the
+   layer computes exactly what `Cr1,1,85` would compute with 43,520 parameters, at 3.7×
+   the model size and the matching slowdown.
+
+   The network is trainable as specified — this is waste, not breakage — but if the
+   `255` was meant to be `1`, changing it drops the model from 15.2 M to 4.1 M
+   parameters with no change in what it can represent.
 
 **VRAM.** Batch 256 at height 64, width ⁄8 after the strides, through 3× `Lbx256`,
 should sit comfortably in the ~35 GB free on GPU 1 — but kraken pads each batch to its
