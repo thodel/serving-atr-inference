@@ -19,7 +19,12 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["PreflightError", "GpuInfo", "free_disk_gb", "query_gpus", "check_disk", "check_vram"]
+__all__ = ["PreflightError", "GpuInfo", "free_disk_gb", "query_gpus", "check_disk",
+           "check_vram", "check_tmpdir", "mount_fstype", "NETWORK_FS"]
+
+#: Filesystems where POSIX delete semantics do not hold well enough for the
+#: temp-directory churn that ketos/lightning/datasets do.
+NETWORK_FS = frozenset({"cifs", "smb3", "smbfs", "nfs", "nfs4", "fuse.sshfs", "9p", "afs"})
 
 
 class PreflightError(RuntimeError):
@@ -100,3 +105,46 @@ def check_vram(gpu: int, min_free_mb: int, gpus: list[GpuInfo] | None = None) ->
             "is resident — check the gateway's vLLM residency (/health) before training."
         )
     return info
+
+
+def mount_fstype(path: str | Path, mounts_file: str | Path = "/proc/mounts") -> tuple[str, str] | None:
+    """(mountpoint, fstype) for the filesystem holding ``path``, or None.
+
+    Longest-prefix match over /proc/mounts, which is how the kernel resolves it.
+    """
+    try:
+        lines = Path(mounts_file).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    target = Path(path).expanduser().resolve()
+    best: tuple[str, str] | None = None
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mountpoint = parts[1].replace("\\040", " ")  # /proc/mounts escapes spaces
+        fstype = parts[2]
+        mp = Path(mountpoint)
+        if target == mp or mp in target.parents:
+            if best is None or len(mountpoint) > len(best[0]):
+                best = (mountpoint, fstype)
+    return best
+
+
+def check_tmpdir(path: str | Path, mounts_file: str | Path = "/proc/mounts") -> None:
+    """Refuse a temp directory on a network filesystem.
+
+    Found the hard way: with TMPDIR on the CIFS research share, ``ketos compile``
+    died three minutes in with ``OSError: [Errno 39] Directory not empty`` from
+    ``shutil.rmtree`` — SMB does not release directory entries promptly enough for
+    the create/delete churn of temporary directories. Local scratch is also simply
+    faster. Failing here turns a confusing mid-stage crash into an immediate,
+    explicable rejection.
+    """
+    hit = mount_fstype(path, mounts_file)
+    if hit and hit[1] in NETWORK_FS:
+        raise PreflightError(
+            f"TMPDIR {path} is on a {hit[1]} filesystem ({hit[0]}). Temporary "
+            "directories there fail to clean up (ENOTEMPTY in shutil.rmtree during "
+            "ketos compile). Point TMPDIR at local disk in .env."
+        )

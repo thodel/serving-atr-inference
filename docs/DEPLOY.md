@@ -169,7 +169,7 @@ established on this box**, so the two projects share a cache instead of duplicat
 | what | path | set by |
 |---|---|---|
 | HF cache (models + datasets) | `~/.cache/huggingface/hub` → symlink → `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub` | nothing — it is the *standard* path |
-| scratch | `…/training_folder/tmp` | `TMPDIR` in `.env` |
+| scratch | `~/atr-cache/tmp` — **local disk, not the share** | `TMPDIR` in `.env` |
 | jobs | `…/training_folder/jobs/<job_id>/` | `ATR_TRAIN_JOBS_ROOT` |
 | trained weights | `…/training_folder/trained/<model_id>/` | `ATR_TRAIN_TRAINED_ROOT` |
 
@@ -195,6 +195,13 @@ Two rules that are easy to get wrong:
   ```
 * **`TMPDIR` must be set in `.env`, not a shell profile** — `dill` reads it at import
   time, and a systemd service never sources `~/.bashrc`.
+* **`TMPDIR` must point at LOCAL disk.** With it on the CIFS share, `ketos compile`
+  fails ~3 minutes in with `OSError: [Errno 39] Directory not empty` from
+  `shutil.rmtree`: SMB does not release directory entries promptly enough for the
+  create/delete churn of temporary directories. `vlm_training`'s README points TMPDIR
+  at the share — that advice dates from when `/` was full, and it will hit the same
+  error. The trainer now rejects a job whose TMPDIR is on a network filesystem
+  (`check_tmpdir`) rather than failing mid-stage.
 
 Unlike `vlm_training`, which loads whole line-crop datasets, every load here is narrowed
 to the selected projects with `data_files`: this repo's ground truth is page scans, and

@@ -33,7 +33,13 @@ from loguru import logger
 from atr_serving.training.contracts import TrainJob, TrainRequest
 from atr_serving.training.jobstore import JobStore, JobStoreError
 
-from kraken_train_svc.preflight import PreflightError, check_disk, check_vram, query_gpus
+from kraken_train_svc.preflight import (
+    PreflightError,
+    check_disk,
+    check_tmpdir,
+    check_vram,
+    query_gpus,
+)
 from kraken_train_svc.runner import tail
 from kraken_train_svc.settings import TrainerSettings, get_settings
 
@@ -181,6 +187,11 @@ async def submit(request: TrainRequest) -> dict:
         check_disk(settings.jobs_root, settings.min_free_disk_gb)
     except PreflightError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
+    # A network TMPDIR breaks temp-dir cleanup mid-compile; catch it at submit.
+    try:
+        check_tmpdir(os.environ.get("TMPDIR", "/tmp"))
+    except PreflightError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     job = store.create(request)
     logger.info("queued job {} for model {}", job.id, request.model_id)

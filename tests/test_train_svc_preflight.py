@@ -9,6 +9,7 @@ from kraken_train_svc.preflight import (
     GpuInfo,
     PreflightError,
     check_disk,
+    check_tmpdir,
     check_vram,
     free_disk_gb,
     query_gpus,
@@ -72,3 +73,42 @@ def test_check_disk_refuses_when_the_box_is_full(tmp_path: Path):
     check_disk(tmp_path, 0.0)  # passes
     with pytest.raises(PreflightError, match="GB free"):
         check_disk(tmp_path, 10**9)
+
+
+# ── TMPDIR must be local (a CIFS TMPDIR broke ketos compile) ────────────────
+MOUNTS = """\
+/dev/nvme0n1p2 / ext4 rw,relatime 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+//resstore.unibe.ch/wbkolleg_dh_1 /mnt/wbkolleg_dh_1 cifs rw,relatime 0 0
+tmpfs /run tmpfs rw,nosuid,nodev 0 0
+"""
+
+
+@pytest.fixture
+def mounts(tmp_path: Path) -> Path:
+    f = tmp_path / "mounts"
+    f.write_text(MOUNTS, encoding="utf-8")
+    return f
+
+
+def test_mount_fstype_longest_prefix_wins(mounts):
+    from kraken_train_svc.preflight import mount_fstype
+
+    assert mount_fstype("/mnt/wbkolleg_dh_1/x/y", mounts) == ("/mnt/wbkolleg_dh_1", "cifs")
+    assert mount_fstype("/home/tobias", mounts) == ("/", "ext4")
+
+
+def test_check_tmpdir_rejects_the_research_share(mounts):
+    """ketos compile died with ENOTEMPTY in shutil.rmtree with TMPDIR here."""
+    with pytest.raises(PreflightError, match="cifs"):
+        check_tmpdir("/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/tmp", mounts)
+
+
+def test_check_tmpdir_accepts_local_disk(mounts):
+    check_tmpdir("/home/tobias/atr-cache/tmp", mounts)
+    check_tmpdir("/tmp", mounts)
+
+
+def test_check_tmpdir_is_silent_without_proc_mounts(tmp_path: Path):
+    """Not Linux, or /proc unavailable — do not invent a failure."""
+    check_tmpdir("/anything", tmp_path / "nope")
