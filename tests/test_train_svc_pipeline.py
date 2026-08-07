@@ -333,6 +333,22 @@ def test_register_copies_weights_and_writes_metadata(store, settings):
     assert '"cer"' in meta
 
 
+def test_register_does_not_copy_file_metadata(store, settings, monkeypatch):
+    """copy2/copy replicate mode+times; on the CIFS share that is EPERM for a
+    non-owner, which failed a run that had already trained and evaluated."""
+    import shutil as _shutil
+
+    def forbidden(*a, **k):  # pragma: no cover - only runs if the guard fails
+        raise AssertionError("register must use copyfile, not copy2/copy")
+
+    monkeypatch.setattr(_shutil, "copy2", forbidden)
+    monkeypatch.setattr(_shutil, "copy", forbidden)
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    assert job.status == "completed", job.error
+    weights = settings.trained_root / "kraken-thun-missiven-v1" / "kraken-thun-missiven-v1.mlmodel"
+    assert weights.read_bytes() == b"WEIGHTS"
+
+
 def test_registered_model_is_disabled_until_promoted(store, settings):
     """Registering is not evidence the gateway can serve it (#36 promotes)."""
     run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())

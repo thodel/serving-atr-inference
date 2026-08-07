@@ -259,7 +259,11 @@ class Pipeline:
         dest_dir = self.settings.trained_root / model_id
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{model_id}{weights.suffix}"
-        shutil.copy2(weights, dest)
+        # copyfile, NOT copy2/copy: those also replicate mode and timestamps, and
+        # on the CIFS share (files owned by root:research) chmod/utime by a
+        # non-owner fails with EPERM — "PermissionError: [Errno 1] Operation not
+        # permitted" after a successful training run. Only the bytes matter here.
+        shutil.copyfile(weights, dest)
 
         (dest_dir / "metadata.json").write_text(
             json.dumps(
