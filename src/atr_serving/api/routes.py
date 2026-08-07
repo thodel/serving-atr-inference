@@ -96,7 +96,8 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
 async def health(request: Request) -> HealthResponse:
     registry = _registry(request)
     settings = _settings(request)
-    engines = [EngineStatus(name=n, url=u) for n, u in settings.engine_urls().items()]
+    # service_urls() = recognition engines + the trainer (:8204, #35)
+    engines = [EngineStatus(name=n, url=u) for n, u in settings.service_urls().items()]
     return HealthResponse(
         status="ok",
         version=__version__,

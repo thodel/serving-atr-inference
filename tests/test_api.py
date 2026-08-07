@@ -17,7 +17,9 @@ def test_health_is_public(client: TestClient):
     body = resp.json()
     assert body["status"] == "ok"
     assert body["model_count"] >= 10
-    assert {e["name"] for e in body["engines"]} == {"kraken", "trocr", "party"}
+    # the trainer (:8204) joins the recognition engines here (#35) — it is a
+    # service the gateway fronts, even though it is not a recognition engine
+    assert {e["name"] for e in body["engines"]} == {"kraken", "trocr", "party", "train"}
 
 
 def test_models_requires_key(client: TestClient):

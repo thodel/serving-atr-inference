@@ -45,11 +45,25 @@ class Settings(BaseSettings):
     kraken_url: str = "http://127.0.0.1:8201"
     trocr_url: str = "http://127.0.0.1:8202"
     party_url: str = "http://127.0.0.1:8203"
+    # The training service (#34). Not a recognition engine — it is reached only by
+    # the /train/* proxy (#35), which is the ONLY way in: atr-train binds
+    # 127.0.0.1 and the ufw rule opens :8200 alone to the client host.
+    train_url: str = "http://127.0.0.1:8204"
     # vLLM instances are dynamic (one per resident VLM); discovered via the
     # ModelManager in Phase 3, not statically configured here.
 
     def engine_urls(self) -> dict[str, str]:
+        """Recognition engines only — ``get_engine_client`` indexes this."""
         return {"kraken": self.kraken_url, "trocr": self.trocr_url, "party": self.party_url}
+
+    def service_urls(self) -> dict[str, str]:
+        """Everything /health reports, recognition engines plus the trainer.
+
+        Kept separate from :meth:`engine_urls` on purpose: that mapping is indexed
+        by ``ENGINE_IMAGE_FIELD`` for multipart recognition calls, and the trainer
+        has no image field. Merging them would put a KeyError one typo away.
+        """
+        return {**self.engine_urls(), "train": self.train_url}
 
     # ── vLLM (managed as subprocesses by the ModelManager, not systemd) ───────
     # asterAIx: GPU 1 only (GPU 0 is the shared RAG GPU); one 8B resident at a time.

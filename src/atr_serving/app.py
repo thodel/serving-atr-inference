@@ -9,6 +9,7 @@ from loguru import logger
 
 from atr_serving import __version__
 from atr_serving.api.routes import router
+from atr_serving.api.train_routes import router as train_router
 from atr_serving.config import DEFAULT_INSECURE_KEY, Settings, get_settings
 from atr_serving.manager import ModelManager
 from atr_serving.registry import Registry, load_registry
@@ -50,6 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.registry = registry
     app.state.model_manager = manager
     app.include_router(router)
+    app.include_router(train_router)
     return app
 
 

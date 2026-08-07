@@ -75,6 +75,44 @@ bash scripts/probe_host.sh | tee asteraix-probe.txt
 Provisioning is documented in [`docs/DEPLOY.md`](docs/DEPLOY.md) (clone → venvs →
 `.env` → prefetch → `systemctl --user` units → ufw). Final vLLM pins land with #5.
 
+## Training API (#35)
+
+Training runs on this box too — see [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md).
+The gateway proxies `/train/*` to the training service on `:8204`; that service binds
+`127.0.0.1` and the `ufw` rule opens only `:8200` to the client host, so **this proxy
+is the only way in**. Same `X-API-Key` as recognition.
+
+| Endpoint | Returns | Use |
+|---|---|---|
+| `POST /train/jobs` | `202 {job_id, status, queued_reason}` | Submit a run. |
+| `GET /train/jobs` | `{jobs: [...]}` | Recent runs, newest first. |
+| `GET /train/jobs/{id}` | full job record | Status, stage, progress, metrics, error. |
+| `GET /train/jobs/{id}/log?stage=train&lines=200` | `{lines: [...]}` | Tail one stage's log. |
+| `POST /train/jobs/{id}/cancel` | job record | SIGTERM the run's process group. |
+| `DELETE /train/jobs/{id}` | `{deleted: true}` | Drop artifacts; the record and the model survive. |
+
+```
+curl -H "X-API-Key: $ATR_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model_id":"kraken-thun-v1",
+       "dataset":{"hf_repo":"dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",
+                  "train_projects":["GT_Thun-Training_(TEST-DEMO)"],
+                  "eval_projects":["GT_Thun-Test_(DEMO_TEST)"]}}' \
+  https://<gateway>/train/jobs
+```
+
+Training is **fire-and-forget**: the run is a detached process on the box and
+outlives both this request and a restart of either service. Poll the job record.
+
+Errors keep the trainer's status and detail, because they name their own fix —
+`507` a full filesystem, `500` a `TMPDIR` on a network mount, `409` an
+already-terminal job, `400` an engine with no backend (only `kraken` today). A
+gateway that cannot reach the trainer is a `502` naming the URL, never a job id
+for a job that was not created.
+
+Trained models are registered **disabled** in the gitignored
+`config/models.local.yaml` until the promotion gate (#36) proves the host can
+serve them, so nothing appears in `/models` on the strength of having been trained.
+
 ## Recognition API — page-level & line-level
 
 All recognition endpoints require the `X-API-Key` header and take the page as a

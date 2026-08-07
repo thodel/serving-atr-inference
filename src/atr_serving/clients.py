@@ -208,3 +208,70 @@ class VllmClient:
 def get_vllm_client(port: int) -> VllmClient:
     """Factory used by routes; a seam for tests to monkeypatch."""
     return VllmClient(port)
+
+
+# ── training service (#34/#35) ──────────────────────────────────────────────
+class TrainerError(EngineError):
+    """The trainer answered with an error status.
+
+    Carries the status and body so the proxy can pass both through unchanged.
+    The trainer's errors are *actionable* — 507 names a full filesystem, 500 a
+    network TMPDIR, 409 an already-terminal job — and collapsing them into a
+    generic 502 would throw away the part that tells the caller what to fix.
+    """
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(f"trainer error {status_code}: {detail}")
+        self.status_code = status_code
+        self.detail = detail
+
+
+class TrainerClient:
+    """Async client for the training service. Used only by the /train/* proxy."""
+
+    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    async def _request(self, method: str, path: str, **kwargs) -> Any:
+        url = f"{self.base_url}{path}"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.request(method, url, **kwargs)
+        except httpx.RequestError as exc:
+            logger.error("trainer unreachable at {}: {}", url, exc)
+            raise EngineError(f"training service unreachable at {url}: {exc}") from exc
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:  # noqa: BLE001 — a non-JSON error body is still a body
+                detail = resp.text
+            raise TrainerError(resp.status_code, str(detail))
+        return resp.json()
+
+    async def submit(self, body: dict[str, Any]) -> dict:
+        return await self._request("POST", "/jobs", json=body)
+
+    async def list_jobs(self) -> dict:
+        return await self._request("GET", "/jobs")
+
+    async def get(self, job_id: str) -> dict:
+        return await self._request("GET", f"/jobs/{job_id}")
+
+    async def log(self, job_id: str, stage: str, lines: int) -> dict:
+        return await self._request("GET", f"/jobs/{job_id}/log",
+                                   params={"stage": stage, "lines": lines})
+
+    async def cancel(self, job_id: str) -> dict:
+        return await self._request("POST", f"/jobs/{job_id}/cancel")
+
+    async def delete(self, job_id: str) -> dict:
+        return await self._request("DELETE", f"/jobs/{job_id}")
+
+    async def health(self) -> dict:
+        return await self._request("GET", "/health")
+
+
+def get_trainer_client(settings) -> TrainerClient:
+    """Factory used by routes; a seam for tests to monkeypatch."""
+    return TrainerClient(settings.train_url)
