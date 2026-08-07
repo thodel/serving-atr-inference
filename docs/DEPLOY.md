@@ -180,6 +180,19 @@ Two rules that are easy to get wrong:
   partition. (`.env` used to set it — that is fixed, but check yours.) Ground truth is
   then cached once per dataset as `hub/datasets--<owner>--<name>` and reused by both
   projects, which is the same "same name = same dataset" check `data_prep.py` makes.
+  Verified 2026-08-07: `datasets--dh-unibe--image-text_medieval-scripts_xiv-xv-xvi`
+  is already there (304 GB), pulled by `vlm_training`.
+* **`hub/` is not the only cache directory.** Under `~/.cache/huggingface` there are
+  also `datasets/` (the Arrow cache `load_dataset` builds in non-streaming mode) and
+  `xet/`. On asterAIx only `hub` was symlinked, so those two still land on the full
+  root partition. Symlink them the same way, or the first non-streaming load will
+  fill `/` again:
+
+  ```bash
+  mkdir -p /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache
+  mv ~/.cache/huggingface/datasets/* /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache/ 2>/dev/null
+  rmdir ~/.cache/huggingface/datasets && ln -s /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache ~/.cache/huggingface/datasets
+  ```
 * **`TMPDIR` must be set in `.env`, not a shell profile** — `dill` reads it at import
   time, and a systemd service never sources `~/.bashrc`.
 
