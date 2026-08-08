@@ -12,7 +12,15 @@ Pillow>=10.0
 
 # Qwen3-VL support landed in transformers 4.57. Below that, AutoProcessor raises
 # "Unrecognized model ... qwen3_vl" and the run dies before the first batch.
-transformers>=4.57
+#
+# The <5 cap is not caution for its own sake: train_qlora.py and evaluate_qlora.py
+# are written against the 4.x Trainer / TrainingArguments / AutoProcessor surface,
+# and an unbounded requirement resolved to transformers 5.14.1 on the first real
+# build (asterAIx, 2026-08-07). That is the same trap engines/kraken_train_svc
+# documents for kraken: a major version arrives silently and the code that drives
+# it is suddenly writing calls the library no longer has. Lift the cap only
+# together with a run that actually trains on 5.x.
+transformers>=4.57,<5
 # The vision tower's video/image processors are torchvision-backed; without it
 # Qwen3VLVideoProcessor refuses to instantiate.
 torchvision==0.23.0
@@ -29,6 +37,8 @@ bitsandbytes>=0.45.0   # 4-bit NF4 + paged 8-bit Adam
 # download. Same upper bound as kraken-train: datasets 4.x/5.x tighten the
 # dill/multiprocess/pyarrow ranges and send pip into minutes of backtracking.
 datasets>=3.0,<4
-huggingface_hub>=0.25
+# Capped for the same reason as transformers: hub 1.x is a major release, and
+# datasets 3.x is the thing that has to keep working against it.
+huggingface_hub>=0.25,<2
 # Optional: only imported when a job sets params.wandb_run.
 wandb
