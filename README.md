@@ -24,9 +24,17 @@ units (`deploy/systemd/`). What is done, and what the open issues still cover:
 |---|---|
 | gateway `:8200` — registry (49 models), `/health`, `/models`, recognition routing | done |
 | engine services — kraken, TrOCR, party, vLLM (`engines/`) | done; **#30** open (3 of 7 engines 500 in production), **#32** open (party cannot load safetensors) |
-| training service `:8204` — kraken (`ketos`) and VLM (QLoRA) backends | done (M1–M3, #33–#35) |
+| training service `:8204` — one supervisor, one queue, one GPU guard | done (M1–M3, #33–#35) |
+| kraken backend (`ketos`) | done; has produced real models |
+| VLM backend (QLoRA on Qwen3-VL) | done, and **verified on GPU end to end** (#47) — see the measured run below |
 | serving what we trained | partly — `local_path` specs and the disabled-by-default overlay are in; the promotion gate is **#36** |
 | publishing trained models to HuggingFace | done (`scripts/publish_to_hub.py`) |
+
+First full VLM run (2026-08-08, Thun demo pair, `max_pages: 40`, 1 epoch): 52 pages →
+783 line crops, 38 steps in 5 min, **CER 0.466** against **1.837** for the un-adapted
+base. Most of that gap is the model learning to stop at the line rather than learning to
+read — see [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md), which states the caveat
+alongside the number.
 
 Open work is grouped into three epics: **#49** — the training subsystem from "it runs"
 to "it is trustworthy" (promotion gate #36, per-epoch metrics #38, dataset preflight
@@ -75,29 +83,68 @@ bash scripts/probe_host.sh | tee asteraix-probe.txt
   **child subprocesses** rather than root systemd units. Rootless **podman** is the
   container fallback (not docker).
 - **`:8000/:8080/:9000/:11434/:80` are taken** (incl. Ollama + nginx) → gateway on
-  **`:8200`**, engines `:8201–:8203`, vLLM `:8210+`.
-- `/` is **80 % full (~356 G free)** → set `HF_HOME` and monitor.
+  **`:8200`**, engines `:8201–:8203`, vLLM `:8210+`, training `:8204`.
+- `/` filled to **100 %** on 2026-08-06 and was cleared to ~660 G free by moving the
+  HuggingFace cache to the research share. **Do not set `HF_HOME`** —
+  `~/.cache/huggingface/hub` is a symlink to
+  `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub`, so the *standard* path already
+  resolves there and the cache is shared. Setting `HF_HOME` re-routes downloads to a
+  second location and re-downloads models that are already on disk (this cost 16 GB on
+  2026-08-08 — **#48**).
+- **The share is CIFS**, which refuses `chmod`, `utime` and symlinks to a non-owner.
+  That is not cosmetic: it is why the trainer copies weights with `copyfile` rather than
+  `copy2`, why `TMPDIR` must be on local disk, and why `pip` cannot *replace* an
+  installed package when `TMPDIR` points at the share (installs succeed, upgrades fail
+  with `EPERM`, and the venv silently keeps the old version).
 
 ### Setup principles
 
-- One venv per engine family (`.venvs/{gateway,vllm,kraken,trocr,party}`, all Python
-  3.12), each pinning its own cu12x `torch`. The gateway venv has **no** ML deps —
-  this isolation avoids the `torch`/`transformers` conflicts documented in
-  `os-vlm-tester`'s README.
+- One venv per engine family
+  (`.venvs/{gateway,vllm,kraken,trocr,party,kraken-train,vlm-train}`, all Python 3.12),
+  each pinning its own cu12x `torch`. The gateway venv has **no** ML deps — this
+  isolation avoids the `torch`/`transformers` conflicts documented in `os-vlm-tester`'s
+  README.
 - vLLM: published wheel (pulls matching `torch`+CUDA), version pinned in
   `engines/vllm/requirements.txt`.
 - kraken / trocr / party: separate venvs, separate pins; small models on GPU 1.
+- **Pin both ends of every ML requirement.** `transformers>=4.57` in the VLM training
+  venv resolved to **5.14.1** on its first real build — a major version the training
+  script was not written against. Requirement files say which API surface their code
+  targets; keep it that way.
+- `scripts/make_venvs.sh` takes targets (`bash scripts/make_venvs.sh vlm-train`).
+  **Never re-run it bare on a live box** — several requirement files are ranges, so a
+  blanket run silently upgrades a serving engine under a running service.
 
 Provisioning is documented in [`docs/DEPLOY.md`](docs/DEPLOY.md) (clone → venvs →
 `.env` → prefetch → `systemctl --user` units → ufw).
 
 ## Training API
 
-Training runs on this box too — design in [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md),
-the VLM backend in [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md). Two backends share the
-job store, the state machine, the five stages and the whole dataset pipeline: **kraken**
-(`ketos`, recognition models from scratch or fine-tuned from Zenodo) and **vllm** (QLoRA
-fine-tunes of a Qwen3-VL base). Only `params` and the per-stage commands differ.
+`atr-train` (`:8204`) pulls ground truth from [dh-unibe](https://huggingface.co/dh-unibe),
+runs the job on GPU 1, and registers the result in the gitignored overlay registry —
+**disabled** until something has actually served it.
+
+| `engine` | what it trains | venv | docs |
+|---|---|---|---|
+| `kraken` | recognition models via `ketos`, from scratch or fine-tuned from Zenodo | `.venvs/kraken-train` | [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) |
+| `vllm` | QLoRA fine-tunes of a Qwen3-VL base | `.venvs/vlm-train` | [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md) |
+| `trocr` | *planned* — epic **#41** | | |
+
+**One service, one queue, one GPU guard**, because there is one GPU: two services would
+each enforce `max_concurrent=1` against their own job list and start two runs into the
+same card. **One venv per backend**, because kraken 7.0.2 and a `transformers` new enough
+for Qwen3-VL cannot share a dependency tree. The service resolves that by importing
+neither: it spawns each job as a detached child of *that engine's* interpreter
+(`src/atr_serving/training/backends.py`).
+
+Both backends share the job envelope, the store, the state machine, the five stages, the
+resource guards and the whole `prepare` stage. A backend supplies four stage bodies and a
+params model — nothing else.
+
+```bash
+bash scripts/make_venvs.sh vlm-train            # only needed for the vllm backend
+curl -s localhost:8204/health | jq .backends    # which backends this box can actually run
+```
 
 The gateway proxies `/train/*` to the training service on `:8204`; that service binds
 `127.0.0.1` and the `ufw` rule opens only `:8200` to the client host, so **this proxy
@@ -228,30 +275,6 @@ empty `text` with `lines: 0` means the page genuinely had no detected lines. A
 registered id (see `GET /models`) or a raw Zenodo ref (`10.xxxx/zenodo.NNNN`,
 or a bare record id) is accepted; anything else is a `404`.
 
-## Training
-
-The box also trains. `atr-train` (`:8204`, proxied at `POST /train/jobs`) pulls ground
-truth from [dh-unibe](https://huggingface.co/dh-unibe), runs the job on GPU 1, and
-registers the result in the gitignored overlay registry — **disabled** until something
-has actually served it.
-
-Two backends, one service, one queue (there is one GPU):
-
-| `engine` | what it trains | venv | docs |
-|---|---|---|---|
-| `kraken` | kraken recognition models (`ketos`) | `.venvs/kraken-train` | [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) |
-| `vllm` | QLoRA fine-tunes of Qwen3-VL | `.venvs/vlm-train` | [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md) |
-
-Both share the job envelope, the store, the API, the resource guards and the whole
-`prepare` stage; only `params` and the stage commands differ. The service imports
-neither engine — it spawns each job as a detached child of that engine's interpreter, so
-the two dependency trees never meet.
-
-```bash
-bash scripts/make_venvs.sh vlm-train     # only needed for the vllm backend
-curl -s localhost:8204/health | jq .backends   # which backends this box can run
-```
-
 ## Security
 
 Two VMs on the same private university network, behind the same firewall, no TLS.
@@ -263,13 +286,18 @@ services bind `127.0.0.1`.
 
 ```
 config/models.yaml          model registry (single source of truth)
+config/models.local.yaml    gitignored overlay — models trained on this box
 src/atr_serving/            gateway (FastAPI, no ML deps)
-  training/                 training core — pure, testable without a GPU
-engines/                    per-engine services (filled in by issues)
-  kraken_train_svc/         the training service + the kraken backend
+  training/                 training core — pure, testable in the repo venv, no GPU
+    runner_base.py            the stage lifecycle + the shared prepare stage
+    backends.py               engine → runner module + venv
+    contracts.py              the engine-agnostic job envelope
+engines/                    per-engine services, one venv each
+  kraken_svc/ trocr_svc/ party_svc/ vllm/     recognition
+  kraken_train_svc/         the training service (:8204) + the kraken backend
   vlm_train_svc/            the VLM (QLoRA) backend
 deploy/systemd/             unit files
-scripts/                    venv builder, model prefetch, LoRA merge
+scripts/                    venv builder, model prefetch, LoRA merge, hub publishing
 eval/                       evaluation harness (ported from os-vlm-tester)
-tests/
+tests/                      443 tests; none need a GPU or the network
 ```
