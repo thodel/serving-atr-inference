@@ -156,3 +156,13 @@ def test_a_symlink_into_the_share_is_still_the_share(mounts, tmp_path: Path, mon
     link.symlink_to("/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache")
     with pytest.raises(PreflightError, match="cifs"):
         check_datasets_cache(link, mounts)
+
+
+def test_streaming_is_the_default(tmp_path: Path):
+    """A cached run downloads and converts the WHOLE selection before yielding a
+    row — 11½ h and zero pages on the run that exposed it (#60). Streaming is the
+    right default for the scale this trainer exists for; caching stays available
+    for project-scale selections, where re-fetching would be the waste."""
+    from atr_serving.training.settings import TrainerSettings
+
+    assert TrainerSettings(jobs_root=tmp_path).cache_datasets is False

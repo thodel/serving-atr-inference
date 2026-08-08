@@ -45,11 +45,22 @@ class TrainerSettings(BaseSettings):
     #: the top 10 checkpoints and rewrites them every epoch, which is a lot of
     #: traffic to push over SMB for files we discard once the best is converted.
     checkpoint_root: Path = Path.home() / "atr-cache" / "checkpoints"
-    #: Keep downloaded ground truth in the standard HF cache (whose ``hub/`` is
-    #: symlinked to the research share on asterAIx), so the same dataset is
-    #: fetched once and reused — by us and by lassberg/vlm_training alike.
-    #: False = stream from the hub every run, keeping nothing.
-    cache_datasets: bool = True
+    #: Cache the downloaded ground truth in the standard HF cache, or stream it.
+    #:
+    #: **False (default) — stream from the hub, keeping nothing.** This is the
+    #: right default for the selections this trainer exists for: a ~1 TB page
+    #: selection's Arrow generation cache is not something this box wants to
+    #: materialise, and in cached mode ``datasets`` downloads and converts the
+    #: *entire* selection before yielding the first row — 11½ hours with zero
+    #: pages written and no progress reported, on the run that exposed it (#60).
+    #: Streaming passes rows straight into the kraken page format, so pages
+    #: appear within minutes and the page count is a real progress signal.
+    #:
+    #: True — download and convert once, reuse across runs. Correct at project
+    #: scale (a 116 MB dataset fetched repeatedly is waste), and the reasoning
+    #: that made it the old default. It inverts entirely at terabyte scale, which
+    #: is why the default moved rather than the option disappearing.
+    cache_datasets: bool = False
 
     # ── executables ───────────────────────────────────────────────────────
     ketos: Path = REPO_ROOT / ".venvs" / "kraken-train" / "bin" / "ketos"
