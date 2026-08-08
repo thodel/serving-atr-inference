@@ -65,18 +65,39 @@ is rebuilt:
 bash scripts/check_venvs.sh
 ```
 
-It activates each venv and runs two checks per engine:
+It runs two checks per venv, and **the second one is the point**:
 
-1. **`import transformers; from transformers import TrainingArguments`** — catches
-   a whole class of silently-wrong installs where the package builds fine but the
-   calling code (`TrainingArguments`, model classes, etc.) is incompatible with the
-   version installed. This is the check that would have found the transformers 5.x
-   incident (#48) immediately rather than at the first training job.
-2. **Engine-specific smoke test** — a lightweight `import` or model-class load per
-   engine to confirm the dependency tree is complete.
+1. **An import smoke test** — what the code in this repo actually imports from that
+   venv, so a broken or incomplete dependency tree fails here rather than at the first
+   request. For `vlm-train` it also asserts `qwen3_vl` is a model this `transformers`
+   knows, which is precisely what a version below 4.57 lacks and costs no download to
+   ask.
+2. **A version check** against that venv's own `requirements.txt`
+   (`scripts/check_requirements.py`), so the installed version has to satisfy the
+   requirement it was built from.
 
-The script exits 0 only when every present venv passes; any failure is printed
-with the specific check that failed.
+Imports alone would not have caught the transformers 5.x incident (#48), and this is
+worth being precise about because it is easy to assume otherwise: `import transformers`
+worked on 5.14.1, and so did `TrainingArguments(...)` — the code constructs fine, it is
+the *training behaviour* that would have differed. The mismatch was found by printing
+`transformers.__version__`.
+
+The failed **repair** has the same shape: the downgrade to 4.57.6 died with `EPERM`,
+pip exited non-zero, and the venv silently kept 5.14.1. An import-only check passes
+identically before and after a fix that never happened. Only comparing versions catches
+either, which is why a `MISMATCH` line points at #54 — a version that refuses to change
+usually means `TMPDIR` is on the share.
+
+Every expectation is read from the requirements files themselves, so there is no second
+list to drift. Run with `-v` to see the satisfied requirements too:
+
+```bash
+bash scripts/check_venvs.sh -v
+```
+
+Exits 0 only when every **present** venv passes; venvs that were never built are
+reported as `SKIP`, not as failures — a box that only trains kraken has no reason to
+have `.venvs/vlm-train`.
 
 ### Known limitation: CIFS hub cache symlink
 

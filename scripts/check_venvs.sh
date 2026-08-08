@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
-# Post-provisioning smoke test: verify every venv imports what it should.
+# Post-provisioning smoke test: does each venv contain what its code needs, at the
+# version its requirements file asks for?
 #
-# Run after make_venvs.sh (or any time you suspect a venv is broken):
-#   bash scripts/check_venvs.sh
+#   bash scripts/check_venvs.sh          # every venv that exists
+#   bash scripts/check_venvs.sh -v       # also list satisfied requirements
 #
-# Returns exit 0 only when every venv passes. Prints PASS / FAIL per venv.
+# Exit 0 only when every present venv passes. Prints PASS / FAIL / SKIP per venv.
+#
+# TWO checks per venv, and the second one is the point (#53):
+#
+#   1. an IMPORT smoke test — catches a broken or incomplete dependency tree;
+#   2. a VERSION check against the venv's own requirements.txt.
+#
+# Imports alone are not enough, and that is not hypothetical. The transformers 5.x
+# incident (#48) passed every import there was: `import transformers` worked and
+# `TrainingArguments(...)` constructed fine on 5.14.1 against code written for 4.57.
+# So did the failed repair — the downgrade died with EPERM, pip exited non-zero, and
+# the venv silently kept 5.14.1. Only comparing the installed version against the
+# requirement catches either.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "${SCRIPT_DIR}")"
+VERBOSE=""
+[ "${1:-}" = "-v" ] || [ "${1:-}" = "--verbose" ] && VERBOSE="-v"
 
 # VENVS_ROOT from .env if present, otherwise default to .venvs next to this repo.
 if [ -f "${ROOT}/.env" ] && grep -q '^VENVS_ROOT=' "${ROOT}/.env"; then
   VENVS_ROOT="$(grep '^VENVS_ROOT=' "${ROOT}/.env" | cut -d= -f2-)"
-  # expand ~ if the env var contains it
-  VENVS_ROOT="${VENVS_ROOT/#\~/$HOME}"
+  VENVS_ROOT="${VENVS_ROOT/#\~/$HOME}"   # expand ~ if the env var contains it
 else
   VENVS_ROOT="${ROOT}/.venvs"
 fi
@@ -24,105 +38,89 @@ if [ ! -d "${VENVS_ROOT}" ]; then
   exit 1
 fi
 
-# ── helpers ──────────────────────────────────────────────────────────────────
-
-# run_python <venv_path> <description> <python_code>
-# Runs python -c with the given code in the given venv.
-# stdout returned on success; nothing on failure.
-run_python() {
-  local venv_path="$1"; shift
-  local description="$1"; shift
-  local code="$*"
-  local python="${venv_path}/bin/python"
-  if [ ! -x "${python}" ]; then
-    echo "FAIL: ${description}: ${python} not found" >&2
-    return 1
-  fi
-  if output=$("${python}" -c "${code}" 2>&1); then
-    echo "${output}"
-    return 0
-  else
-    echo "FAIL: ${description}: exit $? — ${output}" >&2
-    return 1
-  fi
-}
-
 # ── venv definitions ─────────────────────────────────────────────────────────
 #
-# Format: "name|venv_dir|check_transformers|engine_check_description|engine_check_cmd"
-# check_transformers: "yes" means run import + TrainingArguments construction
-# engine_check_cmd:   python invocation or "none" — run only when venv exists
-
+#   name | venv dir | requirements file ("-" = none) | import smoke test
+#
+# The requirements file is a PATH, not a package list: every expectation is read
+# from the file the venv was actually built from, so there is no second list here
+# to drift out of step with the first.
+#
+# The import smoke tests name what the code in this repo really imports. `vlm-train`
+# checks `qwen3_vl` is a model transformers knows — that is precisely what a version
+# below 4.57 fails at, and it costs no download to ask.
 declare -a VENV_ENTRIES=(
-  "gateway|gateway|yes|Gateway smoke|import fastapi, loguru; print('gateway ok')"
-  "kraken|kraken|no|Kraken version|import kraken; print(kraken.__version__)"
-  "party|party|no|Party smoke|import kraken; print('party ok')"
-  "trocr|trocr|yes|TroCr smoke|none"                                     # trocr has no extra dep beyond transformers
-  "kraken-train|kraken-train|yes|Kraken-train version + TrainingArguments|import kraken; print(kraken.__version__)"
-  "vlm-train|vlm-train|yes|VLM-train Qwen2VL import|from transformers import Qwen2VLForConditionalGeneration; print('vlm-train ok')"
-  "vllm|vllm|no|vLLM version|import vllm; print(vllm.__version__)"
+  # The gateway venv has NO ML deps by design (IMPLEMENTATION_PLAN §3); its deps
+  # come from pyproject.toml, not a requirements.txt.
+  "gateway|gateway|-|import atr_serving.app, fastapi, loguru, httpx, PIL; print('gateway ok')"
+  "kraken|kraken|engines/kraken_svc/requirements.txt|import kraken; from importlib.metadata import version; print('kraken', version('kraken'))"
+  "party|party|engines/party_svc/requirements.txt|import kraken; print('party ok')"
+  "trocr|trocr|engines/trocr_svc/requirements.txt|from transformers import TrOCRProcessor, VisionEncoderDecoderModel; print('trocr ok')"
+  "kraken-train|kraken-train|engines/kraken_train_svc/requirements.txt|import kraken, datasets; from importlib.metadata import version; print('kraken-train', version('kraken'))"
+  "vlm-train|vlm-train|engines/vlm_train_svc/requirements.txt|import peft, bitsandbytes, datasets; from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig, Trainer, TrainingArguments; from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES; assert 'qwen3_vl' in CONFIG_MAPPING_NAMES, 'this transformers does not know qwen3_vl'; print('vlm-train ok')"
+  "vllm|vllm|engines/vllm/requirements.txt|import vllm; from importlib.metadata import version; print('vllm', version('vllm'))"
 )
 
 # ── main ─────────────────────────────────────────────────────────────────────
-
 passed=0
 failed=0
+skipped=0
 
 for entry in "${VENV_ENTRIES[@]}"; do
-  IFS='|' read -r name venv_dir check_tf desc engine_check <<< "${entry}"
+  IFS='|' read -r name venv_dir reqs smoke <<< "${entry}"
   venv_path="${VENVS_ROOT}/${venv_dir}"
+  python="${venv_path}/bin/python"
 
-  if [ ! -d "${venv_path}" ]; then
-    echo "SKIP: ${name} — venv not present"
+  if [ ! -x "${python}" ]; then
+    echo "SKIP  ${name} — venv not present"
+    skipped=$((skipped + 1))
     continue
   fi
 
-  echo -n "[${name}] "
-
   venv_ok=true
-  failures=""
+  detail=""
 
-  # 1. Transformers import + TrainingArguments construction.
-  #    This is the smoke test for the transformers 5.x incident (#48): a mismatch
-  #    between the installed version and the calling code would be spotted here,
-  #    not at the first /train POST.
-  if [ "${check_tf}" = "yes" ]; then
-    tf_code='import transformers; from transformers import TrainingArguments; print(transformers.__version__)'
-    if ! run_python "${venv_path}" "${name}-transformers" "${tf_code}" >/dev/null 2>&1; then
-      venv_ok=false
-      failures="${failures}  [transformers import / TrainingArguments]\n"
-    fi
+  # 1. Import smoke test.
+  if ! out=$("${python}" -c "${smoke}" 2>&1); then
+    venv_ok=false
+    detail="${detail}
+      imports: ${out}"
   fi
 
-  # 2. Engine-specific smoke test.
-  if [ "${engine_check}" != "none" ]; then
-    python="${venv_path}/bin/python"
-    # engine_check is a python -c script to run directly (not via run_python, to
-    # avoid double-wrapping the description).
-    if ! "${python}" -c "${engine_check}" 2>/dev/null; then
+  # 2. Versions, against this venv's own requirements file.
+  if [ "${reqs}" != "-" ]; then
+    if ! out=$("${python}" "${SCRIPT_DIR}/check_requirements.py" ${VERBOSE} "${ROOT}/${reqs}" 2>&1); then
       venv_ok=false
-      failures="${failures}  [${desc}]\n"
+      detail="${detail}
+      versions (${reqs}):
+$(echo "${out}" | sed 's/^/        /')"
+    elif [ -n "${VERBOSE}" ]; then
+      detail="${detail}
+$(echo "${out}" | sed 's/^/      /')"
     fi
   fi
 
   if $venv_ok; then
-    echo "PASS"
-    ((passed++))
+    echo "PASS  ${name}"
+    [ -n "${VERBOSE}" ] && [ -n "${detail}" ] && echo "${detail}"
+    passed=$((passed + 1))
   else
-    echo "FAIL"
-    echo -e "${failures}" >&2
-    ((failed++))
+    echo "FAIL  ${name}${detail}"
+    failed=$((failed + 1))
   fi
 done
 
 echo ""
 echo "────────────────────────────────────────"
-echo "Results: ${passed} passed, ${failed} failed"
+echo "Results: ${passed} passed, ${failed} failed, ${skipped} not present"
 
 if [ ${failed} -gt 0 ]; then
-  echo "One or more venvs failed. Run with verbose output above for details." >&2
+  echo "" >&2
+  echo "A version MISMATCH usually means a pip install failed without you noticing:" >&2
+  echo "pip exits non-zero but leaves the version it was replacing in place. Re-run" >&2
+  echo "the install with TMPDIR on LOCAL disk (see #54) and check again." >&2
   exit 1
 fi
 
-echo "All venvs OK."
+echo "All present venvs OK."
 exit 0
