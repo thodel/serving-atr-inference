@@ -56,7 +56,7 @@ VLM_MAX_SEQ_LEN: dict[str, int] = {"line": 512, "page": 4096}
 # A model id doubles as a directory name and a registry id — keep it boring.
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
-TrainEngine = Literal["kraken", "vllm"]
+TrainEngine = Literal["kraken", "trocr", "vllm"]
 
 JobStatus = Literal[
     "queued", "preparing", "compiling", "training", "testing", "registering",
@@ -242,9 +242,58 @@ class VlmTrainParams(BaseModel):
         return self.max_seq_len or VLM_MAX_SEQ_LEN[self.granularity]
 
 
+class TrOCRTrainParams(BaseModel):
+    """Hyperparameters for a TrOCR fine-tune (microsoft/trocr-* or dh-unibe/*)."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    # ── model ────────────────────────────────────────────────────────────────
+    #: TrOCR is a fine-tune only — a base model is always required.
+    base_model: str = "microsoft/trocr-base-handwritten"
+
+    # ── seq2seq optimisation ─────────────────────────────────────────────────
+    epochs: int = Field(default=3, ge=1)
+    batch_size: int = Field(default=1, ge=1)
+    accumulate_grad_batches: int = Field(default=8, ge=1)
+    lrate: float = Field(default=5e-5, gt=0.0)
+    lr_scheduler: Literal["cosine", "linear", "constant"] = "cosine"
+    warmup_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
+    weight_decay: float = Field(default=0.0, ge=0.0)
+    max_grad_norm: float = Field(default=1.0, gt=0.0)
+    optim: str = "adamw_torch"
+    gradient_checkpointing: bool = True
+
+    # ── generation at eval time ──────────────────────────────────────────────
+    #: Tokens to generate at most per sample during evaluation.
+    max_new_tokens: int = Field(default=256, ge=1)
+    #: Beam width for beam search at eval. 1 = greedy.
+    beam_size: int = Field(default=1, ge=1)
+    #: Length penalty passed to ``model.generate``. Positive values encourage
+    #: longer sequences; negative encourage shorter.
+    length_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
+
+    # ── evaluation ───────────────────────────────────────────────────────────
+    eval_samples: int = Field(default=200, ge=1)
+
+    # ── run ──────────────────────────────────────────────────────────────────
+    seed: int = 42
+    workers: int = Field(default=4, ge=0)
+    #: The unit sets CUDA_VISIBLE_DEVICES=1, so physical GPU 1 is cuda:0 here.
+    device: str = "cuda:0"
+    #: Weights & Biases run name; None = reporting off.
+    wandb_run: str | None = None
+    #: Precision. TrOCR's ViT backbone benefits from amp (bf16); fp32 is slower.
+    precision: Literal["fp32", "fp16", "bf16"] = "bf16"
+
+    @property
+    def effective_batch_size(self) -> int:
+        return self.batch_size * self.accumulate_grad_batches
+
+
 #: Which params model each engine's ``params`` block is parsed as.
 PARAMS_BY_ENGINE: dict[str, type[BaseModel]] = {
     "kraken": KrakenTrainParams,
+    "trocr": TrOCRTrainParams,
     "vllm": VlmTrainParams,
 }
 
@@ -262,7 +311,9 @@ class TrainRequest(BaseModel):
     #: there is no such thing as training a VLM from scratch here; it defaults to
     #: :data:`VLM_BASE_MODEL`.
     base_model: str | None = None
-    params: KrakenTrainParams | VlmTrainParams = Field(default_factory=KrakenTrainParams)
+    params: KrakenTrainParams | TrOCRTrainParams | VlmTrainParams = Field(
+        default_factory=KrakenTrainParams
+    )
     notes: str | None = None
 
     @model_validator(mode="before")
