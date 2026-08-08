@@ -56,6 +56,54 @@ Set in `.env`:
   `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub`, so the standard path already
   resolves to the research share and is shared with `lassberg/vlm_training`.
 
+## 3b. Post-provisioning verification
+
+Run the smoke test immediately after `make_venvs.sh` and again whenever a venv
+is rebuilt:
+
+```bash
+bash scripts/check_venvs.sh
+```
+
+It activates each venv and runs two checks per engine:
+
+1. **`import transformers; from transformers import TrainingArguments`** — catches
+   a whole class of silently-wrong installs where the package builds fine but the
+   calling code (`TrainingArguments`, model classes, etc.) is incompatible with the
+   version installed. This is the check that would have found the transformers 5.x
+   incident (#48) immediately rather than at the first training job.
+2. **Engine-specific smoke test** — a lightweight `import` or model-class load per
+   engine to confirm the dependency tree is complete.
+
+The script exits 0 only when every present venv passes; any failure is printed
+with the specific check that failed.
+
+### Known limitation: CIFS hub cache symlink
+
+On asterAIx `~/.cache/huggingface/hub` is a symlink to a CIFS share:
+
+```
+~/.cache/huggingface/hub → /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub
+```
+
+CIFS (SMB) does not support the `chmod` / `symlink` operations that
+`huggingface_hub` uses to manage blob deduplication. Every download is stored
+without ref-linking even when the blob already exists on the share, so the same
+model files are copied once per venv / per service that uses them. This is **harmless
+but not optimal**: the symlink works, models load correctly, and training proceeds
+as normal — the only degradation is extra disk I/O. No error is raised; the
+`huggingface_hub` client issues a warning like:
+
+```
+Could not set permissions on [...] Operation not permitted
+```
+
+This warning can be ignored. It was also the root cause of the transformers 5.x
+incident (#48): the failed upgrade attempt left the venv with the old transformers
+but a partially-updated dependency, and the absence of blob dedup meant the
+failure was silent — no error surfaced until a training job actually tried to
+construct `TrainingArguments`.
+
 ## 4. Prefetch model weights + merge vLLM LoRA adapters
 
 ```bash
