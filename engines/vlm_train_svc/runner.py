@@ -34,6 +34,7 @@ from loguru import logger
 
 from atr_serving.registry import ModelSpec
 from atr_serving.training.contracts import Metrics, StageRecord, TrainJob, utcnow
+from atr_serving.training.cropping import write_crops
 from atr_serving.training.manifests import read_manifest
 from atr_serving.training.overlay import upsert_entry
 from atr_serving.training.runner_base import BasePipeline, StageFailed, run_job
@@ -43,7 +44,7 @@ from atr_serving.training.vlm_cmd import (
     parse_eval_report,
     train_cmd,
 )
-from atr_serving.training.vlm_dataset import Sample, samples_for, write_jsonl
+from atr_serving.training.vlm_dataset import samples_for, write_jsonl
 
 __all__ = ["Pipeline", "main"]
 
@@ -72,7 +73,7 @@ class Pipeline(BasePipeline):
         for name, manifest in (("train", pages_train), ("val", pages_val)):
             samples = samples_for(read_manifest(manifest), params.granularity, root=paths.root)
             if params.granularity == "line":
-                samples = self._write_crops(samples, paths.root, paths.data / "crops" / name)
+                samples = write_crops(samples, paths.root, paths.data / "crops" / name)
             jsonl = paths.data / f"{name}.jsonl"
             written = write_jsonl(jsonl, samples)
             if not written:
@@ -88,47 +89,6 @@ class Pipeline(BasePipeline):
         job.progress.samples_written = total
         self.store.save(job)
         return out[0], out[1]
-
-    def _write_crops(self, samples: list[Sample], root: Path, dest: Path) -> list[Sample]:
-        """Cut each sample's bbox out of its page and repoint the sample at it."""
-        from PIL import Image  # engine venv only
-
-        dest.mkdir(parents=True, exist_ok=True)
-        out: list[Sample] = []
-        open_path: str | None = None
-        page: "Image.Image | None" = None
-
-        for index, sample in enumerate(samples):
-            if sample.bbox is None:
-                out.append(sample)
-                continue
-            if sample.image != open_path:
-                # One page held open at a time. Samples arrive grouped by page, so
-                # this is one decode per page; caching them all would be gigabytes
-                # of decoded scans.
-                if page is not None:
-                    page.close()
-                page = Image.open(root / sample.image).convert("RGB")
-                open_path = sample.image
-            # Clamp to the page here, where its size is known: PIL would otherwise
-            # pad an out-of-bounds box with black, and a padded band of black is a
-            # worse training signal than a slightly tighter crop. Polygons that
-            # overrun the page edge by a pixel or two are common in Transkribus
-            # exports, and the padding added in vlm_dataset makes it commoner.
-            left, top, right, bottom = sample.bbox
-            box = (max(left, 0), max(top, 0), min(right, page.width), min(bottom, page.height))
-            crop_path = dest / f"{index:07d}.jpg"
-            page.crop(box).save(crop_path, format="JPEG", quality=95)
-            out.append(Sample(
-                image=str(crop_path.relative_to(root)),
-                text=sample.text,
-                source_type=sample.source_type,
-                bbox=None,
-                page=sample.page,
-            ))
-        if page is not None:
-            page.close()
-        return out
 
     # ── train ───────────────────────────────────────────────────────────────
     def _train(self, job: TrainJob, train_jsonl: Path, val_jsonl: Path,
