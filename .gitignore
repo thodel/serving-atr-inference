@@ -240,3 +240,6 @@ trained/
 # it produces is a GitHub issue, not a tracked file.
 discovery_report.json
 discovery_report.md
+
+# Tooling scratch (openclaw); never project content
+.openclaw/
