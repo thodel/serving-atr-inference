@@ -28,9 +28,11 @@ units (`deploy/systemd/`). What is done, and what the open issues still cover:
 | serving what we trained | partly — `local_path` specs and the disabled-by-default overlay are in; the promotion gate is **#36** |
 | publishing trained models to HuggingFace | done (`scripts/publish_to_hub.py`) |
 
-Still open beyond that: **#37** runbook + eval comparison, **#38** per-epoch metrics,
-**#39** chunked prepare for datasets larger than the disk, **#40** training on 1..n
-datasets rather than one.
+Open work is grouped into three epics: **#49** — the training subsystem from "it runs"
+to "it is trustworthy" (promotion gate #36, per-epoch metrics #38, dataset preflight
+#46, 1..n datasets #40, chunked prepare #39, line-level sources #45, runbook + eval
+#37); **#41** — TrOCR fine-tuning as the third backend (#42–#44); and **#48** —
+deployment robustness. #30 and #32 remain open from production.
 
 ## Quickstart (dev)
 
