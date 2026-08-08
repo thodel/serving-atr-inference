@@ -485,3 +485,50 @@ def test_request_defaults_survive_the_wire(client):
     assert params.spec.startswith("[256,64,0,1 Cr4,2,8,4,2")
     assert (params.lrate, params.quit, params.weights_format) == (1e-4, "fixed", "coreml")
     assert TrainRequest(model_id="x", dataset=DatasetSpec(hf_repo=REPO)).params == params
+
+
+# ── verify_only must not act (#59) ───────────────────────────────────────────
+def test_verify_only_does_not_queue_anything(client, spawn):
+    """The incident: `POST :8204/jobs?verify_only=true` queued a multi-day run.
+    FastAPI drops query params a route does not declare, so the flag whose whole
+    purpose is 'change nothing' was silently discarded."""
+    resp = client.post("/jobs", params={"verify_only": "true"}, json=BODY)
+    assert resp.status_code == 200
+    assert "job_id" not in resp.json()
+    assert resp.json()["valid"] is True
+    assert store_of(client).list() == []      # nothing created
+    assert spawn.calls == []                  # nothing started
+
+
+def test_verify_only_reports_an_invalid_spec_without_failing_the_request(client):
+    """'Is this spec good?' and 'did my request fail?' are different questions."""
+    resp = client.post("/jobs", params={"verify_only": "true"},
+                       json={**BODY, "dataset": {**BODY["dataset"], "train_projects": []}})
+    assert resp.status_code in (200, 400)
+    assert store_of(client).list() == []
+
+
+# ── one live job per model_id (#56) ──────────────────────────────────────────
+def test_a_second_live_job_for_the_same_model_id_is_refused(client, spawn):
+    """Job ids are de-duplicated; model_ids were not — and the model_id is the
+    directory and registry name, so the later run overwrites the earlier one's
+    registered weights."""
+    first = client.post("/jobs", json=BODY).json()["job_id"]
+    resp = client.post("/jobs", json=BODY)
+    assert resp.status_code == 409
+    assert first in resp.json()["detail"]
+    assert BODY["model_id"] in resp.json()["detail"]
+    assert len(store_of(client).list()) == 1
+
+
+def test_the_model_id_is_free_again_once_the_job_is_terminal(client):
+    """A finished run must not block retraining the same model."""
+    first = client.post("/jobs", json=BODY).json()["job_id"]
+    store = store_of(client)
+    store.fail(store.load(first), "earlier attempt failed")
+    assert client.post("/jobs", json=BODY).status_code == 202
+
+
+def test_a_different_model_id_is_unaffected(client):
+    client.post("/jobs", json=BODY)
+    assert client.post("/jobs", json={**BODY, "model_id": "other-model"}).status_code == 202

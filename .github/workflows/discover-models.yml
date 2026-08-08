@@ -18,15 +18,32 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Was 30, and every scheduled run between 2026-07-13 and 2026-08-03 was killed
+    # at the limit by an unbounded 429 retry (#58). With the retry bounded and the
+    # pagination capped, a run that takes longer than 10 minutes is broken.
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The script exits 1 without requests. It has been finding a preinstalled
+      # copy on ubuntu-latest — a runner-image detail, not a contract.
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
       - name: Discover models
         env:
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          # Anonymous hub calls are rate-limited per IP, and every GitHub-hosted
+          # runner shares one — which is why the schedule hit 429s where a local
+          # run never did. Optional: without the secret the script still runs,
+          # bounded, and reports what it could not reach (#58).
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: >
           python scripts/discover_models.py
           --dry-run

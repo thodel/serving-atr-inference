@@ -523,3 +523,100 @@ class TestDiscoverIntegration:
         assert len(report.hf_candidates) == 0
         assert len(report.zenodo_candidates) == 0
         assert len(report.errors) >= 1
+
+# ── loop bounds: why every scheduled run timed out (#58) ─────────────────────
+class TestLoopBounds:
+    """Between 2026-07-13 and 2026-08-03 every scheduled run of this script was
+    killed at `timeout-minutes: 30`, always within two seconds of the limit —
+    the signature of a loop that never ends rather than work that is slow."""
+
+    @staticmethod
+    def _rate_limited_session(retry_after: str = "10"):
+        """A session that answers 429 forever, as a throttled hub does."""
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.headers = {"Retry-After": retry_after}
+        session = MagicMock(spec=requests.Session)
+        session.get.side_effect = requests.exceptions.HTTPError(response=resp)
+        return session
+
+    def test_a_permanently_rate_limited_hub_gives_up_instead_of_hanging(self, monkeypatch):
+        import scripts.discover_models as dm
+
+        slept: list[float] = []
+        monkeypatch.setattr(dm, "_sleep", slept.append)
+        monkeypatch.setattr(dm, "HF_SEARCH_TERMS", ["kraken"])
+
+        models, error = dm.discover_hf_models(self._rate_limited_session())
+
+        assert models == []
+        assert error is not None and "rate-limited" in error
+        assert "HF_TOKEN" in error                      # names the fix, not just the symptom
+        assert len(slept) == dm.MAX_RETRIES_PER_PAGE    # bounded, then done
+
+    def test_the_retry_wait_is_capped(self, monkeypatch):
+        """A server asking for 900 s is asking for more than the job has."""
+        import scripts.discover_models as dm
+
+        slept: list[float] = []
+        monkeypatch.setattr(dm, "_sleep", slept.append)
+        monkeypatch.setattr(dm, "HF_SEARCH_TERMS", ["kraken"])
+        dm.discover_hf_models(self._rate_limited_session(retry_after="900"))
+
+        assert slept and max(slept) == dm.RETRY_AFTER_CAP_S
+
+    def test_a_hub_that_never_runs_out_of_results_still_terminates(self, monkeypatch):
+        """The other unbounded loop: pagination ran until two empty pages, and a
+        broad term against a large index does not produce one."""
+        import scripts.discover_models as dm
+
+        monkeypatch.setattr(dm, "_sleep", lambda _s: None)
+        monkeypatch.setattr(dm, "HF_SEARCH_TERMS", ["ocr"])
+        calls: list[int] = []
+
+        def endless(session, query, page=1):
+            calls.append(page)
+            return [dm.HFModel(id=f"x/model-{page}", downloads=1, last_modified="", tags=[])]
+
+        monkeypatch.setattr(dm, "_search_hf", endless)
+        models, error = dm.discover_hf_models(MagicMock(spec=requests.Session))
+
+        assert len(calls) == dm.MAX_PAGES_PER_QUERY
+        assert len(models) == dm.MAX_PAGES_PER_QUERY
+        assert error is None            # a cap is not a failure
+
+    def test_one_throttled_query_does_not_lose_the_others(self, monkeypatch):
+        """A partial report naming what it could not reach beats no report."""
+        import scripts.discover_models as dm
+
+        monkeypatch.setattr(dm, "_sleep", lambda _s: None)
+        monkeypatch.setattr(dm, "HF_SEARCH_TERMS", ["throttled", "fine"])
+        resp = MagicMock(status_code=429, headers={"Retry-After": "1"})
+
+        def flaky(session, query, page=1):
+            if query == "throttled":
+                raise requests.exceptions.HTTPError(response=resp)
+            return [dm.HFModel(id="x/good", downloads=1, last_modified="", tags=[])] if page == 1 else []
+
+        monkeypatch.setattr(dm, "_search_hf", flaky)
+        models, error = dm.discover_hf_models(MagicMock(spec=requests.Session))
+
+        assert [m.id for m in models] == ["x/good"]
+        assert error is not None
+
+
+class TestHubAuth:
+    def test_a_token_is_sent_when_one_is_configured(self, monkeypatch):
+        """Anonymous calls share the runner's IP with the world, which is what
+        made 429s the normal response rather than an edge case."""
+        import scripts.discover_models as dm
+
+        monkeypatch.setenv("HF_TOKEN", "hf_secret")
+        assert dm._hf_headers() == {"Authorization": "Bearer hf_secret"}
+
+    def test_no_token_means_no_header_not_an_empty_one(self, monkeypatch):
+        import scripts.discover_models as dm
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        assert dm._hf_headers() == {}

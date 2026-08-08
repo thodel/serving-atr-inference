@@ -22,7 +22,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.4"]
+# requests is a *test* dependency, not a gateway one: scripts/discover_models.py
+# needs it, and without it tests/test_discover_models*.py fail at collection and
+# take the whole run down with them — which is why every local run used --ignore
+# on those two files until #57.
+dev = ["pytest>=8.0", "ruff>=0.4", "requests>=2.31"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,0 +1,43 @@
+name: Tests
+
+# Nothing ran this suite until #57: the only workflow here was the weekly model
+# discovery, so `gh run list --commit <sha>` was empty for every commit in the
+# repo's history. 478 tests that only run where somebody remembers to run them
+# are not a safety net.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # asterAIx has Python 3.12 only (docs/asteraix-environment.md), so the
+          # box is what CI matches — not the 3.11 that happens to be in the dev
+          # machine's venv.
+          python-version: "3.12"
+          cache: pip
+
+      # The gateway deps plus the dev extra. No ML libraries: the suite covers
+      # the training subsystem through the seams that exist precisely so it can
+      # be tested without torch, kraken or a GPU (`src/atr_serving/training/`).
+      - run: pip install -e ".[dev]"
+
+      - run: ruff check .
+
+      # No --ignore flags. If a file cannot be collected, that is a failure and
+      # not something to route around.
+      - run: pytest -q

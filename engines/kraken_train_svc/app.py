@@ -30,10 +30,9 @@ import os
 import shutil
 import signal
 import subprocess
-from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 from loguru import logger
 
@@ -254,7 +253,17 @@ async def health() -> JSONResponse:
 
 
 @app.post("/jobs", status_code=202)
-async def submit(request: TrainRequest) -> dict:
+async def submit(request: TrainRequest, response: Response,
+                 verify_only: bool = Query(False)) -> dict:
+    """Submit a training job, or — with ``verify_only=true`` — only report on it.
+
+    ``verify_only`` is declared HERE and not only on the gateway proxy (#59).
+    FastAPI silently drops query parameters a route does not declare, so
+    ``POST :8204/jobs?verify_only=true`` used to be an ordinary submit: a flag
+    whose entire purpose is "change nothing" queued a multi-day training run,
+    and the caller could not tell from the request that it had been ignored.
+    A safety flag that is dropped rather than refused is worse than no flag.
+    """
     settings = _settings()
     store = _store()
     # Same rule as disk below: a venv that was never built will not build itself
@@ -284,8 +293,29 @@ async def submit(request: TrainRequest) -> dict:
     # for every caller — the proxy's own contract is that no training logic lives
     # in it (#35), and a check it owned would be one a direct call could skip.
     checked = _verify(request)
+    if verify_only:
+        # A dry run answers a question; it does not act. 200 even for an invalid
+        # spec — "is this spec good?" and "did my request fail?" are different
+        # questions, and the caller reads ``valid``. Same contract as the proxy.
+        response.status_code = 200
+        return checked
     if not checked["valid"]:
         raise HTTPException(status_code=400, detail=checked)
+
+    # A model_id is a directory name AND a registry id, so two live jobs sharing
+    # one means whichever registers last silently replaces the other's weights
+    # (#56). The job ids stay distinct — JobStore de-duplicates those — which is
+    # exactly why this is easy to miss until the models are already overwritten.
+    clash = next((j for j in store.list()
+                  if j.request.model_id == request.model_id and not j.is_terminal), None)
+    if clash is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"job {clash.id} is already {clash.status} for model_id "
+                    f"{request.model_id!r}. Two live jobs writing one model_id means the "
+                    "second overwrites the first's registered weights — choose a different "
+                    "model_id, or cancel that job first."),
+        )
     # An unreachable hub does NOT block the queue: the job downloads when it
     # starts, which may be hours from now, and refusing it would turn a hiccup
     # into a failed submission. The reason travels on the job instead.

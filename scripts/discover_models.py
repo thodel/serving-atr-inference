@@ -22,7 +22,6 @@ import json
 import os
 import sys
 import time
-import urllib.parse
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -139,6 +138,54 @@ class DiscoveryReport:
 
 HF_API = "https://huggingface.co/api/models"
 
+# ─── Loop bounds (#58) ────────────────────────────────────────────────────────
+# Every scheduled run of this script between 2026-07-13 and 2026-08-03 was killed
+# by the 30-minute job timeout, always within two seconds of the limit. The cause
+# was two loops with no ceiling: a 429 handler that slept and retried the *same*
+# page forever, and pagination that ran until two empty pages. Anonymous hub
+# traffic from a shared CI runner is throttled as a matter of course, so the
+# retry loop was not an edge case — it was the normal path.
+#
+#: Give up on a query after this many consecutive rate-limit retries. Reporting
+#: "throttled, here is what I did get" beats never reporting at all.
+MAX_RETRIES_PER_PAGE = 4
+#: Pages per search term. Results come back newest-first (``direction=-1``), so a
+#: weekly discovery run has no use for page 11 of 7 broad terms.
+MAX_PAGES_PER_QUERY = 10
+#: Honour ``Retry-After``, but never sleep longer than this — a server asking for
+#: 900 s is asking for more than the job has.
+RETRY_AFTER_CAP_S = 30
+#: Pause between pages. Module-level so the tests can zero it; the old inline
+#: ``time.sleep(0.5)`` made the suite wait for real.
+PAGE_PAUSE_S = 0.25
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection so tests can neutralise the back-off (see PAGE_PAUSE_S)."""
+    if seconds > 0:
+        time.sleep(seconds)
+
+
+def _retry_after(exc: "requests.exceptions.HTTPError", cap: float) -> float:
+    """Seconds to wait after a 429, from the header, clamped and never negative."""
+    default = 10.0
+    try:
+        value = float(exc.response.headers.get("Retry-After", default))
+    except (AttributeError, TypeError, ValueError):
+        value = default
+    return max(0.0, min(value, cap))
+
+
+def _hf_headers() -> dict[str, str]:
+    """Authorise hub calls when a token is available.
+
+    Anonymous requests are rate-limited per IP, and every GitHub-hosted runner
+    shares its IP with the rest of the world — which is why the scheduled run
+    always hit 429s where a local run never did.
+    """
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
 
 def _search_hf(session: requests.Session, query: str, page: int = 1) -> list[HFModel]:
     """
@@ -154,7 +201,7 @@ def _search_hf(session: requests.Session, query: str, page: int = 1) -> list[HFM
     if page > 1:
         params["offset"] = (page - 1) * 100
 
-    resp = session.get(HF_API, params=params, timeout=30)
+    resp = session.get(HF_API, params=params, headers=_hf_headers(), timeout=30)
     resp.raise_for_status()
     data = resp.json()
 
@@ -185,9 +232,11 @@ def discover_hf_models(session: requests.Session) -> tuple[list[HFModel], str | 
     for query in HF_SEARCH_TERMS:
         page = 1
         consecutive_empty = 0
-        while consecutive_empty < 2:
+        attempts = 0
+        while consecutive_empty < 2 and page <= MAX_PAGES_PER_QUERY:
             try:
                 results = _search_hf(session, query, page=page)
+                attempts = 0
                 if not results:
                     consecutive_empty += 1
                 else:
@@ -201,12 +250,17 @@ def discover_hf_models(session: requests.Session) -> tuple[list[HFModel], str | 
                             if model.downloads > existing.downloads:
                                 all_models[model.id] = model
                     page += 1
-                    time.sleep(0.25)  # polite back-off
+                    _sleep(PAGE_PAUSE_S)  # polite back-off
             except requests.exceptions.HTTPError as e:
                 if e.response is not None and e.response.status_code == 429:
-                    # rate-limited: wait and retry same page
-                    retry_after = int(e.response.headers.get("Retry-After", "10"))
-                    time.sleep(retry_after)
+                    attempts += 1
+                    if attempts > MAX_RETRIES_PER_PAGE:
+                        error_msg = (f"HF query {query!r} page {page}: rate-limited "
+                                     f"{attempts - 1}× in a row, giving up on this query. "
+                                     "Set HF_TOKEN — anonymous requests from CI share an "
+                                     "IP and are throttled hard.")
+                        break
+                    _sleep(_retry_after(e, RETRY_AFTER_CAP_S))
                     continue
                 # non-retryable HTTP error: record error and stop this query
                 error_msg = f"HF query \'{query}\' page {page}: {e}"
@@ -258,10 +312,12 @@ def discover_zenodo_models(session: requests.Session) -> tuple[list[ZenodoRecord
     for params, community in queries:
         page = 1
         consecutive_empty = 0
-        while consecutive_empty < 2:
+        attempts = 0
+        while consecutive_empty < 2 and page <= MAX_PAGES_PER_QUERY:
             try:
                 paged_params = {**params, "page": page}
                 data = _search_zenodo(session, paged_params)
+                attempts = 0
                 hits = data.get("hits", {}).get("hits", [])
                 if not hits:
                     consecutive_empty += 1
@@ -292,12 +348,17 @@ def discover_zenodo_models(session: requests.Session) -> tuple[list[ZenodoRecord
                     if not data.get("links", {}).get("next"):
                         break
                     page += 1
-                    time.sleep(0.5)  # polite back-off
+                    _sleep(PAGE_PAUSE_S)  # polite back-off
 
             except requests.exceptions.HTTPError as e:
                 if e.response is not None and e.response.status_code == 429:
-                    retry_after = int(e.response.headers.get("Retry-After", "10"))
-                    time.sleep(retry_after)
+                    attempts += 1
+                    if attempts > MAX_RETRIES_PER_PAGE:
+                        error_msg = (f"Zenodo community {community!r} page {page}: "
+                                     f"rate-limited {attempts - 1}× in a row, giving up "
+                                     "on this community")
+                        break
+                    _sleep(_retry_after(e, RETRY_AFTER_CAP_S))
                     continue
                 # non-retryable HTTP error: record error and stop this query
                 error_msg = f"Zenodo community '{community}' page {page}: {e}"
@@ -378,7 +439,7 @@ def format_report_markdown(report: DiscoveryReport) -> str:
         f"**Served (excluded):** {len(report.served_hf_repos)} HF repos, {len(report.served_zenodo_ids)} Zenodo records\n",
     ]
     if report.errors:
-        sections.append(f"\n⚠️ **Errors** (graceful degradation):\n")
+        sections.append("\n⚠️ **Errors** (graceful degradation):\n")
         for err in report.errors:
             sections.append(f"- {err}\n")
 
