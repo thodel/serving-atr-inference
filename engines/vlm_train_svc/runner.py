@@ -226,6 +226,10 @@ class Pipeline(BasePipeline):
                     "source_adapter": str(adapter),
                     "metrics": metrics.model_dump(),
                     "request": job.request.model_dump(mode="json"),
+                    # What the selection actually yielded (pages, transcribed
+                    # lines, built samples) — the model card publishes this rather
+                    # than the projects that were asked for.
+                    "progress": job.progress.model_dump(),
                 },
                 indent=2,
             ),

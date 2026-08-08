@@ -163,6 +163,12 @@ class Pipeline(BasePipeline):
                     "source_weights": str(weights),
                     "metrics": metrics.model_dump(),
                     "request": job.request.model_dump(mode="json"),
+                    # How much of the selected dataset actually became training
+                    # material. The request says which projects were asked for;
+                    # this says what arrived — the two differ whenever a page is
+                    # dropped or ``max_pages`` bites, and the model card publishes
+                    # the second, not the first.
+                    "progress": job.progress.model_dump(),
                 },
                 indent=2,
             ),

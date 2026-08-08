@@ -11,12 +11,26 @@ tracked as independently-codeable [GitHub issues](../../issues).
 ## Architecture (one line)
 
 A dependency-free **FastAPI gateway** routes to **isolated per-engine services**
-(kraken / trocr / party / vLLM), each in its own venv + systemd unit, because the
-engine families need mutually incompatible `torch`/`transformers` pins.
+(kraken / trocr / party / vLLM, plus a training service), each in its own venv +
+systemd unit, because the engine families need mutually incompatible
+`torch`/`transformers` pins.
 
 ## Status
 
-**Phase 0 (this scaffold):** registry + `/health` + `/models`. No engines yet.
+Serving **and** training are implemented and run on asterAIx as `systemctl --user`
+units (`deploy/systemd/`). What is done, and what the open issues still cover:
+
+| part | state |
+|---|---|
+| gateway `:8200` — registry (49 models), `/health`, `/models`, recognition routing | done |
+| engine services — kraken, TrOCR, party, vLLM (`engines/`) | done; **#30** open (3 of 7 engines 500 in production), **#32** open (party cannot load safetensors) |
+| training service `:8204` — kraken (`ketos`) and VLM (QLoRA) backends | done (M1–M3, #33–#35) |
+| serving what we trained | partly — `local_path` specs and the disabled-by-default overlay are in; the promotion gate is **#36** |
+| publishing trained models to HuggingFace | done (`scripts/publish_to_hub.py`) |
+
+Still open beyond that: **#37** runbook + eval comparison, **#38** per-epoch metrics,
+**#39** chunked prepare for datasets larger than the disk, **#40** training on 1..n
+datasets rather than one.
 
 ## Quickstart (dev)
 
@@ -73,11 +87,16 @@ bash scripts/probe_host.sh | tee asteraix-probe.txt
 - kraken / trocr / party: separate venvs, separate pins; small models on GPU 1.
 
 Provisioning is documented in [`docs/DEPLOY.md`](docs/DEPLOY.md) (clone → venvs →
-`.env` → prefetch → `systemctl --user` units → ufw). Final vLLM pins land with #5.
+`.env` → prefetch → `systemctl --user` units → ufw).
 
-## Training API (#35)
+## Training API
 
-Training runs on this box too — see [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md).
+Training runs on this box too — design in [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md),
+the VLM backend in [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md). Two backends share the
+job store, the state machine, the five stages and the whole dataset pipeline: **kraken**
+(`ketos`, recognition models from scratch or fine-tuned from Zenodo) and **vllm** (QLoRA
+fine-tunes of a Qwen3-VL base). Only `params` and the per-stage commands differ.
+
 The gateway proxies `/train/*` to the training service on `:8204`; that service binds
 `127.0.0.1` and the `ufw` rule opens only `:8200` to the client host, so **this proxy
 is the only way in**. Same `X-API-Key` as recognition.
@@ -103,11 +122,14 @@ curl -H "X-API-Key: $ATR_API_KEY" -H 'Content-Type: application/json' \
 Training is **fire-and-forget**: the run is a detached process on the box and
 outlives both this request and a restart of either service. Poll the job record.
 
+Add `"engine": "vllm"` (and VLM `params`) to submit a QLoRA fine-tune instead; the
+envelope is otherwise identical.
+
 Errors keep the trainer's status and detail, because they name their own fix —
 `507` a full filesystem, `500` a `TMPDIR` on a network mount, `409` an
-already-terminal job, `400` an engine with no backend (only `kraken` today). A
-gateway that cannot reach the trainer is a `502` naming the URL, never a job id
-for a job that was not created.
+already-terminal job, `503` a backend whose venv was never built on this box,
+`400` an engine with no backend at all. A gateway that cannot reach the trainer is
+a `502` naming the URL, never a job id for a job that was not created.
 
 Trained models are registered **disabled** in the gitignored
 `config/models.local.yaml` until the promotion gate (#36) proves the host can
@@ -119,6 +141,18 @@ The register stage leaves each model's best-run weights and a `metadata.json`
 under `~/atr-cache/trained/<model_id>/`. `scripts/publish_to_hub.py` pushes those
 directories to `<org>/<model_id>`, generating the model card from that metadata —
 CER/WER, dataset selection, hyperparameters, job id.
+
+Each model is **linked to the ground truth it was trained on**: the card declares
+every training corpus in the frontmatter's `datasets:` key, which is what makes
+the model appear on the dataset's hub page and the dataset on the model's, and
+`base_model:` does the same for a fine-tune's starting checkpoint. Because a job
+trains on a few project directories out of a 6.6 TB corpus, the repo id never
+travels alone — the card names the training and evaluation projects, the seeded
+split when there are no held-out projects, the pinned revision, and how many pages
+and lines the selection actually yielded. The machine-readable `model-index`
+score names the evaluated slice as its `config`; with several datasets it is
+omitted entirely, because one CER over the union of their validation splits is
+not a result *on* any one of them.
 
 It needs `huggingface_hub`, which the gateway venv deliberately does not have, so
 run it from the trainer venv:
