@@ -141,18 +141,30 @@ class Pipeline(BasePipeline):
         The entry is written **disabled**: registering is not evidence that the
         gateway can serve it. The promotion gate (#36) flips it after one real
         recognition — the lesson of #30/#31.
+
+        Atomic registration: ``metadata.json`` is written to a temp file first,
+        then renamed over the weights copy. Any failure between the copy and the
+        rename (full disk, CIFS hiccup, cancellation) leaves no partial artifact:
+        a directory without a ``metadata.json`` is an unambiguous orphan and is
+        cleaned up by :func:`cleanup_orphaned_weights`.
         """
         model_id = job.request.model_id
         dest_dir = self.settings.trained_root / model_id
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{model_id}{weights.suffix}"
+        tmp_meta = dest_dir / f"{model_id}.metadata.json.tmp"
+
         # copyfile, NOT copy2/copy: those also replicate mode and timestamps, and
         # on the CIFS share (files owned by root:research) chmod/utime by a
         # non-owner fails with EPERM — "PermissionError: [Errno 1] Operation not
         # permitted" after a successful training run. Only the bytes matter here.
         shutil.copyfile(weights, dest)
 
-        (dest_dir / "metadata.json").write_text(
+        # Write metadata to a temp file first, then atomically rename.  The
+        # weights are already on disk so an in-flight rename failure cannot
+        # produce a partial metadata.json — only a weights file alone, which is
+        # indistinguishable from a cancelled job and is cleaned up as an orphan.
+        tmp_meta.write_text(
             json.dumps(
                 {
                     "model_id": model_id,
@@ -174,6 +186,7 @@ class Pipeline(BasePipeline):
             ),
             encoding="utf-8",
         )
+        tmp_meta.rename(dest_dir / "metadata.json")
 
         upsert_entry(
             self.settings.overlay_path,
@@ -189,6 +202,27 @@ class Pipeline(BasePipeline):
         job.model_path = str(dest)
         logger.info("registered {} -> {} (disabled until promoted)", model_id, dest)
         return dest
+
+    def cleanup_orphaned_weights(self) -> int:
+        """Remove weight directories that have no ``metadata.json``.
+
+        Called on service startup and after a failed register stage (directly
+        or via the DELETE endpoint). A directory without metadata is an orphan
+        — it was left behind by a registration that never completed.
+
+        Returns the number of directories removed.
+        """
+        trained = Path(self.settings.trained_root)
+        removed = 0
+        for entry in trained.iterdir():
+            if not entry.is_dir():
+                continue
+            if (entry / "metadata.json").is_file():
+                continue
+            logger.warning("removing orphaned weights directory: {}", entry.name)
+            shutil.rmtree(entry)
+            removed += 1
+        return removed
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process entry point

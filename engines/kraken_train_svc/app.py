@@ -177,7 +177,28 @@ async def _scheduler() -> None:  # pragma: no cover - timing loop
         await asyncio.sleep(_settings().poll_interval_s)
 
 
-@asynccontextmanager
+def _cleanup_orphaned_weights(trained_root: Path | str) -> int:
+    """Remove weight directories that have no ``metadata.json``.
+
+    A directory without metadata is an orphan — it was left behind by a
+    registration that died before completing.  Called on service startup and
+    after DELETE, so orphans never accumulate.
+    """
+    trained_root = Path(trained_root)
+    if not trained_root.is_dir():
+        return 0
+    removed = 0
+    for entry in trained_root.iterdir():
+        if not entry.is_dir():
+            continue
+        if (entry / "metadata.json").is_file():
+            continue
+        logger.warning("removing orphaned weights directory: {}", entry.name)
+        shutil.rmtree(entry, ignore_errors=True)
+        removed += 1
+    return removed
+
+
 async def lifespan(_app: FastAPI):  # pragma: no cover - process lifecycle
     settings = _settings()
     settings.jobs_root.mkdir(parents=True, exist_ok=True)
@@ -378,8 +399,11 @@ async def delete_job(job_id: str) -> dict:
     ckpt = Path(job.checkpoint_dir) if job.checkpoint_dir else None
     if ckpt is not None and ckpt.is_dir():
         shutil.rmtree(ckpt, ignore_errors=True)
+    # Orphaned weights: a failed register stage may have left a weights directory
+    # with no metadata.json.  Clean it here so DELETE is always idempotent (#50).
+    orphaned = _cleanup_orphaned_weights(_settings().trained_root)
     return {"job_id": job_id, "deleted": True, "record_kept": True,
-            "checkpoints_removed": ckpt is not None}
+            "checkpoints_removed": ckpt is not None, "orphaned_weights_removed": orphaned}
 
 
 if __name__ == "__main__":  # pragma: no cover
