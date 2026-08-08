@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 from pydantic import ValidationError
 
 from atr_serving.api.auth import require_api_key
@@ -58,13 +58,17 @@ async def _forward(coro) -> Any:
 
 
 @router.post("/jobs", status_code=202)
-async def submit_job(request: Request, body: dict = Body(...),
-                    verify_only: bool = Query(False)) -> dict:
-    """Submit a training job. Returns ``{job_id, status, queued_reason}``.
+async def submit_job(request: Request, response: Response, body: dict = Body(...),
+                     verify_only: bool = Query(False)) -> dict:
+    """Submit a training job. Returns ``202 {job_id, status, queued_reason}``.
 
-    Pass ``verify_only=true`` (query param) to verify the dataset spec against
-    the hub without actually queueing the job. Returns HTTP 400 with
-    ``{valid: false, errors: [...]}`` on failure.
+    ``verify_only=true`` checks the dataset against the hub and returns the
+    report **without queueing anything** — ``200 {valid, checked, errors}``. It
+    is a dry run, so it never creates a job, not even when the spec is fine.
+
+    The check itself lives in the trainer (#46), not here: this proxy's contract
+    is that no training logic lives in it, and a check it owned would be one a
+    direct call to ``:8204`` could skip.
     """
     engine = body.get("engine", "kraken")
     if engine not in SUPPORTED_ENGINES:
@@ -86,14 +90,13 @@ async def submit_job(request: Request, body: dict = Body(...),
             status_code=422,
             detail=exc.errors(include_url=False, include_context=False),
         ) from exc
-    # Verify against the hub before queueing; fail fast on a bad spec
-    if verify_only or body.get("dataset"):
-        try:
-            verify_resp = await _client(request).verify(body, verify_only=verify_only)
-        except EngineError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        if verify_resp.get("valid", True) != True:
-            raise HTTPException(status_code=400, detail=verify_resp)
+    if verify_only:
+        # A dry run answers, it does not act. 200 rather than the route's 202,
+        # because 202 means "accepted for processing" and nothing was; and 200
+        # even for an invalid spec, because "is this spec good?" and "did my
+        # request fail?" are different questions. The caller reads ``valid``.
+        response.status_code = 200
+        return await _forward(_client(request).verify(body))
     return await _forward(_client(request).submit(body))
 
 

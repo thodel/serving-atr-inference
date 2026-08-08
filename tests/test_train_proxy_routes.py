@@ -59,9 +59,11 @@ class FakeTrainer:
     async def delete(self, job_id):
         return await self._answer("delete", job_id, result={"job_id": job_id, "deleted": True})
 
-    async def verify(self, body, *, verify_only=False):
-        return await self._answer("verify", body, verify_only,
-                                  result={"valid": True, "errors": []})
+    #: Overridable per test; the default is a spec that checked out.
+    verify_result = {"valid": True, "checked": True, "errors": []}
+
+    async def verify(self, body):
+        return await self._answer("verify", body, result=self.verify_result)
 
 
 def make_client(trainer: FakeTrainer) -> TestClient:
@@ -100,10 +102,10 @@ def test_submit_forwards_and_returns_the_job(client, trainer):
     resp = client.post("/train/jobs", json=BODY, headers=AUTH)
     assert resp.status_code == 202
     assert resp.json()["job_id"] == JOB["job_id"]
-    # verify() is called first to check the dataset spec, then submit() queues the job
-    assert trainer.calls[0][0] == "verify"
-    assert trainer.calls[1][0] == "submit"
-    assert trainer.calls[1][1]["model_id"] == "kraken-thun-missiven-v1"
+    # One call, not two: the dataset check lives in the trainer's own submit (#46),
+    # so the proxy forwards and nothing here duplicates a hub round-trip.
+    assert [c[0] for c in trainer.calls] == ["submit"]
+    assert trainer.calls[0][1]["model_id"] == "kraken-thun-missiven-v1"
 
 
 def test_list_get_log_cancel_delete(client, trainer):
@@ -136,14 +138,45 @@ def test_malformed_request_is_422_with_the_offending_field(client, trainer):
 
 def test_a_dataset_selecting_nothing_still_reaches_the_trainer(client, trainer):
     """The schema allows it; the pipeline is what refuses to load 1 TB. The proxy
-    does not invent policy the trainer does not have — it does verify the spec
-    against the hub first, but verify() is a fast pre-flight, not a rejection."""
+    does not invent policy the trainer does not have."""
     resp = client.post("/train/jobs", json={"model_id": "m", "dataset": {"hf_repo": REPO}},
                        headers=AUTH)
     assert resp.status_code == 202
-    # verify() is called first, then submit()
-    assert trainer.calls[0][0] == "verify"
-    assert trainer.calls[1][0] == "submit"
+    assert [c[0] for c in trainer.calls] == ["submit"]
+
+
+# ── verify_only is a dry run ────────────────────────────────────────────────
+def test_verify_only_never_queues_a_job(client, trainer):
+    """The regression that motivated this: a valid spec fell through the check and
+    was submitted anyway, so `verify_only=true` handed back a running job."""
+    resp = client.post("/train/jobs", params={"verify_only": "true"}, json=BODY, headers=AUTH)
+    assert resp.status_code == 200
+    assert resp.json()["valid"] is True
+    assert [c[0] for c in trainer.calls] == ["verify"]
+    assert "submit" not in [c[0] for c in trainer.calls]
+
+
+def test_verify_only_reports_an_invalid_spec_as_200_with_valid_false(trainer_factory=None):
+    """An answered question is not a failed request: the report comes back 200 and
+    the caller reads ``valid``."""
+    trainer = FakeTrainer()
+    trainer.verify_result = {"valid": False, "checked": True,
+                             "errors": ["project 'typo' not found under data/train/"]}
+    client = make_client(trainer)
+    resp = client.post("/train/jobs", params={"verify_only": "true"}, json=BODY, headers=AUTH)
+    assert resp.status_code == 200
+    assert resp.json()["valid"] is False
+    assert "typo" in resp.json()["errors"][0]
+    assert [c[0] for c in trainer.calls] == ["verify"]
+
+
+def test_verify_only_still_refuses_a_malformed_envelope(client, trainer):
+    """Envelope validation runs first; a dry run of a request that could never be
+    submitted is still a 422, and reaches the trainer not at all."""
+    resp = client.post("/train/jobs", params={"verify_only": "true"},
+                       json={**BODY, "model_id": "Not A Slug"}, headers=AUTH)
+    assert resp.status_code == 422
+    assert trainer.calls == []
 
 
 # ── failure passthrough ─────────────────────────────────────────────────────

@@ -4,6 +4,8 @@ import pytest
 
 from atr_serving.training.contracts import DatasetSpec
 from atr_serving.training.hf_source import (
+    DatasetNotOnHub,
+    VerificationUnavailable,
     DatasetSelectionError,
     data_files_for,
     hub_cache_dir,
@@ -178,7 +180,7 @@ class TestVerifyDatasetSpec:
     def test_repo_not_found(self):
         """A non-existent repo is reported as an error."""
         def fake_list_notfound(repo, **kwargs):
-            raise Exception("repo not found")
+            raise DatasetNotOnHub("repo not found")
 
         spec = DatasetSpec(hf_repo="does/not-exist",
                            train_projects=["some-project"])
@@ -194,16 +196,10 @@ class TestVerifyDatasetSpec:
             return [f"data/train/{THUN_TRAIN}/shard.parquet",
                     f"data/train/{THUN_TEST}/shard.parquet"]
 
-        def fake_download(repo, filename, **kwargs):
-            class FakeInfo:
-                size = 1024
-            return FakeInfo()
-
         spec = DatasetSpec(hf_repo=REPO,
                            train_projects=["NonExistent-Project"])
         errors = verify_dataset_spec(spec, FakeSettings(),
-                                     list_repo_files_fn=fake_list_ok,
-                                     hf_hf_file_download_fn=fake_download)
+                                     list_repo_files_fn=fake_list_ok)
         assert any("NonExistent-Project" in e for e in errors)
 
     def test_missing_eval_project_is_reported(self):
@@ -223,17 +219,11 @@ class TestVerifyDatasetSpec:
                 f"data/train/{THUN_TEST}/shard.parquet",
             ]
 
-        def fake_download(repo, filename, **kwargs):
-            class FakeInfo:
-                size = 10_000_000
-            return FakeInfo()
-
         spec = DatasetSpec(hf_repo=REPO,
                            train_projects=[THUN_TRAIN],
                            eval_projects=[THUN_TEST])
         errors = verify_dataset_spec(spec, FakeSettings(),
-                                     list_repo_files_fn=fake_list_ok,
-                                     hf_hf_file_download_fn=fake_download)
+                                     list_repo_files_fn=fake_list_ok)
         assert errors == []
 
     def test_no_parquet_files_in_repo_is_an_error(self):
@@ -264,17 +254,14 @@ class TestVerifyDatasetSpec:
             # 5 parquet files
             return [f"data/train/{THUN_TRAIN}/s{i}.parquet" for i in range(5)]
 
-        def fake_download(repo, filename, **kwargs):
-            # Each file reports 20 GB
-            class FakeInfo:
-                size = 20 * 1024**3
-            return FakeInfo()
+        def fake_size(repo, paths, revision=None, repo_type="dataset"):
+            return 20 * 1024**3 * len(paths)          # 20 GB per selected shard
 
         spec = DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN])
-        # Only 50 GB free, but selection estimates 100 GB
+        # Only 50 GB free, but the five selected shards are 100 GB
         errors = verify_dataset_spec(spec, FakeSettings(min_free_disk_gb=50.0),
                                      list_repo_files_fn=fake_list_ok,
-                                     hf_hf_file_download_fn=fake_download)
+                                     paths_size_fn=fake_size)
         assert any("GB" in e and "50" in e for e in errors)
 
     def test_aggregates_all_four_kinds_of_problems(self):
@@ -283,17 +270,11 @@ class TestVerifyDatasetSpec:
             # Only THUN_TEST exists, not THUN_TRAIN
             return [f"data/train/{THUN_TEST}/s.parquet"]
 
-        def fake_download(repo, filename, **kwargs):
-            class FakeInfo:
-                size = 1_000_000
-            return FakeInfo()
-
         spec = DatasetSpec(hf_repo=REPO,
                            train_projects=["MissingProject", THUN_TEST],
                            eval_projects=["AnotherMissing"])
         errors = verify_dataset_spec(spec, FakeSettings(),
-                                     list_repo_files_fn=fake_list_some_missing,
-                                     hf_hf_file_download_fn=fake_download)
+                                     list_repo_files_fn=fake_list_some_missing)
         assert len(errors) >= 2
         assert any("MissingProject" in e for e in errors)
         assert any("AnotherMissing" in e for e in errors)
@@ -309,3 +290,68 @@ class TestVerifyDatasetSpec:
         verify_dataset_spec(spec, FakeSettings(),
                             list_repo_files_fn=fake_list_with_rev)
         assert recorded[0]["revision"] == "some-sha"
+    # ── could-not-check is not the same as invalid ──────────────────────────
+    def test_an_unreachable_hub_raises_rather_than_reporting_a_bad_spec(self):
+        """The distinction the first cut of #46 collapsed: it caught every
+        exception from the listing and reported "does not exist or is not
+        accessible", so a DNS blip read as a typo in the repo name and the
+        gateway answered 400 — "your request is wrong" — for a perfectly good
+        spec it had simply failed to look up."""
+        def unreachable(repo, **kwargs):
+            raise VerificationUnavailable("ConnectionError: [Errno -3] Temporary failure")
+
+        spec = DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN])
+        with pytest.raises(VerificationUnavailable):
+            verify_dataset_spec(spec, FakeSettings(), list_repo_files_fn=unreachable)
+
+    def test_the_repo_is_listed_once_not_twice(self):
+        """It was probed and then listed again — two full tree walks over a
+        694-project repo to learn the same thing."""
+        calls = []
+
+        def counting(repo, **kwargs):
+            calls.append(repo)
+            return [f"data/train/{THUN_TRAIN}/s.parquet"]
+
+        verify_dataset_spec(DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
+                            FakeSettings(), list_repo_files_fn=counting)
+        assert len(calls) == 1
+
+    # ── the size check measures the selection, not the corpus ───────────────
+    def test_only_the_selected_projects_are_sized(self):
+        """The whole point of selecting projects is not to weigh the other 6.6 TB.
+        The first cut estimated the repo — average shard size times *every*
+        parquet file — which on image-text_medieval-scripts refuses every job,
+        including the 116 MB Thun pair that is the standard test case."""
+        sized: list[list[str]] = []
+
+        def fake_list(repo, **kwargs):
+            return [f"data/train/{THUN_TRAIN}/s.parquet"] + [
+                f"data/train/Other_Huge_Project/s{i}.parquet" for i in range(500)
+            ]
+
+        def fake_size(repo, paths, revision=None, repo_type="dataset"):
+            sized.append(list(paths))
+            return 1024 ** 3  # 1 GB for whatever was asked about
+
+        errors = verify_dataset_spec(
+            DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
+            FakeSettings(min_free_disk_gb=50.0),
+            list_repo_files_fn=fake_list, paths_size_fn=fake_size,
+        )
+        assert errors == []
+        assert sized == [[f"data/train/{THUN_TRAIN}/s.parquet"]]
+
+    def test_a_size_lookup_that_fails_does_not_invalidate_a_good_spec(self):
+        def fake_list(repo, **kwargs):
+            return [f"data/train/{THUN_TRAIN}/s.parquet"]
+
+        def unreachable(repo, paths, revision=None, repo_type="dataset"):
+            raise VerificationUnavailable("hub down")
+
+        errors = verify_dataset_spec(
+            DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
+            FakeSettings(min_free_disk_gb=50.0),
+            list_repo_files_fn=fake_list, paths_size_fn=unreachable,
+        )
+        assert errors == []

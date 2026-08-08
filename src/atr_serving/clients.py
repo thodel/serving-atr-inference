@@ -271,9 +271,9 @@ class TrainerClient:
     async def health(self) -> dict:
         return await self._request("GET", "/health")
 
-    async def verify(self, body: dict[str, Any], *, verify_only: bool = False) -> dict:
-        params = {"verify_only": verify_only} if verify_only else {}
-        return await self._request("POST", "/jobs/verify", json=body, params=params)
+    async def verify(self, body: dict[str, Any]) -> dict:
+        """Check a request's dataset against the hub. Queues nothing."""
+        return await self._request("POST", "/jobs/verify", json=body)
 
 
 def get_trainer_client(settings) -> TrainerClient:

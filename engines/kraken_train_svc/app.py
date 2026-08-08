@@ -39,7 +39,11 @@ from loguru import logger
 
 from atr_serving.training.backends import BACKENDS, UnknownBackend, backend_for
 from atr_serving.training.contracts import TrainJob, TrainRequest
-from atr_serving.training.hf_source import verify_dataset_spec
+from atr_serving.training.hf_source import (
+    DatasetSelectionError,
+    VerificationUnavailable,
+    verify_dataset_spec,
+)
 from atr_serving.training.jobstore import JobStore, JobStoreError
 
 from atr_serving.training.preflight import (
@@ -255,32 +259,59 @@ async def submit(request: TrainRequest) -> dict:
     except PreflightError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    # The dataset is checked HERE, not in the gateway proxy, so the guard holds
+    # for every caller — the proxy's own contract is that no training logic lives
+    # in it (#35), and a check it owned would be one a direct call could skip.
+    checked = _verify(request)
+    if not checked["valid"]:
+        raise HTTPException(status_code=400, detail=checked)
+    # An unreachable hub does NOT block the queue: the job downloads when it
+    # starts, which may be hours from now, and refusing it would turn a hiccup
+    # into a failed submission. The reason travels on the job instead.
+    if not checked["checked"]:
+        logger.warning("queuing {} unverified: {}",
+                       request.model_id, checked["unverified_reason"])
+
     job = store.create(request)
     logger.info("queued job {} for model {}", job.id, request.model_id)
     _schedule()  # start immediately when the box allows it, rather than at the next tick
     job = store.load(job.id)
-    return {"job_id": job.id, "status": job.status, "queued_reason": job.queued_reason}
+    return {"job_id": job.id, "status": job.status, "queued_reason": job.queued_reason,
+            "dataset_verified": checked["checked"],
+            **({"unverified_reason": checked["unverified_reason"]}
+               if not checked["checked"] else {})}
+
+
+def _verify(request: TrainRequest) -> dict:
+    """Check the dataset spec against the hub. Never raises for a reachability
+    problem — that is reported as ``checked: false`` and left to the caller.
+
+    Three outcomes, deliberately distinct:
+
+    ``{valid: true,  checked: true}``   the selection is really there
+    ``{valid: false, checked: true}``   the spec is wrong, and ``errors`` says how
+    ``{valid: true,  checked: false}``  the hub could not be reached; unknown
+    """
+    check = getattr(app.state, "verify_spec", None) or verify_dataset_spec
+    try:
+        errors = check(request.dataset, _settings())
+    except DatasetSelectionError as exc:
+        return {"valid": False, "checked": True, "errors": [str(exc)]}
+    except VerificationUnavailable as exc:
+        return {"valid": True, "checked": False, "errors": [],
+                "unverified_reason": f"the hub could not be reached: {exc}"}
+    return {"valid": not errors, "checked": True, "errors": errors}
 
 
 @app.post("/jobs/verify", status_code=200)
-async def verify(request: TrainRequest, verify_only: bool = Query(False)) -> dict:
-    """Verify a TrainRequest against the hub without queuing it.
+async def verify(request: TrainRequest) -> dict:
+    """Check a TrainRequest's dataset against the hub without queueing anything.
 
-    Returns ``{valid: bool, errors: list[str]}``. HTTP 400 when verify_only=True
-    and the spec is invalid. When verify_only=False (the default), submission
-    proceeds normally and verification failures are included in the response.
+    Always 200 — the answer is in the body. A caller asking "would this run?"
+    gets a report, not an exception, and an unreachable hub is reported as
+    ``checked: false`` rather than as a bad spec.
     """
-    settings = _settings()
-    try:
-        errors = verify_dataset_spec(request.dataset, settings)
-    except Exception as exc:  # noqa: BLE001 — structural guard from verify_dataset_spec
-        errors = [str(exc)]
-
-    if errors:
-        if verify_only:
-            raise HTTPException(status_code=400, detail={"valid": False, "errors": errors})
-        return {"valid": False, "errors": errors}
-    return {"valid": True, "errors": []}
+    return _verify(request)
 
 
 @app.get("/jobs")

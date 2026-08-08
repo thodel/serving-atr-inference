@@ -209,6 +209,25 @@ curl -H "X-API-Key: $ATR_API_KEY" -H 'Content-Type: application/json' \
 Training is **fire-and-forget**: the run is a detached process on the box and
 outlives both this request and a restart of either service. Poll the job record.
 
+**The dataset is checked against the hub before anything queues** (#46): the repo
+exists, at the pinned revision; every named project is really a directory under
+`data/<split>/`; the layout is parquet; and *the selection* — not the corpus —
+fits the disk guard. A bad spec is a `400` listing every problem at once, instead
+of a job that dies in prepare an hour into a download. Add `?verify_only=true` to
+get that report without queueing anything:
+
+```bash
+curl -H "X-API-Key: $ATR_API_KEY" -H 'Content-Type: application/json' -d @job.json \
+  'https://<gateway>/train/jobs?verify_only=true'
+# {"valid": false, "checked": true,
+#  "errors": ["project 'GT_Thun-Trainig' not found under data/train/ … Available: [...]"]}
+```
+
+An unreachable hub is **not** a bad spec: the job queues anyway with
+`dataset_verified: false` and the reason, because the download happens when the
+run starts — possibly hours later — and a network hiccup now should not cost the
+submission.
+
 Add `"engine": "vllm"` (and VLM `params`) to submit a QLoRA fine-tune instead; the
 envelope is otherwise identical.
 

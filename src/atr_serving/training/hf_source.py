@@ -16,7 +16,6 @@ import nothing from ``datasets``: the trainer service hands us plain dicts.
 
 from __future__ import annotations
 
-import fnmatch
 import os
 import re
 from dataclasses import dataclass
@@ -29,7 +28,9 @@ if TYPE_CHECKING:
     from atr_serving.training.settings import TrainerSettings
 
 __all__ = [
+    "DatasetNotOnHub",
     "DatasetSelectionError",
+    "VerificationUnavailable",
     "PageRow",
     "IMAGE_COLUMNS",
     "PAGEXML_COLUMNS",
@@ -57,6 +58,20 @@ IMAGE_COLUMNS = ("image",)
 
 class DatasetSelectionError(ValueError):
     """Raised when a DatasetSpec selects nothing, or something unsafe."""
+
+
+class DatasetNotOnHub(LookupError):
+    """The repo (or the pinned revision) is not there. A fact about the spec."""
+
+
+class VerificationUnavailable(RuntimeError):
+    """The hub could not be reached, so the spec was **not** checked.
+
+    Deliberately a separate type from :class:`DatasetNotOnHub`, and never folded
+    into the returned error list: a caller that cannot tell "your dataset does
+    not exist" from "I could not look" will reject a perfectly good job the
+    moment the network hiccups.
+    """
 
 
 # `(` and `)` are fine in a glob; these are not — a project name containing them
@@ -222,24 +237,61 @@ def row_to_page(index: int, row: dict) -> PageRow:
 # ── hub verification ─────────────────────────────────────────────────────────
 # The seam: in production these call huggingface_hub; in tests they are patched.
 def _default_list_repo_files(hf_repo: str, revision: str | None, repo_type: str = "dataset"):
-    from huggingface_hub import HfApi
-    return HfApi().list_repo_files(hf_repo, revision=revision, repo_type=repo_type)
+    """List a repo's files, translating the hub's errors into our two cases.
+
+    The translation lives here, at the seam, because this is the only place that
+    imports ``huggingface_hub`` — and because the distinction it draws is the
+    whole point: a repo that is *missing* is the caller's mistake, a hub that is
+    *unreachable* is nobody's. Collapsing them (as the first cut of #46 did)
+    reports "this dataset does not exist" when the truth is "we could not look",
+    which is the #21/#30 rule in a new place.
+    """
+    try:
+        from huggingface_hub import HfApi
+        from huggingface_hub.errors import (
+            EntryNotFoundError,
+            RepositoryNotFoundError,
+            RevisionNotFoundError,
+        )
+    except ModuleNotFoundError as exc:  # e.g. the gateway venv, which has no ML deps
+        raise VerificationUnavailable(f"huggingface_hub is not installed: {exc}") from exc
+
+    try:
+        return HfApi().list_repo_files(hf_repo, revision=revision, repo_type=repo_type)
+    except (RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError) as exc:
+        raise DatasetNotOnHub(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — everything else is "could not look"
+        raise VerificationUnavailable(f"{type(exc).__name__}: {exc}") from exc
 
 
-def _default_hf_hf_file_download(hf_repo: str, filename: str, revision: str | None,
-                                  repo_type: str = "dataset"):
-    from huggingface_hub import HfApi
-    return HfApi().hf_hf_file_download(hf_repo, filename=filename,
-                                       revision=revision, repo_type=repo_type)
+def _default_paths_size(hf_repo: str, paths: list[str], revision: str | None,
+                        repo_type: str = "dataset") -> int:
+    """Total size in bytes of ``paths``, **without downloading them**.
+
+    ``get_paths_info`` answers from the repo tree. The first cut of #46 tried to
+    size the selection with ``hf_hub_download``, which fetches the file — a
+    "cheap pre-flight" that would have pulled up to 20 parquet shards. It never
+    ran, because the method name was misspelled and the AttributeError was
+    swallowed; the typo was the only thing keeping the check honest.
+    """
+    try:
+        from huggingface_hub import HfApi
+    except ModuleNotFoundError as exc:
+        raise VerificationUnavailable(f"huggingface_hub is not installed: {exc}") from exc
+
+    try:
+        infos = HfApi().get_paths_info(hf_repo, paths, repo_type=repo_type, revision=revision)
+    except Exception as exc:  # noqa: BLE001 — a size estimate is never worth failing over
+        raise VerificationUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    return sum(getattr(i, "size", 0) or 0 for i in infos)
 
 
 def verify_dataset_spec(
     spec: DatasetSpec,
     settings: TrainerSettings,
     *,
-    dry_run: bool = False,
     list_repo_files_fn=None,
-    hf_hf_file_download_fn=None,
+    paths_size_fn=None,
 ) -> list[str]:
     """Check a DatasetSpec against the hub before it is queued.
 
@@ -250,21 +302,23 @@ def verify_dataset_spec(
     2. Do named ``train_projects`` / ``eval_projects`` exist as directories
        under ``data/<split>/``?
     3. Does the dataset have parquet files (proxy for PageXML format)?
-    4. How large is the estimated download, against ``min_free_disk_gb``?
+    4. How large is **the selection** — not the repo — against ``min_free_disk_gb``?
 
     Returns a list of human-readable problem descriptions. Empty list = valid.
 
     Raises :exc:`DatasetSelectionError` for structural problems (empty projects,
-    ambiguous names — the same class used by :func:`data_files_for`).
+    projects on both sides of the split) and :exc:`VerificationUnavailable` when
+    the hub could not be reached. The second is deliberately **not** an error in
+    the returned list: "we could not check" must not read as "your spec is
+    wrong", and the caller decides whether to queue anyway.
 
-    The network call is behind a seam (``list_repo_files_fn`` /
-    ``hf_hf_file_download_fn``) so tests can inject fakes without touching the
-    network.
+    The network calls are behind seams (``list_repo_files_fn``, ``paths_size_fn``)
+    so this is testable in the repo venv without a network.
     """
     if list_repo_files_fn is None:
         list_repo_files_fn = _default_list_repo_files
-    if hf_hf_file_download_fn is None:
-        hf_hf_file_download_fn = _default_hf_hf_file_download
+    if paths_size_fn is None:
+        paths_size_fn = _default_paths_size
 
     errors: list[str] = []
 
@@ -281,24 +335,18 @@ def verify_dataset_spec(
             "That leaks evaluation pages into training."
         )
 
-    # 1. Repo existence — a single lightweight probe
-    try:
-        list_repo_files_fn(spec.hf_repo, revision=spec.revision, repo_type="dataset")
-    except Exception as exc:  # noqa: BLE001
-        revision_note = f" at revision {spec.revision!r}" if spec.revision else ""
-        errors.append(
-            f"hf_repo {spec.hf_repo!r}{revision_note} does not exist or is not "
-            f"accessible: {exc}"
-        )
-        return errors  # nothing further to check if the repo is missing
-
-    # List all files once; reuse for project and size checks
+    # 1. Repo existence. One listing serves this, the project check and the size
+    #    estimate — the first cut called it twice, which on a 694-project repo is
+    #    two full tree walks to learn the same thing.
+    #    VerificationUnavailable is not caught: it is not a fact about the spec.
     try:
         all_files = list(list_repo_files_fn(spec.hf_repo, revision=spec.revision,
                                             repo_type="dataset"))
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"could not list files in {spec.hf_repo!r}: {exc}")
-        return errors
+    except DatasetNotOnHub as exc:
+        revision_note = f" at revision {spec.revision!r}" if spec.revision else ""
+        errors.append(f"hf_repo {spec.hf_repo!r}{revision_note} does not exist or is "
+                      f"not accessible: {exc}")
+        return errors  # nothing further to check if the repo is missing
 
     # 2. Project directories must exist under data/<split>/
     split_prefix = f"data/{spec.split}/"
@@ -329,36 +377,33 @@ def verify_dataset_spec(
             f"data/<split>/<project>/*.parquet layout from the pagexml-hf converter."
         )
 
-    # 4. Rough size estimate vs. free disk
-    if settings and settings.min_free_disk_gb > 0:
-        total_bytes = 0
-        try:
-            # Sample up to 20 files to estimate average size
-            parquet_files = [f for f in all_files if f.endswith(".parquet")]
-            sample = parquet_files[:20]
-            for pf in sample:
-                try:
-                    info = hf_hf_file_download_fn(
-                        spec.hf_repo, filename=pf,
-                        revision=spec.revision, repo_type="dataset"
-                    )
-                    if info and hasattr(info, "size") and info.size:
-                        total_bytes += info.size
-                except Exception:  # noqa: BLE001
-                    pass
-            if sample and total_bytes > 0:
-                avg_size = total_bytes / len(sample)
-                total_estimate = avg_size * len(parquet_files)
-                needed_gb = total_estimate / (1024**3)
-                free_gb = settings.min_free_disk_gb
-                if needed_gb > free_gb * 0.9:
-                    errors.append(
-                        f"estimated download ~{needed_gb:.1f} GB "
-                        f"(min_free_disk_gb={free_gb:.1f} GiB). "
-                        "Selection may exceed available space; consider reducing "
-                        "train_projects or setting max_pages."
-                    )
-        except Exception:  # noqa: BLE001
-            pass  # size check is best-effort
+    # 4. Size of THE SELECTION against the disk guard. Sizing the whole repo (what
+    #    the first cut computed) is meaningless here: `data/train/` of
+    #    image-text_medieval-scripts is ~6.6 TB, so every job on it would be
+    #    refused, including the 116 MB Thun pair that is the standard test case.
+    #    Selecting a few project directories out of hundreds is the entire design.
+    if settings is not None and settings.min_free_disk_gb > 0 and not errors:
+        selected = [
+            f for f in all_files
+            if f.endswith(".parquet")
+            and f.startswith(split_prefix)
+            and f[len(split_prefix):].split("/", 1)[0] in set(all_projects)
+        ]
+        if selected:
+            # Best-effort: an unreachable hub here does not invalidate a spec whose
+            # repo and projects already checked out.
+            try:
+                needed_gb = paths_size_fn(spec.hf_repo, selected, spec.revision,
+                                          "dataset") / 1024 ** 3
+            except VerificationUnavailable:
+                needed_gb = 0.0
+            if needed_gb > settings.min_free_disk_gb:
+                errors.append(
+                    f"the selection is ~{needed_gb:.1f} GB across {len(selected)} "
+                    f"parquet shards, over the {settings.min_free_disk_gb} GB the "
+                    "trainer keeps free. Select fewer projects, or set max_pages — "
+                    "note that max_pages caps what is materialized, not what is "
+                    "downloaded (#39)."
+                )
 
     return errors

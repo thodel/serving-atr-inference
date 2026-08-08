@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from atr_serving.training.contracts import DatasetSpec, Metrics, TrainRequest
+from atr_serving.training.hf_source import VerificationUnavailable
 from atr_serving.training.jobstore import JobStore
 
 from kraken_train_svc import app as app_module
@@ -86,6 +87,12 @@ def spawn() -> FakeSpawn:
 
 
 @pytest.fixture
+def app():
+    """The service module's app object, so a test can install its own seams."""
+    return app_module.app
+
+
+@pytest.fixture
 def client(settings: TrainerSettings, spawn: FakeSpawn):
     app = app_module.app
     app.state.settings = settings
@@ -94,7 +101,7 @@ def client(settings: TrainerSettings, spawn: FakeSpawn):
     app.state.vram_check = free_gpu
     with TestClient(app) as c:
         yield c
-    for attr in ("settings", "store", "spawn", "vram_check"):
+    for attr in ("settings", "store", "spawn", "vram_check", "verify_spec"):
         if hasattr(app.state, attr):
             delattr(app.state, attr)
 
@@ -125,11 +132,63 @@ def test_invalid_request_is_rejected(client):
     assert client.post("/jobs", json=bad).status_code == 422
 
 
-def test_a_dataset_selecting_nothing_is_still_accepted_but_fails_in_the_runner(client):
-    """The API does not second-guess the schema; the guard lives in the pipeline,
-    which fails the job loudly rather than downloading 6.6 TB."""
+def test_a_dataset_selecting_nothing_is_refused_at_submit(client):
+    """Was accepted until #46, on the grounds that the pipeline would fail it
+    loudly. It still would — but hours later, after the job queued and started
+    downloading. The check is free and structural, so it happens here."""
     resp = client.post("/jobs", json={"model_id": "m", "dataset": {"hf_repo": REPO}})
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["valid"] is False and detail["checked"] is True
+    assert "train_projects" in detail["errors"][0]
+
+
+def test_a_project_on_both_sides_of_the_split_is_refused_at_submit(client):
+    resp = client.post("/jobs", json={
+        "model_id": "m",
+        "dataset": {"hf_repo": REPO, "train_projects": ["a"], "eval_projects": ["a"]},
+    })
+    assert resp.status_code == 400
+    assert "both train and eval" in resp.json()["detail"]["errors"][0]
+
+
+def test_a_spec_the_hub_rejects_is_refused_with_every_problem_at_once(client, app):
+    app.state.verify_spec = lambda spec, settings: [
+        "project 'GT_Thun-Trainig' not found under data/train/",
+        "no .parquet files found",
+    ]
+    resp = client.post("/jobs", json=BODY)
+    assert resp.status_code == 400
+    assert len(resp.json()["detail"]["errors"]) == 2
+
+
+def test_an_unreachable_hub_queues_the_job_rather_than_refusing_it(client, app):
+    """"Could not check" is not "your spec is wrong". The job downloads when it
+    starts, possibly hours later, so a hiccup now must not cost the submission —
+    but the record says it went in unverified."""
+    def unreachable(spec, settings):
+        raise VerificationUnavailable("ConnectionError: hub unreachable")
+
+    app.state.verify_spec = unreachable
+    resp = client.post("/jobs", json=BODY)
     assert resp.status_code == 202
+    assert resp.json()["dataset_verified"] is False
+    assert "hub" in resp.json()["unverified_reason"]
+
+
+def test_a_verified_submission_says_so(client, app):
+    app.state.verify_spec = lambda spec, settings: []
+    resp = client.post("/jobs", json=BODY)
+    assert resp.status_code == 202
+    assert resp.json()["dataset_verified"] is True
+
+
+def test_verify_answers_without_queueing_anything(client, app):
+    app.state.verify_spec = lambda spec, settings: ["project 'typo' not found"]
+    resp = client.post("/jobs/verify", json=BODY)
+    assert resp.status_code == 200          # an answered question, not a failed request
+    assert resp.json()["valid"] is False
+    assert client.get("/jobs").json()["jobs"] == []
 
 
 def test_full_disk_refuses_the_submission(client, settings):

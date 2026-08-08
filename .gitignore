@@ -235,3 +235,8 @@ config/models.local.yaml
 # Training jobs + trained weights (default: ~/atr-cache/..., these cover a local root)
 training_jobs/
 trained/
+
+# Written into the workspace by the model-discovery Action (#24); the report
+# it produces is a GitHub issue, not a tracked file.
+discovery_report.json
+discovery_report.md
