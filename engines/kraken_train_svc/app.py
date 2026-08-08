@@ -39,6 +39,7 @@ from loguru import logger
 
 from atr_serving.training.backends import BACKENDS, UnknownBackend, backend_for
 from atr_serving.training.contracts import TrainJob, TrainRequest
+from atr_serving.training.hf_source import verify_dataset_spec
 from atr_serving.training.jobstore import JobStore, JobStoreError
 
 from atr_serving.training.preflight import (
@@ -259,6 +260,27 @@ async def submit(request: TrainRequest) -> dict:
     _schedule()  # start immediately when the box allows it, rather than at the next tick
     job = store.load(job.id)
     return {"job_id": job.id, "status": job.status, "queued_reason": job.queued_reason}
+
+
+@app.post("/jobs/verify", status_code=200)
+async def verify(request: TrainRequest, verify_only: bool = Query(False)) -> dict:
+    """Verify a TrainRequest against the hub without queuing it.
+
+    Returns ``{valid: bool, errors: list[str]}``. HTTP 400 when verify_only=True
+    and the spec is invalid. When verify_only=False (the default), submission
+    proceeds normally and verification failures are included in the response.
+    """
+    settings = _settings()
+    try:
+        errors = verify_dataset_spec(request.dataset, settings)
+    except Exception as exc:  # noqa: BLE001 — structural guard from verify_dataset_spec
+        errors = [str(exc)]
+
+    if errors:
+        if verify_only:
+            raise HTTPException(status_code=400, detail={"valid": False, "errors": errors})
+        return {"valid": False, "errors": errors}
+    return {"valid": True, "errors": []}
 
 
 @app.get("/jobs")

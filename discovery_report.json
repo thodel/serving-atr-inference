@@ -1,0 +1,105 @@
+{
+  "hf_candidates": [
+    {
+      "id": "lapislazuli666/kraken-htr-medieval-french",
+      "downloads": 13,
+      "last_modified": "2026-06-18T16:00:39.000Z",
+      "tags": [
+        "kraken",
+        "coreml",
+        "htr",
+        "ocr",
+        "handwriting-recognition",
+        "medieval",
+        "manuscripts",
+        "french",
+        "gothic-script",
+        "image-to-text",
+        "fro",
+        "dataset:HTR-United/cremma-medieval",
+        "license:cc-by-4.0",
+        "region:us"
+      ],
+      "score": 0
+    }
+  ],
+  "zenodo_candidates": [],
+  "new_hf_models": [
+    {
+      "id": "lapislazuli666/kraken-htr-medieval-french",
+      "downloads": 13,
+      "last_modified": "2026-06-18T16:00:39.000Z",
+      "tags": [
+        "kraken",
+        "coreml",
+        "htr",
+        "ocr",
+        "handwriting-recognition",
+        "medieval",
+        "manuscripts",
+        "french",
+        "gothic-script",
+        "image-to-text",
+        "fro",
+        "dataset:HTR-United/cremma-medieval",
+        "license:cc-by-4.0",
+        "region:us"
+      ],
+      "score": 0
+    }
+  ],
+  "new_zenodo_models": [],
+  "served_hf_repos": [
+    "dh-unibe/trocr-essoins-middle-latin",
+    "dh-unibe/trocr-kurrent-xvi-xvii",
+    "dh-unibe/trocr-medieval-escriptmask",
+    "wjbmattingly/lightonocr-2-1b-catmus-caroline",
+    "wjbmattingly/qwen3-vl-8b-hebrew-3-epochs",
+    "wjbmattingly/qwen3-vl-8b-old-church-slavonic-line-3-epochs"
+  ],
+  "served_zenodo_ids": [
+    "10519596",
+    "10556673",
+    "10592716",
+    "10599911",
+    "10886224",
+    "11113737",
+    "11673242",
+    "13736584",
+    "13741957",
+    "13788177",
+    "13814200",
+    "13862096",
+    "13942714",
+    "15030337",
+    "15366732",
+    "17690418",
+    "18207676",
+    "18207719",
+    "18207767",
+    "18207779",
+    "18220238",
+    "18732245",
+    "19222213",
+    "20529753",
+    "20642057",
+    "2577813",
+    "5468665",
+    "6542744",
+    "7050270",
+    "7050342",
+    "7051644",
+    "7410529",
+    "7516057",
+    "7516310",
+    "7631619",
+    "7755483",
+    "7755504",
+    "7933402",
+    "8193498"
+  ],
+  "errors": [
+    "HF query 'qwen-vl OCR fine-tune' page 1: HTTPSConnectionPool(host='huggingface.co', port=443): Max retries exceeded with url: /api/models?search=qwen-vl+OCR+fine-tune&direction=-1&limit=100&full=false (Caused by NameResolutionError(\"<urllib3.connection.HTTPSConnection object at 0x7763babbd6d0>: Failed to resolve 'huggingface.co' ([Errno -3] Temporary failure in name resolution)\"))",
+    "Zenodo community 'htr-model' page 1: HTTPSConnectionPool(host='zenodo.org', port=443): Max retries exceeded with url: /api/records?q=HTR+model&type=dataset&size=200&allversions=false&page=1 (Caused by NameResolutionError(\"<urllib3.connection.HTTPSConnection object at 0x7763babbe7e0>: Failed to resolve 'zenodo.org' ([Errno -3] Temporary failure in name resolution)\"))"
+  ]
+}

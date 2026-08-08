@@ -58,8 +58,14 @@ async def _forward(coro) -> Any:
 
 
 @router.post("/jobs", status_code=202)
-async def submit_job(request: Request, body: dict = Body(...)) -> dict:
-    """Submit a training job. Returns ``{job_id, status, queued_reason}``."""
+async def submit_job(request: Request, body: dict = Body(...),
+                    verify_only: bool = Query(False)) -> dict:
+    """Submit a training job. Returns ``{job_id, status, queued_reason}``.
+
+    Pass ``verify_only=true`` (query param) to verify the dataset spec against
+    the hub without actually queueing the job. Returns HTTP 400 with
+    ``{valid: false, errors: [...]}`` on failure.
+    """
     engine = body.get("engine", "kraken")
     if engine not in SUPPORTED_ENGINES:
         raise HTTPException(
@@ -80,6 +86,14 @@ async def submit_job(request: Request, body: dict = Body(...)) -> dict:
             status_code=422,
             detail=exc.errors(include_url=False, include_context=False),
         ) from exc
+    # Verify against the hub before queueing; fail fast on a bad spec
+    if verify_only or body.get("dataset"):
+        try:
+            verify_resp = await _client(request).verify(body, verify_only=verify_only)
+        except EngineError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if verify_resp.get("valid", True) != True:
+            raise HTTPException(status_code=400, detail=verify_resp)
     return await _forward(_client(request).submit(body))
 
 

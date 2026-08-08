@@ -10,6 +10,7 @@ from atr_serving.training.hf_source import (
     page_stem,
     project_glob,
     row_to_page,
+    verify_dataset_spec,
 )
 
 THUN_TRAIN = "GT_Thun-Training_(TEST-DEMO)"
@@ -163,3 +164,148 @@ def test_a_decoded_image_cell_is_refused_with_the_reason():
 
     with pytest.raises(DatasetSelectionError, match="decode=False"):
         row_to_page(0, {"image": FakePIL(), "xml_content": "<PcGts/>"})
+
+
+# ── verify_dataset_spec ─────────────────────────────────────────────────────
+class FakeSettings:
+    def __init__(self, min_free_disk_gb=50.0):
+        self.min_free_disk_gb = min_free_disk_gb
+
+
+class TestVerifyDatasetSpec:
+    """Unit tests for verify_dataset_spec — all network calls are faked."""
+
+    def test_repo_not_found(self):
+        """A non-existent repo is reported as an error."""
+        def fake_list_notfound(repo, **kwargs):
+            raise Exception("repo not found")
+
+        spec = DatasetSpec(hf_repo="does/not-exist",
+                           train_projects=["some-project"])
+        errors = verify_dataset_spec(spec, FakeSettings(),
+                                     list_repo_files_fn=fake_list_notfound)
+        assert len(errors) == 1
+        assert "does/not-exist" in errors[0]
+        assert "not exist" in errors[0].lower()
+
+    def test_missing_train_project_is_reported(self):
+        """A project that does not exist in the repo is named in the error."""
+        def fake_list_ok(repo, **kwargs):
+            return [f"data/train/{THUN_TRAIN}/shard.parquet",
+                    f"data/train/{THUN_TEST}/shard.parquet"]
+
+        def fake_download(repo, filename, **kwargs):
+            class FakeInfo:
+                size = 1024
+            return FakeInfo()
+
+        spec = DatasetSpec(hf_repo=REPO,
+                           train_projects=["NonExistent-Project"])
+        errors = verify_dataset_spec(spec, FakeSettings(),
+                                     list_repo_files_fn=fake_list_ok,
+                                     hf_hf_file_download_fn=fake_download)
+        assert any("NonExistent-Project" in e for e in errors)
+
+    def test_missing_eval_project_is_reported(self):
+        def fake_list_ok(repo, **kwargs):
+            return [f"data/train/{THUN_TRAIN}/s.parquet"]
+        spec = DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN],
+                           eval_projects=["FakeEvalProject"])
+        errors = verify_dataset_spec(spec, FakeSettings(),
+                                     list_repo_files_fn=fake_list_ok)
+        assert any("FakeEvalProject" in e for e in errors)
+
+    def test_valid_spec_returns_no_errors(self):
+        """A correctly configured spec passes silently."""
+        def fake_list_ok(repo, **kwargs):
+            return [
+                f"data/train/{THUN_TRAIN}/shard.parquet",
+                f"data/train/{THUN_TEST}/shard.parquet",
+            ]
+
+        def fake_download(repo, filename, **kwargs):
+            class FakeInfo:
+                size = 10_000_000
+            return FakeInfo()
+
+        spec = DatasetSpec(hf_repo=REPO,
+                           train_projects=[THUN_TRAIN],
+                           eval_projects=[THUN_TEST])
+        errors = verify_dataset_spec(spec, FakeSettings(),
+                                     list_repo_files_fn=fake_list_ok,
+                                     hf_hf_file_download_fn=fake_download)
+        assert errors == []
+
+    def test_no_parquet_files_in_repo_is_an_error(self):
+        """A repo without .parquet files is the wrong format."""
+        def fake_list_no_parquet(repo, **kwargs):
+            return ["README.md", "dataset_info.json"]
+
+        spec = DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN])
+        errors = verify_dataset_spec(spec, FakeSettings(),
+                                     list_repo_files_fn=fake_list_no_parquet)
+        assert any(".parquet" in e for e in errors)
+
+    def test_empty_train_projects_raises_DatasetSelectionError(self):
+        """Structural validation mirrors data_files_for."""
+        spec = DatasetSpec(hf_repo=REPO, train_projects=[])
+        with pytest.raises(DatasetSelectionError, match="selects no train_projects"):
+            verify_dataset_spec(spec, FakeSettings())
+
+    def test_overlapping_train_and_eval_raises(self):
+        spec = DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN],
+                           eval_projects=[THUN_TRAIN])
+        with pytest.raises(DatasetSelectionError, match="both train and eval"):
+            verify_dataset_spec(spec, FakeSettings())
+
+    def test_size_warning_when_selection_exceeds_disk(self):
+        """A selection larger than min_free_disk_gb produces a warning."""
+        def fake_list_ok(repo, **kwargs):
+            # 5 parquet files
+            return [f"data/train/{THUN_TRAIN}/s{i}.parquet" for i in range(5)]
+
+        def fake_download(repo, filename, **kwargs):
+            # Each file reports 20 GB
+            class FakeInfo:
+                size = 20 * 1024**3
+            return FakeInfo()
+
+        spec = DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN])
+        # Only 50 GB free, but selection estimates 100 GB
+        errors = verify_dataset_spec(spec, FakeSettings(min_free_disk_gb=50.0),
+                                     list_repo_files_fn=fake_list_ok,
+                                     hf_hf_file_download_fn=fake_download)
+        assert any("GB" in e and "50" in e for e in errors)
+
+    def test_aggregates_all_four_kinds_of_problems(self):
+        """Errors from every check stage are collected, not short-circuited."""
+        def fake_list_some_missing(repo, **kwargs):
+            # Only THUN_TEST exists, not THUN_TRAIN
+            return [f"data/train/{THUN_TEST}/s.parquet"]
+
+        def fake_download(repo, filename, **kwargs):
+            class FakeInfo:
+                size = 1_000_000
+            return FakeInfo()
+
+        spec = DatasetSpec(hf_repo=REPO,
+                           train_projects=["MissingProject", THUN_TEST],
+                           eval_projects=["AnotherMissing"])
+        errors = verify_dataset_spec(spec, FakeSettings(),
+                                     list_repo_files_fn=fake_list_some_missing,
+                                     hf_hf_file_download_fn=fake_download)
+        assert len(errors) >= 2
+        assert any("MissingProject" in e for e in errors)
+        assert any("AnotherMissing" in e for e in errors)
+
+    def test_revision_is_passed_to_list_repo_files(self):
+        recorded = []
+        def fake_list_with_rev(repo, revision=None, **kwargs):
+            recorded.append({"repo": repo, "revision": revision})
+            return []
+
+        spec = DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN],
+                           revision="some-sha")
+        verify_dataset_spec(spec, FakeSettings(),
+                            list_repo_files_fn=fake_list_with_rev)
+        assert recorded[0]["revision"] == "some-sha"

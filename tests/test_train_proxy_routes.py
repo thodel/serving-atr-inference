@@ -59,6 +59,10 @@ class FakeTrainer:
     async def delete(self, job_id):
         return await self._answer("delete", job_id, result={"job_id": job_id, "deleted": True})
 
+    async def verify(self, body, *, verify_only=False):
+        return await self._answer("verify", body, verify_only,
+                                  result={"valid": True, "errors": []})
+
 
 def make_client(trainer: FakeTrainer) -> TestClient:
     app = create_app(Settings(api_key=KEY, require_auth=True))
@@ -96,8 +100,10 @@ def test_submit_forwards_and_returns_the_job(client, trainer):
     resp = client.post("/train/jobs", json=BODY, headers=AUTH)
     assert resp.status_code == 202
     assert resp.json()["job_id"] == JOB["job_id"]
-    assert trainer.calls[0][0] == "submit"
-    assert trainer.calls[0][1]["model_id"] == "kraken-thun-missiven-v1"
+    # verify() is called first to check the dataset spec, then submit() queues the job
+    assert trainer.calls[0][0] == "verify"
+    assert trainer.calls[1][0] == "submit"
+    assert trainer.calls[1][1]["model_id"] == "kraken-thun-missiven-v1"
 
 
 def test_list_get_log_cancel_delete(client, trainer):
@@ -130,11 +136,14 @@ def test_malformed_request_is_422_with_the_offending_field(client, trainer):
 
 def test_a_dataset_selecting_nothing_still_reaches_the_trainer(client, trainer):
     """The schema allows it; the pipeline is what refuses to load 1 TB. The proxy
-    does not invent policy the trainer does not have."""
+    does not invent policy the trainer does not have — it does verify the spec
+    against the hub first, but verify() is a fast pre-flight, not a rejection."""
     resp = client.post("/train/jobs", json={"model_id": "m", "dataset": {"hf_repo": REPO}},
                        headers=AUTH)
     assert resp.status_code == 202
-    assert trainer.calls[0][0] == "submit"
+    # verify() is called first, then submit()
+    assert trainer.calls[0][0] == "verify"
+    assert trainer.calls[1][0] == "submit"
 
 
 # ── failure passthrough ─────────────────────────────────────────────────────

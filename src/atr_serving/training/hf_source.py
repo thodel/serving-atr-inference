@@ -16,10 +16,17 @@ import nothing from ``datasets``: the trainer service hands us plain dicts.
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from atr_serving.training.contracts import DatasetSpec
+
+if TYPE_CHECKING:
+    from atr_serving.training.settings import TrainerSettings
 
 __all__ = [
     "DatasetSelectionError",
@@ -33,11 +40,12 @@ __all__ = [
     "page_stem",
     "pick_column",
     "row_to_page",
+    "verify_dataset_spec",
 ]
 
 #: Column aliases across the dh-unibe exports. Nearly all were produced by the
 #: same ``pagexml-hf`` converter and use ``xml_content``/``project_name``, but
-#: older exports (e.g. ``image-text_koenigsfelden-charters-part-3``) use ``xml``
+#: older exports (e.g. ``image-text_koenigsfelden-charters-part-3`` use ``xml``
 #: and ``project``. Assuming one spelling means a job dies on its first row with
 #: "no xml_content" and no hint that the column is simply called something else —
 #: the failure mode that cost an afternoon in lassberg/vlm_training, where the
@@ -108,9 +116,6 @@ def hub_cache_dir(hf_repo: str, hf_home=None):
     ``/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub``, so a dataset another
     project already pulled is simply there.
     """
-    import os
-    from pathlib import Path
-
     if not hf_repo or hf_repo.strip() != hf_repo or hf_repo.count("/") > 1:
         raise DatasetSelectionError(f"not a hub dataset id: {hf_repo!r}")
     name = f"datasets--{hf_repo.replace('/', '--')}"
@@ -212,3 +217,148 @@ def row_to_page(index: int, row: dict) -> PageRow:
         source_filename=filename if isinstance(filename, str) else None,
         project=project if isinstance(project, str) else None,
     )
+
+
+# ── hub verification ─────────────────────────────────────────────────────────
+# The seam: in production these call huggingface_hub; in tests they are patched.
+def _default_list_repo_files(hf_repo: str, revision: str | None, repo_type: str = "dataset"):
+    from huggingface_hub import HfApi
+    return HfApi().list_repo_files(hf_repo, revision=revision, repo_type=repo_type)
+
+
+def _default_hf_hf_file_download(hf_repo: str, filename: str, revision: str | None,
+                                  repo_type: str = "dataset"):
+    from huggingface_hub import HfApi
+    return HfApi().hf_hf_file_download(hf_repo, filename=filename,
+                                       revision=revision, repo_type=repo_type)
+
+
+def verify_dataset_spec(
+    spec: DatasetSpec,
+    settings: TrainerSettings,
+    *,
+    dry_run: bool = False,
+    list_repo_files_fn=None,
+    hf_hf_file_download_fn=None,
+) -> list[str]:
+    """Check a DatasetSpec against the hub before it is queued.
+
+    All checks are cheap and public (no auth required for public repos).
+    Problems are **aggregated** so the caller gets every issue at once:
+
+    1. Does ``hf_repo`` exist (and at ``revision`` if pinned)?
+    2. Do named ``train_projects`` / ``eval_projects`` exist as directories
+       under ``data/<split>/``?
+    3. Does the dataset have parquet files (proxy for PageXML format)?
+    4. How large is the estimated download, against ``min_free_disk_gb``?
+
+    Returns a list of human-readable problem descriptions. Empty list = valid.
+
+    Raises :exc:`DatasetSelectionError` for structural problems (empty projects,
+    ambiguous names — the same class used by :func:`data_files_for`).
+
+    The network call is behind a seam (``list_repo_files_fn`` /
+    ``hf_hf_file_download_fn``) so tests can inject fakes without touching the
+    network.
+    """
+    if list_repo_files_fn is None:
+        list_repo_files_fn = _default_list_repo_files
+    if hf_hf_file_download_fn is None:
+        hf_hf_file_download_fn = _default_hf_hf_file_download
+
+    errors: list[str] = []
+
+    # Structural validation (mirrors data_files_for guards)
+    if not spec.train_projects:
+        raise DatasetSelectionError(
+            f"DatasetSpec for {spec.hf_repo!r} selects no train_projects. Refusing to "
+            "load the whole repository — it is far larger than the disk."
+        )
+    overlap = sorted(set(spec.train_projects) & set(spec.eval_projects))
+    if overlap:
+        raise DatasetSelectionError(
+            f"projects appear in both train and eval: {overlap}. "
+            "That leaks evaluation pages into training."
+        )
+
+    # 1. Repo existence — a single lightweight probe
+    try:
+        list_repo_files_fn(spec.hf_repo, revision=spec.revision, repo_type="dataset")
+    except Exception as exc:  # noqa: BLE001
+        revision_note = f" at revision {spec.revision!r}" if spec.revision else ""
+        errors.append(
+            f"hf_repo {spec.hf_repo!r}{revision_note} does not exist or is not "
+            f"accessible: {exc}"
+        )
+        return errors  # nothing further to check if the repo is missing
+
+    # List all files once; reuse for project and size checks
+    try:
+        all_files = list(list_repo_files_fn(spec.hf_repo, revision=spec.revision,
+                                            repo_type="dataset"))
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"could not list files in {spec.hf_repo!r}: {exc}")
+        return errors
+
+    # 2. Project directories must exist under data/<split>/
+    split_prefix = f"data/{spec.split}/"
+    available_dirs: set[str] = set()
+    for f in all_files:
+        if f.startswith(split_prefix):
+            # "data/split/project_namerest" → project_name is first path segment
+            rest = f[len(split_prefix):]
+            if rest:
+                project = rest.split("/", 1)[0]
+                if project:
+                    available_dirs.add(project)
+
+    all_projects = list(spec.train_projects) + list(spec.eval_projects or [])
+    for project in all_projects:
+        if project not in available_dirs:
+            avail = sorted(available_dirs) if available_dirs else "(could not list)"
+            errors.append(
+                f"project {project!r} not found under data/{spec.split}/ in "
+                f"{spec.hf_repo!r}. Available: {avail}"
+            )
+
+    # 3. Presence of parquet files (pagexml-hf converter always produces them)
+    has_parquet = any(f.endswith(".parquet") for f in all_files)
+    if not has_parquet:
+        errors.append(
+            f"no .parquet files found in {spec.hf_repo!r}. Expected "
+            f"data/<split>/<project>/*.parquet layout from the pagexml-hf converter."
+        )
+
+    # 4. Rough size estimate vs. free disk
+    if settings and settings.min_free_disk_gb > 0:
+        total_bytes = 0
+        try:
+            # Sample up to 20 files to estimate average size
+            parquet_files = [f for f in all_files if f.endswith(".parquet")]
+            sample = parquet_files[:20]
+            for pf in sample:
+                try:
+                    info = hf_hf_file_download_fn(
+                        spec.hf_repo, filename=pf,
+                        revision=spec.revision, repo_type="dataset"
+                    )
+                    if info and hasattr(info, "size") and info.size:
+                        total_bytes += info.size
+                except Exception:  # noqa: BLE001
+                    pass
+            if sample and total_bytes > 0:
+                avg_size = total_bytes / len(sample)
+                total_estimate = avg_size * len(parquet_files)
+                needed_gb = total_estimate / (1024**3)
+                free_gb = settings.min_free_disk_gb
+                if needed_gb > free_gb * 0.9:
+                    errors.append(
+                        f"estimated download ~{needed_gb:.1f} GB "
+                        f"(min_free_disk_gb={free_gb:.1f} GiB). "
+                        "Selection may exceed available space; consider reducing "
+                        "train_projects or setting max_pages."
+                    )
+        except Exception:  # noqa: BLE001
+            pass  # size check is best-effort
+
+    return errors
