@@ -20,6 +20,26 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENVS="${ROOT}/.venvs"
 # asterAIx ships Python 3.12 only (no 3.11) — see docs/asteraix-environment.md
 PY="${PYTHON:-python3.12}"
+
+# pip stages a package's EXISTING files into TMPDIR before overwriting them, so a
+# TMPDIR on the research share breaks every *upgrade* while fresh installs keep
+# working — which is exactly how this presented on asterAIx (2026-08-07): 60-odd
+# packages installed fine, then `pip install -U pip` died with "OSError: [Errno 1]
+# Operation not permitted" uninstalling the bundled pip, and a later downgrade
+# died the same way on huggingface_hub. CIFS refuses the ownership work the
+# staging does; it is the same EPERM that forced copyfile over copy2 in the
+# trainer's register stage. Nothing warns you — the requirement is simply not
+# applied, and the venv quietly keeps the version you were replacing.
+case "$(stat -f -c %T "${TMPDIR:-/tmp}" 2>/dev/null || echo unknown)" in
+  cifs|smb*|nfs*|9p|fuseblk)
+    echo "NOTE: TMPDIR=${TMPDIR} is on a network filesystem, where pip cannot replace" >&2
+    echo "      an installed package. Using a local one for this run instead." >&2
+    TMPDIR="${LOCAL_TMPDIR:-${HOME}/atr-cache/tmp}"
+    mkdir -p "${TMPDIR}"
+    export TMPDIR
+    echo "      TMPDIR=${TMPDIR}" >&2
+    ;;
+esac
 ALL=(gateway kraken party trocr kraken-train vlm-train vllm)
 TARGETS=("$@")
 [ ${#TARGETS[@]} -eq 0 ] && TARGETS=("${ALL[@]}")
