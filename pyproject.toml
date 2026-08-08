@@ -26,7 +26,13 @@ dependencies = [
 # needs it, and without it tests/test_discover_models*.py fail at collection and
 # take the whole run down with them — which is why every local run used --ignore
 # on those two files until #57.
-dev = ["pytest>=8.0", "ruff>=0.4", "requests>=2.31"]
+#
+# ruff is PINNED, not floored. `ruff>=0.4` let CI install 0.16.2 while this repo's
+# venv had 0.15.20, and 0.16 selects rules 0.15 does not: a tree that is clean
+# locally reported 125 errors in the first CI run (BLE001, RUF022, I001, B008 …).
+# A linter whose rule set changes between the machine you fix it on and the
+# machine that judges it cannot be a gate. Upgrading is now a deliberate commit.
+dev = ["pytest>=8.0", "ruff==0.15.20", "requests>=2.31"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

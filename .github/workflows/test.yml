@@ -51,8 +51,10 @@ jobs:
         run: pytest -q
 
       - name: Lint
-        # Non-blocking for now: ruff has never run over this tree, so a first pass
-        # would fail on accumulated style rather than on anything this commit did.
-        # Report it, fix it separately, then make it a gate.
-        continue-on-error: true
+        # Now a gate, which it could not be while `ruff>=0.4` let CI float to a
+        # newer ruff than the tree was cleaned against — 0.16.2 selects rules
+        # 0.15 does not, and the first CI run reported 125 errors against a tree
+        # that was clean locally. The version is pinned in `[dev]`, so this step
+        # judges the same rules the author ran. Bumping the pin is the commit
+        # where those 125 get dealt with.
         run: ruff check .
