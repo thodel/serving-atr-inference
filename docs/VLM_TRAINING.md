@@ -133,6 +133,44 @@ The prompt the model was tuned with is stored on its `ModelSpec`. Serving it wit
 different wording is a silent distribution shift, which is why it travels with
 the model rather than living in the serving code.
 
+## Measured on asterAIx (2026-08-08)
+
+First end-to-end run, deliberately tiny: `max_pages: 40`, `epochs: 1`,
+`eval_samples: 25`, defaults otherwise. Job `20260808T080206Z-qwen3vl-thun-smoke`,
+GPU 1.
+
+| | |
+|---|---|
+| selection | 52 pages → **783 line crops** (594 train / 189 val), page-disjoint |
+| train | 38 optimizer steps (effective batch 16), **5 min 07 s**, ~1.9 samples/s |
+| loss | train 2.647, eval 3.451 |
+| eval | 25 samples in 26 s (~7/s) after a **2 min 38 s** model load |
+| result | **CER 0.466, WER 0.816** |
+
+Read those numbers for what they are: 38 steps with ~2 warmup steps is a plumbing
+test, not training. The predictions are the interesting part —
+
+> ref: `wir haben verstanden die ordnung der versuͦchen so die von`
+> hyp: `von haben vor panden die verscheidung der kûschen, so du an`
+
+— the model is tracking position and register (it has learned *early modern
+German in this hand's shape*) while largely inventing the content. That is the
+signature of an under-trained VLM reading a little and hallucinating the rest,
+and it is what a CER of 0.47 looks like from the inside.
+
+**A CER without a baseline says nothing about whether training helped.** Run the
+same evaluation against the un-adapted base before drawing any conclusion; that
+comparison is issue #37.
+
+Two things worth knowing before a real run:
+
+* **Loading the base costs ~2.5 min** each time, because the 16 GB of shards come
+  off the CIFS share. It is paid twice per job (train, then test).
+* bitsandbytes warns `inner dimension (4304) is not aligned for fast kernel with
+  blocksize=64, falling back to slower implementation`. Qwen3-VL's dimensions are
+  not friendly to the fast 4-bit path, so throughput is below what the card could
+  do. Not an error, but it is why 1.9 samples/s is the number rather than more.
+
 ## Reading a finished job
 
 ```bash
