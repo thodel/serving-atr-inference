@@ -57,12 +57,28 @@ scoring a published Zenodo model — one that never saw this corpus — on the s
 material. Until it does, no CER here should be quoted, compared across runs, or
 published, and nothing has been pushed to the hub.
 
-Open work is grouped into three epics: **#49** — the training subsystem from "it runs"
-to "it is trustworthy" (eval validation #52, promotion gate #36, per-epoch metrics #38
-and the `rich` constraint on it #51, `trained_root` orphans #50, dataset preflight #46,
-1..n datasets #40, chunked prepare #39, line-level sources #45, runbook + eval #37);
-**#41** — TrOCR fine-tuning as the third backend (#42–#44); and **#48** — deployment
-robustness. #30 and #32 remain open from production.
+Open work is grouped into three epics:
+
+- **#49** — the training subsystem from "it runs" to "it is trustworthy": eval
+  validation #52 (**blocks the interpretation of every CER above**), metric
+  decomposition #55, promotion gate #36, per-epoch metrics #38 and the `rich`
+  constraint on it #51, `trained_root` orphans #50, 1..n datasets #40, chunked
+  prepare #39, line-level sources #45, runbook + eval #37.
+- **#41** — TrOCR fine-tuning as the third backend: #42 (shared cropping) → #43
+  (contracts + argv) → #44 (the engine). In practice #52 should land first, or a
+  third backend risks reproducing the same unexplained result a third time.
+- **#48** — deployment robustness: version assertions in the venv smoke test #53,
+  an environment check #54. Five failure modes in two days, all of them the shell
+  and the service having drifted apart.
+
+#30 and #32 remain open from production.
+
+Every surprise so far has had one shape: **something assumed, nothing checked, the
+failure surfacing far from its cause.** The rule this subsystem already enforces — *no
+silent success; a job with no readable CER is failed, not completed* — is that instinct
+applied to results, and it held: all three runs completed honestly. #52 is the same
+instinct applied to inputs, because an honest number is not automatically a meaningful
+one.
 
 ## Quickstart (dev)
 
