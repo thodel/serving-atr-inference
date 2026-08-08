@@ -140,6 +140,10 @@ class DiscoveryReport:
 HF_API = "https://huggingface.co/api/models"
 
 
+MAX_HF_PAGE_RETRIES = 3  # max 429-retry attempts per HF page
+MAX_PAGES_PER_TERM = 10  # max result pages per HF search term
+
+
 def _search_hf(session: requests.Session, query: str, page: int = 1) -> list[HFModel]:
     """
     Search HuggingFace models. Returns a list of HFModel objects (may be empty).
@@ -178,44 +182,64 @@ def discover_hf_models(session: requests.Session) -> tuple[list[HFModel], str | 
     """
     Paginate through all HF search queries and collect models.
     Returns (candidates, error_message_or_None).
+    Bounded: at most MAX_PAGES_PER_TERM pages per term, at most
+    MAX_HF_PAGE_RETRIES 429-retry attempts per page.
     """
     all_models: dict[str, HFModel] = {}
     error_msg: str | None = None
 
     for query in HF_SEARCH_TERMS:
         page = 1
+        pages_fetched = 0
         consecutive_empty = 0
-        while consecutive_empty < 2:
-            try:
-                results = _search_hf(session, query, page=page)
-                if not results:
-                    consecutive_empty += 1
-                else:
-                    consecutive_empty = 0
-                    for model in results:
-                        if model.id not in all_models:
+
+        while consecutive_empty < 2 and pages_fetched < MAX_PAGES_PER_TERM:
+            # ── bounded retry loop ────────────────────────────────────────
+            results: list[HFModel] = []
+            success = False
+            for retry_count in range(MAX_HF_PAGE_RETRIES):
+                try:
+                    results = _search_hf(session, query, page=page)
+                    success = True
+                    break
+                except requests.exceptions.HTTPError as e:
+                    if e.response is not None and e.response.status_code == 429:
+                        if retry_count + 1 >= MAX_HF_PAGE_RETRIES:
+                            error_msg = (
+                                f"HF query '{query}' page {page}: "
+                                f"still rate-limited after {MAX_HF_PAGE_RETRIES} retries"
+                            )
+                            consecutive_empty = 2
+                            break
+                        retry_after = int(e.response.headers.get("Retry-After", "10"))
+                        time.sleep(retry_after)
+                        continue
+                    error_msg = f"HF query '{query}' page {page}: {e}"
+                    consecutive_empty = 2
+                    break
+                except requests.exceptions.RequestException as e:
+                    error_msg = f"HF query '{query}' page {page}: {e}"
+                    consecutive_empty = 2
+                    break
+
+            if not success and not results:
+                # retry loop exited without setting results
+                break
+
+            if not results:
+                consecutive_empty += 1
+            else:
+                consecutive_empty = 0
+                for model in results:
+                    if model.id not in all_models:
+                        all_models[model.id] = model
+                    else:
+                        existing = all_models[model.id]
+                        if model.downloads > existing.downloads:
                             all_models[model.id] = model
-                        else:
-                            # merge: take higher download count
-                            existing = all_models[model.id]
-                            if model.downloads > existing.downloads:
-                                all_models[model.id] = model
-                    page += 1
-                    time.sleep(0.25)  # polite back-off
-            except requests.exceptions.HTTPError as e:
-                if e.response is not None and e.response.status_code == 429:
-                    # rate-limited: wait and retry same page
-                    retry_after = int(e.response.headers.get("Retry-After", "10"))
-                    time.sleep(retry_after)
-                    continue
-                # non-retryable HTTP error: record error and stop this query
-                error_msg = f"HF query \'{query}\' page {page}: {e}"
-                consecutive_empty = 2  # break outer while
-                break
-            except requests.exceptions.RequestException as e:
-                error_msg = f"HF query \'{query}\' page {page}: {e}"
-                consecutive_empty = 2  # break outer while
-                break
+                pages_fetched += 1
+                page += 1
+                time.sleep(0.25)  # polite back-off
 
     return list(all_models.values()), error_msg
 
@@ -255,58 +279,77 @@ def discover_zenodo_models(session: requests.Session) -> tuple[list[ZenodoRecord
         ({"q": "HTR model", "type": "dataset", "size": 200, "allversions": "false"}, "htr-model")
     )
 
+    MAX_ZENODO_PAGE_RETRIES = 3
+    MAX_PAGES_PER_ZENODO_QUERY = 10
+
     for params, community in queries:
         page = 1
         consecutive_empty = 0
-        while consecutive_empty < 2:
-            try:
-                paged_params = {**params, "page": page}
-                data = _search_zenodo(session, paged_params)
-                hits = data.get("hits", {}).get("hits", [])
-                if not hits:
-                    consecutive_empty += 1
-                else:
-                    consecutive_empty = 0
-                    for hit in hits:
-                        metadata = hit.get("metadata", {})
-                        zid = _normalize_zenodo_id(str(hit.get("id", "")))
-                        if not zid:
-                            continue
+        pages_fetched = 0
 
-                        keywords_raw = metadata.get("keywords", []) or []
-                        keywords = [k.strip().lower() for k in keywords_raw if k]
+        while consecutive_empty < 2 and pages_fetched < MAX_PAGES_PER_ZENODO_QUERY:
+            data = None
+            success = False
+            for retry_count in range(MAX_ZENODO_PAGE_RETRIES):
+                try:
+                    paged_params = {**params, "page": page}
+                    data = _search_zenodo(session, paged_params)
+                    success = True
+                    break
+                except requests.exceptions.HTTPError as e:
+                    if e.response is not None and e.response.status_code == 429:
+                        if retry_count + 1 >= MAX_ZENODO_PAGE_RETRIES:
+                            error_msg = (
+                                f"Zenodo community '{community}' page {page}: "
+                                f"still rate-limited after {MAX_ZENODO_PAGE_RETRIES} retries"
+                            )
+                            consecutive_empty = 2
+                            break
+                        retry_after = int(e.response.headers.get("Retry-After", "10"))
+                        time.sleep(retry_after)
+                        continue
+                    error_msg = f"Zenodo community '{community}' page {page}: {e}"
+                    consecutive_empty = 2
+                    break
+                except requests.exceptions.RequestException as e:
+                    error_msg = f"Zenodo community '{community}' page {page}: {e}"
+                    consecutive_empty = 2
+                    break
 
-                        doi = str(metadata.get("doi", "") or "")
-
-                        record = ZenodoRecord(
-                            zenodo_id=zid,
-                            title=str(metadata.get("title", "") or ""),
-                            doi=doi,
-                            keywords=keywords,
-                            zenodo_url=f"https://zenodo.org/records/{zid}",
-                        )
-                        if zid not in all_records:
-                            all_records[zid] = record
-
-                    # Check if there are more pages
-                    if not data.get("links", {}).get("next"):
-                        break
-                    page += 1
-                    time.sleep(0.5)  # polite back-off
-
-            except requests.exceptions.HTTPError as e:
-                if e.response is not None and e.response.status_code == 429:
-                    retry_after = int(e.response.headers.get("Retry-After", "10"))
-                    time.sleep(retry_after)
-                    continue
-                # non-retryable HTTP error: record error and stop this query
-                error_msg = f"Zenodo community '{community}' page {page}: {e}"
-                consecutive_empty = 2  # break outer while
+            if not success or data is None:
                 break
-            except requests.exceptions.RequestException as e:
-                error_msg = f"Zenodo community '{community}' page {page}: {e}"
-                consecutive_empty = 2  # break outer while
-                break
+
+            hits = data.get("hits", {}).get("hits", [])
+            if not hits:
+                consecutive_empty += 1
+            else:
+                consecutive_empty = 0
+                for hit in hits:
+                    metadata = hit.get("metadata", {})
+                    zid = _normalize_zenodo_id(str(hit.get("id", "")))
+                    if not zid:
+                        continue
+
+                    keywords_raw = metadata.get("keywords", []) or []
+                    keywords = [k.strip().lower() for k in keywords_raw if k]
+
+                    doi = str(metadata.get("doi", "") or "")
+
+                    record = ZenodoRecord(
+                        zenodo_id=zid,
+                        title=str(metadata.get("title", "") or ""),
+                        doi=doi,
+                        keywords=keywords,
+                        zenodo_url=f"https://zenodo.org/records/{zid}",
+                    )
+                    if zid not in all_records:
+                        all_records[zid] = record
+
+                if not data.get("links", {}).get("next"):
+                    break
+                pages_fetched += 1
+                page += 1
+                time.sleep(0.5)  # polite back-off
 
     return list(all_records.values()), error_msg
 

@@ -18,15 +18,19 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install dependency
+        run: pip install requests
+
       - name: Discover models
         env:
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: >
           python scripts/discover_models.py
           --dry-run
