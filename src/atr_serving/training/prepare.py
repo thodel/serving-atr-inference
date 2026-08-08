@@ -90,7 +90,30 @@ class HFPageSource:
             revision=revision,
             verification_mode="no_checks",
         )
-        return iter(ds)
+        return iter(self._raw_images(ds))
+
+    @staticmethod
+    def _raw_images(ds):
+        """Force the image column to hand back the original encoded bytes.
+
+        Most dh-unibe sets declare ``image`` as ``Image(decode=False)`` and pass
+        the JPEG straight through. Some — ``koenigsfelden-charters-part-3``,
+        ``data-towerbooks-textlines`` — declare a plain ``Image``, which
+        ``datasets`` decodes to PIL on read. Materializing those would mean
+        re-encoding every page, degrading the training lines for nothing, and
+        row_to_page rejects a decoded cell rather than do it silently.
+        Casting here makes the guarantee hold for every dataset instead of
+        depending on how each one happened to be exported.
+        """
+        features = getattr(ds, "features", None) or {}
+        image = features.get("image")
+        if image is None or not getattr(image, "decode", False):
+            return ds  # already decode=False, or no image feature to reason about
+
+        from datasets import Image  # only needed when a cast is actually required
+
+        logger.info("casting 'image' to Image(decode=False) — it was declared decoded")
+        return ds.cast_column("image", Image(decode=False))
 
 
 @dataclass

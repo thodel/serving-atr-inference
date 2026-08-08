@@ -24,12 +24,27 @@ from atr_serving.training.contracts import DatasetSpec
 __all__ = [
     "DatasetSelectionError",
     "PageRow",
+    "IMAGE_COLUMNS",
+    "PAGEXML_COLUMNS",
+    "PROJECT_COLUMNS",
     "data_files_for",
     "hub_cache_dir",
     "project_glob",
     "page_stem",
+    "pick_column",
     "row_to_page",
 ]
+
+#: Column aliases across the dh-unibe exports. Nearly all were produced by the
+#: same ``pagexml-hf`` converter and use ``xml_content``/``project_name``, but
+#: older exports (e.g. ``image-text_koenigsfelden-charters-part-3``) use ``xml``
+#: and ``project``. Assuming one spelling means a job dies on its first row with
+#: "no xml_content" and no hint that the column is simply called something else —
+#: the failure mode that cost an afternoon in lassberg/vlm_training, where the
+#: same assumption produced a bare ``KeyError: 'text'`` from inside a worker.
+PAGEXML_COLUMNS = ("xml_content", "xml")
+PROJECT_COLUMNS = ("project_name", "project")
+IMAGE_COLUMNS = ("image",)
 
 
 class DatasetSelectionError(ValueError):
@@ -156,19 +171,44 @@ def _image_bytes(value: object) -> bytes:
             "image cell has no inline bytes; the dataset must be read with "
             "decode=False so the original JPEG passes through unmodified"
         )
-    raise DatasetSelectionError(f"unsupported image cell type: {type(value).__name__}")
+    raise DatasetSelectionError(
+        f"unsupported image cell type: {type(value).__name__}. The image column "
+        "was decoded, which means re-encoding would degrade every training line; "
+        "HFPageSource casts it to Image(decode=False) precisely to avoid this, so "
+        "seeing this here means the cast did not happen."
+    )
+
+
+def pick_column(row: dict, names: tuple[str, ...]) -> str | None:
+    """First of ``names`` present in ``row``, or None."""
+    return next((n for n in names if n in row), None)
 
 
 def row_to_page(index: int, row: dict) -> PageRow:
-    """Convert one dataset row into a :class:`PageRow`."""
-    xml = row.get("xml_content")
+    """Convert one dataset row into a :class:`PageRow`.
+
+    Tolerates the column-name variation across the dh-unibe exports
+    (:data:`PAGEXML_COLUMNS`, :data:`PROJECT_COLUMNS`), and when it cannot find a
+    PageXML column says what the row *does* have. A dataset whose schema differs
+    is a config problem with an obvious fix; a dataset whose schema differs and
+    reports only "no xml_content" is an afternoon.
+    """
+    xml_key = pick_column(row, PAGEXML_COLUMNS)
+    xml = row.get(xml_key) if xml_key else None
     if not isinstance(xml, str) or not xml.strip():
-        raise DatasetSelectionError(f"row {index} has no xml_content")
+        raise DatasetSelectionError(
+            f"row {index} has no usable PageXML. Looked for {list(PAGEXML_COLUMNS)}; "
+            f"the row has {sorted(row)}. If this dataset stores transcriptions in a "
+            "plain text column it is line-level ground truth, which this stage does "
+            "not read — it materializes pages."
+        )
     filename = row.get("filename")
+    project_key = pick_column(row, PROJECT_COLUMNS)
+    project = row.get(project_key) if project_key else None
     return PageRow(
         stem=page_stem(index, filename if isinstance(filename, str) else None),
         image=_image_bytes(row.get("image")),
         xml=xml,
         source_filename=filename if isinstance(filename, str) else None,
-        project=row.get("project_name") if isinstance(row.get("project_name"), str) else None,
+        project=project if isinstance(project, str) else None,
     )

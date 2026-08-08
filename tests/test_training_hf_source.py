@@ -119,3 +119,47 @@ def test_hub_cache_dir_defaults_to_the_standard_path(monkeypatch):
 def test_hub_cache_dir_rejects_unsafe_ids(bad):
     with pytest.raises(DatasetSelectionError):
         hub_cache_dir(bad)
+
+
+# ── column-name variation across the dh-unibe exports ───────────────────────
+# Checked on the hub 2026-08-07: nearly every set is xml_content/project_name,
+# but koenigsfelden-charters-part-3 is an older export using xml/project. The
+# same assumption in lassberg/vlm_training surfaced as a bare KeyError from
+# inside a datasets worker, naming neither the dataset nor the real column.
+def test_row_to_page_accepts_the_older_xml_and_project_names():
+    from atr_serving.training.hf_source import row_to_page
+
+    page = row_to_page(3, {
+        "image": {"bytes": b"\xff\xd8JPEG", "path": "x.jpg"},
+        "xml": "<PcGts><Page imageFilename='a.jpg'/></PcGts>",
+        "filename": "charter_07.jpg",
+        "project": "Koenigsfelden",
+    })
+    assert page.xml.startswith("<PcGts>")
+    assert page.project == "Koenigsfelden"
+    assert page.image == b"\xff\xd8JPEG"
+
+
+def test_a_row_without_any_pagexml_column_names_what_it_does_have():
+    import pytest
+
+    from atr_serving.training.hf_source import DatasetSelectionError, row_to_page
+
+    with pytest.raises(DatasetSelectionError) as exc:
+        row_to_page(0, {"image": b"\xff\xd8", "text": "a line", "line_id": "l1"})
+    message = str(exc.value)
+    assert "xml_content" in message and "xml" in message      # what was looked for
+    assert "line_id" in message and "text" in message          # what is actually there
+    assert "line-level" in message                             # and the likely reason
+
+
+def test_a_decoded_image_cell_is_refused_with_the_reason():
+    import pytest
+
+    from atr_serving.training.hf_source import DatasetSelectionError, row_to_page
+
+    class FakePIL:  # stands in for a decoded PIL image
+        pass
+
+    with pytest.raises(DatasetSelectionError, match="decode=False"):
+        row_to_page(0, {"image": FakePIL(), "xml_content": "<PcGts/>"})
