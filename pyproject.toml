@@ -38,3 +38,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+# These reach `scripts/` by inserting the repo root on sys.path, which has to
+# happen before the import it enables. pytest's own `pythonpath` setting covers
+# the normal run; the guard is there so the file also works under plain python.
+"tests/test_discover_models*.py" = ["E402"]

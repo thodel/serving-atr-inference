@@ -11,6 +11,7 @@ from transformers import VisionEncoderDecoderModel, TrOCRProcessor
 from loguru import logger
 from io import BytesIO
 from typing import Any
+from pydantic import BaseModel
 
 app = FastAPI(title="ATR TrOCR Engine", version="0.1.0")
 
@@ -83,9 +84,6 @@ async def list_models():
 # ---------------------------------------------------------------------------
 # Segmentation (pass-through — this engine does not bundle kraken)
 # ---------------------------------------------------------------------------
-
-from pydantic import BaseModel
-
 
 class BBox(BaseModel):
     x0: int
