@@ -158,9 +158,34 @@ German in this hand's shape*) while largely inventing the content. That is the
 signature of an under-trained VLM reading a little and hallucinating the rest,
 and it is what a CER of 0.47 looks like from the inside.
 
-**A CER without a baseline says nothing about whether training helped.** Run the
-same evaluation against the un-adapted base before drawing any conclusion; that
-comparison is issue #37.
+### Against the baseline
+
+The same 25 samples, same prompt, same budgets, scored on the **un-adapted**
+`Qwen3-VL-8B-Instruct` (`evaluate_qlora.py --no-adapter`):
+
+| | CER | WER |
+|---|---:|---:|
+| base model | 1.837 | 2.386 |
+| + 38 steps of QLoRA | **0.466** | **0.816** |
+
+A CER above 1 means the model emitted far more characters than the reference. It
+is not answering in prose or refusing — it is failing to **stop at the line**:
+
+> ref: `Sigriswil und von Stefisburg gegen den unnsern von hann`
+> base: `Gestandene Erkennung der Tatsachen, daß sie von Digriftel und von Stüffseng gegen den Vormund von Tömy dabey gebraucht haben und darum wohl als geliehene Kost`
+
+One crop, one line of ground truth, and the base model produces several lines and
+then drifts into paraphrase. Sometimes it reads a fair amount on the way — for the
+reference `wir haben verstanden die ordnung der versuͦchen so die von` its second
+output line was `Von haben voranstanden diefenbedenung der Kurfusten/So die van`.
+
+**So most of that 74 % improvement is output discipline, not literacy.** Thirty-eight
+steps were enough to teach "emit exactly one transcription and stop", which is
+what dominates an edit-distance metric when the baseline over-generates by 2–3×.
+How much better the model actually *reads* is a separate question this comparison
+does not answer, and would need either length-controlled scoring or a baseline
+constrained to one line. Worth knowing before quoting the number: it is a real
+improvement on the task as posed, and a weak measure of recognition ability.
 
 Two things worth knowing before a real run:
 
