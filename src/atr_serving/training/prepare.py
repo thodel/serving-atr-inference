@@ -16,13 +16,14 @@ would degrade every training line for no reason.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Protocol
 
 from loguru import logger
 
-from atr_serving.training.hf_source import hub_cache_dir, row_to_page
+from atr_serving.training.hf_source import data_files_for, hub_cache_dir, row_to_page
 from atr_serving.training.pagexml import page_stats, rewrite_image_filename
 
 from atr_serving.training.preflight import PreflightError, free_disk_gb
