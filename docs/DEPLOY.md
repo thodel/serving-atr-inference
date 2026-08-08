@@ -99,6 +99,43 @@ Exits 0 only when every **present** venv passes; venvs that were never built are
 reported as `SKIP`, not as failures — a box that only trains kraken has no reason to
 have `.venvs/vlm-train`.
 
+## The research share is not POSIX — the four rules that follow from it
+
+Everything below was found the hard way, one failure at a time, over three days.
+They are one fact wearing four costumes: **SMB does not give you POSIX file
+semantics**, and every part of the training stack that assumed otherwise broke
+somewhere different. Collected here because reading them together is what makes
+the next one predictable.
+
+| what broke | where | why SMB | guard now |
+|---|---|---|---|
+| `register` died with `EPERM` after training **and** evaluating | `shutil.copy2` to `trained_root` | `chmod`/`utime` by a non-owner is refused; the share is `root:research` | `shutil.copyfile` — bytes only, no metadata |
+| `ketos compile` died 3 min in, `ENOTEMPTY` | `shutil.rmtree` under `TMPDIR` | directory entries are not released promptly enough for temp-dir churn | `preflight.check_tmpdir` refuses a network `TMPDIR` at submit |
+| first checkpoint save died, *"Upgrade fsspec…"* | lightning temp-file + rename into the job dir | the rename is cross-device when temp is local and target is the share | `checkpoint_root` is local disk; only final weights are copied out |
+| **11½ h prepare, zero pages**, `I/O operation on closed file` | `pyarrow` writing the Arrow generation cache | a write handle cannot be held open across a multi-hour pass | `check_datasets_cache` refuses it, and streaming is now the default |
+
+Two more of the same family, outside the trainer: `pip` cannot *replace* an
+installed package when `TMPDIR` is on the share (installs work, upgrades and
+downgrades fail with `EPERM` and silently keep the old version — #48), and
+`huggingface_hub` cannot ref-link blobs there, so downloads are duplicated rather
+than deduplicated (harmless, noisy).
+
+**The rule that falls out of all of them:**
+
+> **Data on the share. Scratch, caches and anything written incrementally on
+> local disk.**
+
+Concretely: materialized pages, compiled `.arrow` datasets, job records and
+trained weights live on the share (they are written once and read back). `TMPDIR`,
+the datasets Arrow cache, checkpoints and venvs live on `/`. The HF **hub** cache
+is the one apparent exception and is not really one — it stores completed
+downloads, not streaming writes.
+
+**What each of these cost before it was found:** minutes (register), three minutes
+(compile), one epoch (checkpoints), **eleven and a half hours** (Arrow cache). The
+pattern is that the failure surfaces further from the cause each time, which is why
+they are guarded at *submit* now rather than diagnosed at the point of collapse.
+
 ### Known limitation: CIFS hub cache symlink
 
 On asterAIx `~/.cache/huggingface/hub` is a symlink to a CIFS share:

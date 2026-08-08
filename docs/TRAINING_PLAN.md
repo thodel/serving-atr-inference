@@ -461,11 +461,53 @@ and nothing has been pushed to the hub.
 
 Two further findings came out of the same runs:
 
-- **#50** — a register stage that fails after copying the weights leaves an orphan in
-  `trained_root` that no cleanup path can reach. `kraken-thun-missiven-v1` is one:
+- **#50** — a register stage that failed after copying the weights left an orphan in
+  `trained_root` that no cleanup path could reach. `kraken-thun-missiven-v1` was one:
   58 MB of a 98 %-CER model with no `metadata.json`, left by the `copy2`/`EPERM` bug
-  9219398 fixed. The bug is fixed; the ordering that let it leak is not.
+  9219398 fixed. Closed by `baac75b`: `metadata.json` is written to a temp file and
+  renamed over the completed copy, so the window is a `rename(2)`, and a directory
+  without metadata is identifiable as an orphan and removed on startup and on DELETE.
 - **#51** — per-epoch metrics cannot be scraped from `train.log`. ketos renders progress
   through `rich`, so into a redirected stdout the `val_accuracy:` labels arrive with
   their values stripped. #38 must read the trainer's own output (`--logger`, or the
   metric embedded in `checkpoint_<NN>-<val_metric>.ckpt`), not the log.
+
+
+## 10. The full-dataset run (2026-08-08)
+
+The first attempt at all 690 projects, and what it cost to learn that the default
+was wrong.
+
+| attempt | mode | outcome |
+|---|---|---|
+| `20260808T085107Z` | cached (`cache_datasets=True`, the old default) | **11 h 27 min, zero pages written**, then `DatasetGenerationError` |
+| `20260808T183111Z` | streaming | **13,483 pages in 2 h 59 min** and still running |
+
+**Why the first produced nothing.** In cached mode `load_dataset` resolves every
+`data_files` glob, downloads every matching parquet and converts the lot into its own
+Arrow cache *before yielding the first row*. For a ~1 TB selection that is the whole
+job before `materialize()` sees anything — and it died inside it, with `pyarrow`
+raising `ValueError: I/O operation on closed file` because the Arrow cache had been
+symlinked onto the CIFS share (#60). Two independent faults, both invisible: no
+progress signal exists during that phase, and `progress.pages_written` only moves when
+a role *completes*, so a wedged job and a working one look identical (#38).
+
+**Measured rates**, which are the numbers to plan the next run with:
+
+- prepare, streaming, warm hub cache: **~4,550 pages/h** cumulative after 3 h,
+  **~10,400 pages/h** instantaneous — the early phase is slower, plausibly glob
+  resolution across 690 projects plus the first uncached shards;
+- extrapolated prepare for ~520 K kept pages: **2–5 days**, the spread being exactly
+  the uncertainty between those two rates;
+- training, from run 2: ~8 it/s at batch 64, so ~4.3 h per epoch over ~8 M lines.
+
+**An open risk, not yet observed:** every page is written into a *single flat
+directory*, which at full scale is ~1.04 M files in one directory on SMB. Directory
+lookups degrade with entry count, so the write rate may decay as it fills. At 27 K
+files it was still writing faster than its own average, so this has not appeared —
+but if a later measurement shows decay, that is the cause, and #39's chunking (which
+keeps each chunk's directory bounded) is the fix rather than a restart.
+
+**What changed as a result:** streaming is now the default (`911dc1e`). Caching stays
+available because it is right at project scale — re-fetching a 116 MB dataset every run
+is the waste that made it the old default — and inverts at terabyte scale.
