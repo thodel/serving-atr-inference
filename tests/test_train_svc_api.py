@@ -532,3 +532,28 @@ def test_the_model_id_is_free_again_once_the_job_is_terminal(client):
 def test_a_different_model_id_is_unaffected(client):
     client.post("/jobs", json=BODY)
     assert client.post("/jobs", json={**BODY, "model_id": "other-model"}).status_code == 202
+
+
+# ── a cached run refuses a network datasets cache (#60) ─────────────────────
+def test_a_cached_run_is_refused_when_the_datasets_cache_is_on_the_share(
+        client, settings, monkeypatch, tmp_path):
+    """The 11½-hour failure, caught at submit instead."""
+    settings.cache_datasets = True
+    monkeypatch.setattr(app_module, "check_datasets_cache",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            PreflightError("the datasets cache /mnt/... is on a cifs filesystem")))
+    resp = client.post("/jobs", json=BODY)
+    assert resp.status_code == 500
+    assert "cifs" in resp.json()["detail"]
+    assert store_of(client).list() == []
+
+
+def test_a_streaming_run_does_not_care_where_the_cache_lives(client, settings, monkeypatch):
+    """streaming=True writes no Arrow cache, so refusing over its location would
+    block a job that cannot be hurt by it."""
+    settings.cache_datasets = False
+    called = []
+    monkeypatch.setattr(app_module, "check_datasets_cache",
+                        lambda *a, **k: called.append(1))
+    assert client.post("/jobs", json=BODY).status_code == 202
+    assert called == []

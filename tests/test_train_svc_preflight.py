@@ -8,6 +8,7 @@ from atr_serving.training import preflight
 from atr_serving.training.preflight import (
     GpuInfo,
     PreflightError,
+    check_datasets_cache,
     check_disk,
     check_tmpdir,
     check_vram,
@@ -112,3 +113,46 @@ def test_check_tmpdir_accepts_local_disk(mounts):
 def test_check_tmpdir_is_silent_without_proc_mounts(tmp_path: Path):
     """Not Linux, or /proc unavailable — do not invent a failure."""
     check_tmpdir("/anything", tmp_path / "nope")
+
+
+# ── the Arrow generation cache must be local too (#60) ──────────────────────
+def test_datasets_cache_dir_follows_the_library_precedence(monkeypatch, tmp_path: Path):
+    from atr_serving.training.preflight import datasets_cache_dir
+
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "explicit"))
+    assert datasets_cache_dir() == tmp_path / "explicit"
+
+    monkeypatch.delenv("HF_DATASETS_CACHE")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hfhome"))
+    assert datasets_cache_dir() == tmp_path / "hfhome" / "datasets"
+
+    monkeypatch.delenv("HF_HOME")
+    assert datasets_cache_dir().parts[-3:] == (".cache", "huggingface", "datasets")
+
+
+def test_check_datasets_cache_refuses_the_share(mounts):
+    """11½ hours, zero pages: pyarrow cannot hold a write handle open on SMB for
+    the length of a generation pass."""
+    with pytest.raises(PreflightError, match="cifs"):
+        check_datasets_cache(
+            "/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache", mounts)
+
+
+def test_the_refusal_names_both_ways_out(mounts):
+    with pytest.raises(PreflightError) as exc:
+        check_datasets_cache("/mnt/wbkolleg_dh_1/x", mounts)
+    assert "HF_DATASETS_CACHE" in str(exc.value)
+    assert "ATR_TRAIN_CACHE_DATASETS=false" in str(exc.value)
+
+
+def test_check_datasets_cache_accepts_local_disk(mounts):
+    check_datasets_cache("/home/tobias/.cache/huggingface/datasets", mounts)
+
+
+def test_a_symlink_into_the_share_is_still_the_share(mounts, tmp_path: Path, monkeypatch):
+    """The path that broke the run was a symlink at the STANDARD location, which
+    is why the check has to resolve before deciding."""
+    link = tmp_path / "datasets"
+    link.symlink_to("/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache")
+    with pytest.raises(PreflightError, match="cifs"):
+        check_datasets_cache(link, mounts)

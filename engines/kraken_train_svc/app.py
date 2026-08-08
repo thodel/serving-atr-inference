@@ -47,6 +47,7 @@ from atr_serving.training.jobstore import JobStore, JobStoreError
 
 from atr_serving.training.preflight import (
     PreflightError,
+    check_datasets_cache,
     check_disk,
     check_tmpdir,
     check_vram,
@@ -288,6 +289,14 @@ async def submit(request: TrainRequest, response: Response,
         check_tmpdir(os.environ.get("TMPDIR", "/tmp"))
     except PreflightError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # ...and a network datasets cache breaks the Arrow generation pass eleven
+    # hours in (#60). Only when this run will actually cache: a streaming job
+    # writes no Arrow cache, so its location cannot hurt it.
+    if settings.cache_datasets:
+        try:
+            check_datasets_cache()
+        except PreflightError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # The dataset is checked HERE, not in the gateway proxy, so the guard holds
     # for every caller — the proxy's own contract is that no training logic lives

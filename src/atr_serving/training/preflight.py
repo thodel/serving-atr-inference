@@ -14,13 +14,15 @@ because a busy GPU is exactly what a queue is for.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 __all__ = ["PreflightError", "GpuInfo", "free_disk_gb", "query_gpus", "check_disk",
-           "check_vram", "check_tmpdir", "mount_fstype", "NETWORK_FS"]
+           "check_vram", "check_tmpdir", "check_datasets_cache", "datasets_cache_dir",
+           "mount_fstype", "NETWORK_FS"]
 
 #: Filesystems where POSIX delete semantics do not hold well enough for the
 #: temp-directory churn that ketos/lightning/datasets do.
@@ -129,6 +131,48 @@ def mount_fstype(path: str | Path, mounts_file: str | Path = "/proc/mounts") -> 
             if best is None or len(mountpoint) > len(best[0]):
                 best = (mountpoint, fstype)
     return best
+
+
+def datasets_cache_dir() -> Path:
+    """Where ``datasets`` writes its Arrow generation cache.
+
+    Same precedence the library uses: ``HF_DATASETS_CACHE``, else
+    ``$HF_HOME/datasets``, else ``~/.cache/huggingface/datasets``. Returned
+    unresolved; :func:`mount_fstype` resolves it, which matters because the path
+    that broke a run was a *symlink* at the standard location pointing at CIFS.
+    """
+    if env := os.environ.get("HF_DATASETS_CACHE"):
+        return Path(env)
+    if home := os.environ.get("HF_HOME"):
+        return Path(home) / "datasets"
+    return Path.home() / ".cache" / "huggingface" / "datasets"
+
+
+def check_datasets_cache(
+    path: str | Path | None = None, mounts_file: str | Path = "/proc/mounts"
+) -> None:
+    """Refuse an Arrow generation cache on a network filesystem.
+
+    The fourth CIFS-semantics failure, and the most expensive: an 11½-hour
+    prepare died with ``ValueError: I/O operation on closed file`` from
+    ``pyarrow``'s writer, because SMB does not hold a file handle open reliably
+    across a multi-hour write. Nothing had been materialized and no progress was
+    reported in the meantime.
+
+    Only meaningful when the job caches — ``streaming=True`` never generates a
+    cache, so callers check this only for cached runs. Refusing a streaming job
+    over the location of a cache it will not write would be nonsense.
+    """
+    path = datasets_cache_dir() if path is None else path
+    hit = mount_fstype(path, mounts_file)
+    if hit and hit[1] in NETWORK_FS:
+        raise PreflightError(
+            f"the datasets cache {path} is on a {hit[1]} filesystem ({hit[0]}). "
+            "pyarrow cannot hold a write handle open there for the length of a "
+            "generation pass (ValueError: I/O operation on closed file, after 11 h). "
+            "Point HF_DATASETS_CACHE at local disk, or set "
+            "ATR_TRAIN_CACHE_DATASETS=false to stream instead of caching."
+        )
 
 
 def check_tmpdir(path: str | Path, mounts_file: str | Path = "/proc/mounts") -> None:

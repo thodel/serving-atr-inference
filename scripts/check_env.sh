@@ -61,6 +61,36 @@ else
   pass "TMPDIR is on local filesystem (${TMPDIR_FS})"
 fi
 
+# datasets Arrow generation cache (#60)
+# Distinct from the hub cache, and the distinction is what an 11.5-hour failure
+# turned on: hub/ stores downloaded files and is fine on the share, while
+# datasets/ is written by pyarrow as a long streaming write, which SMB cannot
+# hold a handle open for.
+if [ -n "${HF_DATASETS_CACHE:-}" ]; then
+  DS_CACHE="$HF_DATASETS_CACHE"
+elif [ -n "${HF_HOME:-}" ]; then
+  DS_CACHE="${HF_HOME}/datasets"
+else
+  DS_CACHE="${HOME}/.cache/huggingface/datasets"
+fi
+DS_RESOLVED=$(readlink -f "$DS_CACHE" 2>/dev/null || echo "$DS_CACHE")
+DS_FS=$(fs_type "$DS_RESOLVED")
+echo "  datasets cache = ${DS_CACHE}"
+[ "$DS_RESOLVED" != "$DS_CACHE" ] && echo "  resolves to    = ${DS_RESOLVED}"
+echo "  datasets fs    = ${DS_FS}"
+
+if [[ "$DS_FS" == "nfs" || "$DS_FS" == "cifs" || "$DS_FS" == "smb" ]]; then
+  fail "the datasets Arrow cache is on a network filesystem (${DS_FS})"
+  info "  pyarrow cannot hold a write handle open there for a generation pass:"
+  info "  'ValueError: I/O operation on closed file' after 11.5 h, zero pages."
+  info "  The trainer refuses a CACHED job in this state.  Fix:"
+  info "    [ -L ~/.cache/huggingface/datasets ] && rm ~/.cache/huggingface/datasets"
+  info "    mkdir -p ~/.cache/huggingface/datasets"
+  info "  or stream instead:  ATR_TRAIN_CACHE_DATASETS=false"
+else
+  pass "datasets Arrow cache is on local filesystem (${DS_FS})"
+fi
+
 # HF_HOME
 HF_HOME_VAL="${HF_HOME:-}"
 HF_HOME_RESOLVED=""

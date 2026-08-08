@@ -293,17 +293,29 @@ Two rules that are easy to get wrong:
   projects, which is the same "same name = same dataset" check `data_prep.py` makes.
   Verified 2026-08-07: `datasets--dh-unibe--image-text_medieval-scripts_xiv-xv-xvi`
   is already there (304 GB), pulled by `vlm_training`.
-* **`hub/` is not the only cache directory.** Under `~/.cache/huggingface` there are
-  also `datasets/` (the Arrow cache `load_dataset` builds in non-streaming mode) and
-  `xet/`. On asterAIx only `hub` was symlinked, so those two still land on the full
-  root partition. Symlink them the same way, or the first non-streaming load will
-  fill `/` again:
+* **`hub/` is the only cache directory that belongs on the share.** Under
+  `~/.cache/huggingface` there are also `datasets/` — the **Arrow generation cache**
+  `load_dataset` builds in non-streaming mode — and `xet/`.
 
-  ```bash
-  mkdir -p /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache
-  mv ~/.cache/huggingface/datasets/* /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache/ 2>/dev/null
-  rmdir ~/.cache/huggingface/datasets && ln -s /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache ~/.cache/huggingface/datasets
-  ```
+  > **An earlier revision of this file told you to symlink `datasets/` to the share
+  > as well. That advice was wrong and cost 11½ hours.** A `kraken-medieval-full-v1`
+  > prepare died with `ValueError: I/O operation on closed file` from `pyarrow`'s
+  > writer, with zero pages materialized: SMB does not hold a write handle open
+  > reliably for the length of a generation pass. Undo it if it is still in place:
+  >
+  > ```bash
+  > [ -L ~/.cache/huggingface/datasets ] && rm ~/.cache/huggingface/datasets && mkdir -p ~/.cache/huggingface/datasets
+  > ```
+  >
+  > `hub/` is unaffected — it stores downloaded files rather than streaming Arrow
+  > writes, and that symlink is what shares 304 GB of ground truth with
+  > `vlm_training`. The trainer now refuses a cached job whose datasets cache is on
+  > a network filesystem (`preflight.check_datasets_cache`, #60), so this fails at
+  > submit instead of eleven hours in.
+
+  Keeping `datasets/` local costs root-partition space only for **cached** runs;
+  `ATR_TRAIN_CACHE_DATASETS=false` streams and generates no Arrow cache at all,
+  which is the right setting for page-scale selections regardless.
 * **`TMPDIR` must be set in `.env`, not a shell profile** — `dill` reads it at import
   time, and a systemd service never sources `~/.bashrc`.
 * **Checkpoints stay on local disk too**, for the same class of reason: lightning
