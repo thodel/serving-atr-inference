@@ -200,6 +200,11 @@ def parse_eval_report(text: str) -> Metrics:
     metrics = Metrics(
         chars=num("chars", int),
         errors=num("errors", int),
+        insertions=num("insertions", int),
+        deletions=num("deletions", int),
+        substitutions=num("substitutions", int),
+        length_ratio=num("length_ratio", float),
+        truncated_cer=num("truncated_cer", float),
         cer=num("cer", float),
         wer=num("wer", float),
         samples=num("samples", int),
