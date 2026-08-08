@@ -54,13 +54,38 @@ class HFPageSource:
     ground truth is ~6.6 TB of page scans, so every load is narrowed to the
     selected projects with ``data_files``.
 
-    * ``cache=True`` (default) — download only the selected shards into the
-      standard cache and read from there. A re-run costs no download.
+    * ``cache=True`` — download the selected shards into the Arrow generation
+      cache and read from there. A re-run costs no download.
+      **The cache directory is set to local disk**, not ``~/.cache/huggingface/datasets``,
+      because ``datasets`` opens an Arrow file handle for the entire prepare phase
+      and that handle goes stale on SMB (the CIFS share). Local scratch is also
+      simply faster for random-access shard reads.
     * ``cache=False`` — stream from the hub, keeping nothing.
     """
 
+    # Local datasets cache: keep the Arrow generation cache on the same local
+    # disk where the kraken page output goes, so the prepare pipeline never
+    # touches the CIFS share except to read the source parquet shards.
+    _LOCAL_DATASETS_CACHE: Path | None = None  # lazily set; never on CIFS
+
     def __init__(self, cache: bool = True) -> None:
         self.cache = cache
+
+    @classmethod
+    def _local_datasets_cache(cls) -> Path:
+        """A local directory for the Arrow generation cache.
+
+        Created once per process under ``/tmp/`` so that:
+        - it is on the local NVMe (no SMB file handle problem)
+        - it is private to this run (no cross-run interference)
+        - ``TMPDIR`` cleanup handles it when the job exits
+        """
+        if cls._LOCAL_DATASETS_CACHE is None:
+            cls._LOCAL_DATASETS_CACHE = Path(
+                os.environ.get("TMPDIR", "/tmp")
+            ) / "atr-datasets-cache" / str(os.getpid())
+            cls._LOCAL_DATASETS_CACHE.mkdir(parents=True, exist_ok=True)
+        return cls._LOCAL_DATASETS_CACHE
 
     def stream(
         self, hf_repo: str, data_files: list[str], revision: str | None = None
@@ -73,6 +98,16 @@ class HFPageSource:
             "Loading" if self.cache else "Streaming", hf_repo, data_files,
             cached, "present" if cached.exists() else "not yet fetched",
         )
+
+        if self.cache:
+            # Point ONLY the Arrow generation cache at local disk.
+            # The standard hub/ blob cache stays where it is (likely the CIFS
+            # symlink on asterAIx) — that traffic is append-only downloads and
+            # does not hold open file handles across a multi-hour prepare.
+            cache_path = str(self._local_datasets_cache())
+            os.environ["HF_DATASETS_CACHE"] = cache_path
+            logger.info("Arrow generation cache: {}", cache_path)
+
         # The dict key is just the split label for the explicit file list; the
         # role (train/eval) is the caller's business.
         #
@@ -89,6 +124,7 @@ class HFPageSource:
             streaming=not self.cache,
             revision=revision,
             verification_mode="no_checks",
+            download_mode="force_redownload" if self.cache else "only_if_exists",
         )
         return iter(self._raw_images(ds))
 

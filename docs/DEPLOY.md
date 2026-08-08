@@ -321,6 +321,21 @@ Two rules that are easy to get wrong:
   error. The trainer now rejects a job whose TMPDIR is on a network filesystem
   (`check_tmpdir`) rather than failing mid-stage.
 
+* **The Arrow generation cache (`HF_DATASETS_CACHE`) must also be on local disk.**
+  When `cache_datasets=True`, ``datasets`` writes its download-and-prepare Arrow
+  cache to ``HF_DATASETS_CACHE`` and holds a file handle open across the entire
+  multi-hour materialisation. On SMB that handle goes stale mid-write and the
+  prepare fails with ``ValueError: I/O operation on closed file`` — after eleven
+  hours and zero pages written. The trainer now checks this at submit time
+  (``check_datasets_cache``) and rejects a misconfigured job immediately.
+
+  The default ``cache_datasets=False`` avoids the problem entirely by streaming
+  from the hub with no on-disk cache at all — the right choice for page-scale
+  selections where materialising the Arrow cache for a ~1 TB selection would
+  fill the local disk for no gain. If you do enable caching, leave
+  ``HF_DATASETS_CACHE`` unset (the trainer sets it to ``/tmp/atr-datasets-cache/<pid>/``)
+  or point it at local disk; do not point it at the CIFS share.
+
 Unlike `vlm_training`, which loads whole line-crop datasets, every load here is narrowed
 to the selected projects with `data_files`: this repo's ground truth is page scans, and
 the medieval-scripts repo is ~6.6 TB.

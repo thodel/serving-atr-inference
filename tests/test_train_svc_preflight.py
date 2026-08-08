@@ -8,6 +8,7 @@ from atr_serving.training import preflight
 from atr_serving.training.preflight import (
     GpuInfo,
     PreflightError,
+    check_datasets_cache,
     check_disk,
     check_tmpdir,
     check_vram,
@@ -112,3 +113,26 @@ def test_check_tmpdir_accepts_local_disk(mounts):
 def test_check_tmpdir_is_silent_without_proc_mounts(tmp_path: Path):
     """Not Linux, or /proc unavailable — do not invent a failure."""
     check_tmpdir("/anything", tmp_path / "nope")
+
+
+# ── HF_DATASETS_CACHE must be local (CIFS broke pyarrow's Arrow writer) ───────
+
+
+def test_check_datasets_cache_rejects_the_cifs_share(mounts):
+    """The Arrow generation cache on CIFS goes stale mid-write (#60)."""
+    with pytest.raises(PreflightError, match="cifs"):
+        check_datasets_cache(
+            "/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_datasets_cache",
+            mounts,
+        )
+
+
+def test_check_datasets_cache_accepts_local_disk(mounts):
+    check_datasets_cache("/tmp/atr-datasets-cache", mounts)
+    check_datasets_cache("/home/tobias/.cache/huggingface/datasets", mounts)
+
+
+def test_check_datasets_cache_is_silent_when_empty():
+    """cache_datasets=False means no cache dir is configured — not an error."""
+    check_datasets_cache("", None)
+    check_datasets_cache(None, None)

@@ -279,6 +279,15 @@ async def submit(request: TrainRequest) -> dict:
         check_tmpdir(os.environ.get("TMPDIR", "/tmp"))
     except PreflightError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # The Arrow generation cache is on local disk by default (HFPageSource sets
+    # HF_DATASETS_CACHE to /tmp/atr-datasets-cache/<pid>/), but if the operator
+    # pointed it at the CIFS share via .env, catch it at submit rather than
+    # letting it fail eleven hours in.
+    datasets_cache = os.environ.get("HF_DATASETS_CACHE", "")
+    try:
+        check_datasets_cache(datasets_cache)
+    except PreflightError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # The dataset is checked HERE, not in the gateway proxy, so the guard holds
     # for every caller — the proxy's own contract is that no training logic lives

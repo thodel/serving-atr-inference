@@ -45,11 +45,24 @@ class TrainerSettings(BaseSettings):
     #: the top 10 checkpoints and rewrites them every epoch, which is a lot of
     #: traffic to push over SMB for files we discard once the best is converted.
     checkpoint_root: Path = Path.home() / "atr-cache" / "checkpoints"
-    #: Keep downloaded ground truth in the standard HF cache (whose ``hub/`` is
-    #: symlinked to the research share on asterAIx), so the same dataset is
-    #: fetched once and reused — by us and by lassberg/vlm_training alike.
-    #: False = stream from the hub every run, keeping nothing.
-    cache_datasets: bool = True
+    #: Keep downloaded ground truth in the Arrow generation cache.
+    #:
+    #: **Important on asterAIx:** when True, the ``datasets`` library writes its
+    #: Arrow cache to ``HF_DATASETS_CACHE`` (defaults to
+    #: ``~/.cache/huggingface/datasets``). On asterAIx that path is on the local
+    #: root partition — the ``datasets/`` subdirectory was deliberately **not**
+    #: symlinked to the CIFS share like ``hub/`` is, because Arrow file handles
+    #: on SMB go stale during multi-hour writes. If you point this at the share
+    #: it will fail after hours with "I/O operation on closed file".
+    #:
+    #: The standard HF ``hub/`` cache (model weights etc.) stays symlinked to the
+    #: share — that traffic is append-only downloads with no open file handles.
+    #:
+    #: False = stream from the hub every run, keeping nothing on disk. This is
+    #: the correct default for page-scale selections: a ~1 TB selection's Arrow
+    #: cache is not something this box wants to materialise locally; streaming
+    #: passes it straight from the hub into the kraken page format.
+    cache_datasets: bool = False
 
     # ── executables ───────────────────────────────────────────────────────
     ketos: Path = REPO_ROOT / ".venvs" / "kraken-train" / "bin" / "ketos"

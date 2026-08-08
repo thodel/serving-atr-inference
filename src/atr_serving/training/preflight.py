@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 __all__ = ["PreflightError", "GpuInfo", "free_disk_gb", "query_gpus", "check_disk",
-           "check_vram", "check_tmpdir", "mount_fstype", "NETWORK_FS"]
+           "check_vram", "check_tmpdir", "check_datasets_cache", "mount_fstype", "NETWORK_FS"]
 
 #: Filesystems where POSIX delete semantics do not hold well enough for the
 #: temp-directory churn that ketos/lightning/datasets do.
@@ -147,4 +147,35 @@ def check_tmpdir(path: str | Path, mounts_file: str | Path = "/proc/mounts") -> 
             f"TMPDIR {path} is on a {hit[1]} filesystem ({hit[0]}). Temporary "
             "directories there fail to clean up (ENOTEMPTY in shutil.rmtree during "
             "ketos compile). Point TMPDIR at local disk in .env."
+        )
+
+
+def check_datasets_cache(cache_dir: str | Path | None, mounts_file: str | Path = "/proc/mounts") -> None:
+    """Refuse an Arrow generation cache on a network filesystem.
+
+    ``datasets`` writes its Arrow generation cache (the "download and prepare"
+    step) to ``HF_DATASETS_CACHE``. With the cache on the CIFS share, pyarrow
+    holds an ``LocalFileOpener`` across a multi-hour streamed download and
+    materialisation, and the SMB handle goes stale mid-write:
+
+        ValueError: I/O operation on closed file
+
+    This is the same class of failure as the TMPDIR/shutil.rmtree case: SMB does
+    not provide the POSIX semantics that a long-lived file handle expects. The
+    check runs at submit time (before the job is queued), so a misconfigured cache
+    is caught immediately rather than eleven hours in.
+
+    If ``cache_dir`` is None or empty, caching is disabled and this is a no-op.
+    """
+    if not cache_dir:
+        return
+    hit = mount_fstype(cache_dir, mounts_file)
+    if hit and hit[1] in NETWORK_FS:
+        raise PreflightError(
+            f"HF_DATASETS_CACHE {cache_dir} is on a {hit[1]} filesystem ({hit[0]}). "
+            "The Arrow generation cache holds an open file handle across the "
+            "multi-hour prepare, and SMB handles go stale mid-write "
+            "(ValueError: I/O operation on closed file). "
+            "Set ATR_TRAIN_CACHE_DATASETS=false to stream, or point "
+            "HF_DATASETS_CACHE at local disk in .env."
         )
