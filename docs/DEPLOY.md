@@ -98,11 +98,26 @@ as normal — the only degradation is extra disk I/O. No error is raised; the
 Could not set permissions on [...] Operation not permitted
 ```
 
-This warning can be ignored. It was also the root cause of the transformers 5.x
-incident (#48): the failed upgrade attempt left the venv with the old transformers
-but a partially-updated dependency, and the absence of blob dedup meant the
-failure was silent — no error surfaced until a training job actually tried to
-construct `TrainingArguments`.
+This warning can be ignored.
+
+> **It is *not* related to the transformers 5.x incident (#48)**, despite both
+> printing `Operation not permitted`. The hub cache and pip are separate systems and
+> the two failures had separate causes:
+>
+> * **transformers 5.14.1 was installed** because the requirement was
+>   `transformers>=4.57` with no upper bound. Nothing failed — pip did as it was told.
+> * **The later downgrade to 4.57.6 failed** because `TMPDIR` pointed at the CIFS
+>   share. pip stages an installed package's files into `TMPDIR` before replacing
+>   them, so *installs* succeeded all along and only *upgrades and downgrades*
+>   failed. Fixed in `eb3b202`: `make_venvs.sh` now overrides a network `TMPDIR`.
+>
+> What was silent was neither of those: pip printed the `EPERM` and exited non-zero,
+> but **the venv kept the version being replaced**, so a corrected pin looked applied
+> and was not. That is the thing to watch for, and the reason `check_venvs.sh` should
+> assert versions and not only imports.
+>
+> For the record, `TrainingArguments` constructed fine on 5.14.1 — the mismatch was
+> caught by checking the version, not by an exception.
 
 ## 4. Prefetch model weights + merge vLLM LoRA adapters
 
