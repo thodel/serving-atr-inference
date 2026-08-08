@@ -377,6 +377,13 @@ class Metrics(BaseModel):
     insertions: int | None = None
     deletions: int | None = None
     substitutions: int | None = None
+    #: Ratio of hypothesis chars / reference chars. 1.0 = no over-generation.
+    #: > 1.0 = autoregressive model emitting past the reference; < 1.0 = premature
+    #: stopping. Primary signal for the stopping vs. reading distinction (#55).
+    length_ratio: float | None = None
+    #: Truncated CER: hypothesis clipped to reference length before scoring.
+    #: Isolates reading ability from stopping ability (#55).
+    truncated_cer: float | None = None
     #: How many samples the score is over. The VLM backend caps evaluation
     #: (``VlmTrainParams.eval_samples``), so a CER without this number would hide
     #: that it was measured on a subset.

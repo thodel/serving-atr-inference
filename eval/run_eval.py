@@ -67,6 +67,12 @@ def build_record(model: str, image: Path, resp: dict, elapsed_ms: int, gt: str |
     if gt is not None:
         rec["cer"] = cer(text, gt)
         rec["wer"] = wer(text, gt)
+        from atr_serving.training.textmetrics import edit_details
+        _, bd = edit_details(text, gt)
+        rec["insertions"] = bd.insertions
+        rec["deletions"] = bd.deletions
+        rec["substitutions"] = bd.substitutions
+        rec["length_ratio"] = len(text) / len(gt) if gt else None
     return rec
 
 
@@ -80,11 +86,19 @@ def summarize(records: list[dict]) -> dict[str, dict]:
         cers = [r["cer"] for r in ok if "cer" in r]
         wers = [r["wer"] for r in ok if "wer" in r]
         times = [r["elapsed_ms"] for r in ok if r.get("elapsed_ms") is not None]
+        total_ins = sum(r.get("insertions", 0) or 0 for r in ok)
+        total_del = sum(r.get("deletions", 0) or 0 for r in ok)
+        total_sub = sum(r.get("substitutions", 0) or 0 for r in ok)
+        ratios = [r["length_ratio"] for r in ok if r.get("length_ratio") is not None]
         out[model] = {
             "images": len(recs),
             "errors": len(recs) - len(ok),
             "mean_cer": round(statistics.mean(cers), 4) if cers else None,
             "mean_wer": round(statistics.mean(wers), 4) if wers else None,
+            "insertions": total_ins,
+            "deletions": total_del,
+            "substitutions": total_sub,
+            "mean_length_ratio": round(statistics.mean(ratios), 4) if ratios else None,
             "mean_ms": int(statistics.mean(times)) if times else None,
         }
     return out
@@ -148,12 +162,18 @@ def main() -> int:
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     print("\n=== summary ===")
-    print(f"{'model':40s} {'imgs':>5} {'err':>4} {'CER':>7} {'WER':>7} {'ms':>7}")
+    print(f"{'model':40s} {'imgs':>5} {'err':>4} {'CER':>7} {'WER':>7} {'ins':>6} {'del':>6} {'sub':>6} {'len_r':>7} {'ms':>7}")
     for model, s in summary.items():
         cer_s = f"{s['mean_cer']:.4f}" if s["mean_cer"] is not None else "-"
         wer_s = f"{s['mean_wer']:.4f}" if s["mean_wer"] is not None else "-"
+        lr_s = f"{s['mean_length_ratio']:.4f}" if s.get("mean_length_ratio") is not None else "-"
         ms_s = str(s["mean_ms"]) if s["mean_ms"] is not None else "-"
-        print(f"{model:40s} {s['images']:>5} {s['errors']:>4} {cer_s:>7} {wer_s:>7} {ms_s:>7}")
+        print(
+            f"{model:40s} {s['images']:>5} {s['errors']:>4} "
+            f"{cer_s:>7} {wer_s:>7} "
+            f"{s['insertions']:>6} {s['deletions']:>6} {s['substitutions']:>6} "
+            f"{lr_s:>7} {ms_s:>7}"
+        )
     print(f"\nWrote {index_path} and {args.out_dir / 'summary.json'}")
     return 0
 
