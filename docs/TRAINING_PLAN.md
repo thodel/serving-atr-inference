@@ -494,17 +494,19 @@ a role *completes*, so a wedged job and a working one look identical (#38).
 
 **Measured rates**, which are the numbers to plan the next run with:
 
-- prepare, streaming, warm hub cache: **~4,550 pages/h** cumulative after 3 h,
-  **~10,400 pages/h** instantaneous — the early phase is slower, plausibly glob
-  resolution across 690 projects plus the first uncached shards;
-- extrapolated prepare for ~520 K kept pages: **2–5 days**, the spread being exactly
-  the uncertainty between those two rates;
+- prepare, streaming, warm hub cache: **7,872 pages/h** steady state, measured over a
+  10-minute window at ~50 K files. The cumulative figure after 3 h was 4,550/h and a
+  45-second sample gave 10,400/h — the first is dragged down by the slow start (glob
+  resolution across 690 projects, first uncached shards), the second is too short a
+  window to plan on. Ten minutes is the shortest sample that agreed with itself;
+- extrapolated prepare for ~520 K kept pages: **~66 h (2.75 days)**;
 - training, from run 2: ~8 it/s at batch 64, so ~4.3 h per epoch over ~8 M lines.
 
 **An open risk, not yet observed:** every page is written into a *single flat
 directory*, which at full scale is ~1.04 M files in one directory on SMB. Directory
-lookups degrade with entry count, so the write rate may decay as it fills. At 27 K
-files it was still writing faster than its own average, so this has not appeared —
+lookups degrade with entry count, so the write rate may decay as it fills. Measured
+twice — at 27 K files and again at ~50 K — the rate went **up**, not down, so this has
+not appeared at the scales seen so far —
 but if a later measurement shows decay, that is the cause, and #39's chunking (which
 keeps each chunk's directory bounded) is the fix rather than a restart.
 
