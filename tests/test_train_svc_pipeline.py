@@ -15,7 +15,7 @@ from atr_serving.training.contracts import DatasetSpec, KrakenTrainParams, Train
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.overlay import load_overlay
 
-from kraken_train_svc.runner import Pipeline, StageFailed
+from kraken_train_svc.runner import Pipeline
 from atr_serving.training.settings import TrainerSettings
 
 REPO = "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi"
@@ -364,3 +364,46 @@ def test_a_failed_job_registers_nothing(store, settings):
                  FakeRunner(fail_on="train"))
     assert load_overlay(settings.overlay_path) == []
     assert not settings.trained_root.joinpath("kraken-thun-missiven-v1").exists()
+
+
+# ── a failed job must carry its evidence, not just its exception type ────────
+def test_a_prepare_failure_still_gets_a_log_tail(store, settings):
+    """prepare runs in-process and writes no logs/prepare.log, so reading the
+    stage log gave an EMPTY log_tail on exactly the failures that are hardest to
+    diagnose. A real 11.5-hour prepare died with DatasetGenerationError and the
+    record carried the exception type and nothing else."""
+    class Exploding:
+        calls: list = []
+
+        def stream(self, hf_repo, data_files, revision=None):
+            raise RuntimeError("An error occurred while generating the dataset")
+            yield  # pragma: no cover - makes this a generator
+
+    job = store.create(request_with())
+    # runner.log is where loguru writes for in-process stages
+    paths = store.paths(job.id)
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    (paths.logs / "runner.log").write_text(
+        "\n".join(f"line {i}" for i in range(10)) + "\nValueError: I/O operation on closed file\n",
+        encoding="utf-8")
+
+    done = Pipeline(store, settings, runner=FakeRunner(), source=Exploding()).execute(job.id)
+
+    assert done.status == "failed"
+    assert "DatasetGenerationError" in done.error or "generating the dataset" in done.error
+    assert done.log_tail, "a failed job must carry evidence, not just an exception type"
+    assert any("closed file" in line for line in done.log_tail)
+
+
+def test_a_subprocess_stage_still_prefers_its_own_log(store, settings):
+    """The fallback must not shadow the stage log when there is one."""
+    job = store.create(request_with())
+    paths = store.paths(job.id)
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    (paths.logs / "runner.log").write_text("runner noise\n", encoding="utf-8")
+
+    done = Pipeline(store, settings, runner=FakeRunner(fail_on="train", exit_code=3),
+                    source=FakeSource({"train": 4, "eval": 2})).execute(job.id)
+    assert done.status == "failed"
+    assert any("boom in train" in line for line in done.log_tail)
+    assert not any("runner noise" in line for line in done.log_tail)

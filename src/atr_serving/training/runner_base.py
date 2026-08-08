@@ -246,12 +246,35 @@ class BasePipeline(ABC):
             return self.store.advance(job, "cancelled")
         except BaseException as exc:  # noqa: BLE001 — every failure must land on the record
             stage = job.stage or "prepare"
-            log_path = self.store.paths(job.id).log(stage)
             logger.exception("job {} failed in {}", job.id, stage)
             return self.store.fail(
                 job, f"{type(exc).__name__} in {stage}: {exc}",
-                log_tail=tail(log_path, self.settings.log_tail_lines),
+                log_tail=tail(self._failure_log(job, stage), self.settings.log_tail_lines),
             )
+
+    def _failure_log(self, job: TrainJob, stage: str) -> Path:
+        """The log most likely to explain a failure in ``stage``.
+
+        Only stages that spawn a subprocess have a ``logs/<stage>.log`` — ``_run``
+        creates it. ``prepare`` and the VLM backend's ``compile`` run in-process
+        and write to ``logs/runner.log`` through loguru, so reading the stage log
+        for those yields nothing and the job record's ``log_tail`` comes back
+        **empty** on a failed job. That happened for real: an 11½-hour prepare
+        died with ``DatasetGenerationError`` and the record carried the exception
+        type and not one line of context, while the actual cause sat in
+        runner.log the whole time.
+
+        A failed job must carry its reason (:meth:`JobStore.fail` insists on one);
+        this makes the same true of the evidence.
+        """
+        paths = self.store.paths(job.id)
+        stage_log = paths.log(stage)
+        try:
+            if stage_log.is_file() and stage_log.stat().st_size:
+                return stage_log
+        except OSError:
+            pass
+        return paths.logs / "runner.log"
 
 
 def install_cancel_handler() -> None:
