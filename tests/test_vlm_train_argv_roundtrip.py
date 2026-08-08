@@ -75,3 +75,30 @@ def test_a_prompt_with_spaces_survives_as_one_argument():
     params = VlmTrainParams(prompt="Transcribe this line, keeping abbreviations.")
     assert parse_train_args(_train_argv(params)).prompt == params.prompt
     assert parse_eval_args(_eval_argv(params)).prompt == params.prompt
+
+
+# ── baseline mode ───────────────────────────────────────────────────────────
+def test_the_runner_s_argv_is_still_an_adapter_run():
+    """The pipeline always evaluates a trained adapter; --no-adapter is for the
+    manual baseline comparison only."""
+    args = parse_eval_args(_eval_argv(VlmTrainParams()))
+    assert args.adapter == "/scratch/ckpt" and args.no_adapter is False
+
+
+def test_baseline_mode_needs_no_adapter():
+    argv = [a for a in _eval_argv(VlmTrainParams()) if a not in ("--adapter", "/scratch/ckpt")]
+    args = parse_eval_args([*argv, "--no-adapter"])
+    assert args.adapter is None and args.no_adapter is True
+
+
+def test_neither_adapter_nor_baseline_is_refused():
+    """A dropped --adapter must not quietly score the base model and report the
+    number as the fine-tune's — the silent success this subsystem refuses."""
+    argv = [a for a in _eval_argv(VlmTrainParams()) if a not in ("--adapter", "/scratch/ckpt")]
+    with pytest.raises(SystemExit):
+        parse_eval_args(argv)
+
+
+def test_both_at_once_is_refused():
+    with pytest.raises(SystemExit):
+        parse_eval_args([*_eval_argv(VlmTrainParams()), "--no-adapter"])

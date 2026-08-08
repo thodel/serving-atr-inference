@@ -27,7 +27,11 @@ from atr_serving.training.vlm_dataset import chat_example, read_jsonl
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Score a trained VLM adapter on held-out samples.")
-    p.add_argument("--adapter", required=True)
+    p.add_argument("--adapter", default=None,
+                   help="LoRA adapter directory to evaluate")
+    p.add_argument("--no-adapter", dest="no_adapter", action="store_true",
+                   help="evaluate the UN-ADAPTED base model — the baseline a fine-tune "
+                        "has to beat. Without this comparison a CER is uninterpretable.")
     p.add_argument("--val-jsonl", required=True)
     p.add_argument("--report", required=True)
     p.add_argument("--base-model", required=True)
@@ -42,12 +46,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-new-tokens", type=int, default=256)
     p.add_argument("--load-in-4bit", dest="load_in_4bit", action="store_true", default=True)
     p.add_argument("--no-load-in-4bit", dest="load_in_4bit", action="store_false")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+
+    # Requiring the choice to be explicit, rather than treating a missing
+    # --adapter as "baseline", is the point: a bug that dropped the adapter would
+    # otherwise score the base model and report the number as the fine-tune's.
+    # That is the silent success this subsystem refuses everywhere else.
+    if bool(args.adapter) == bool(args.no_adapter):
+        p.error("pass exactly one of --adapter <dir> or --no-adapter")
+    return args
 
 
 def load_model(args):
     import torch
-    from peft import PeftModel
     from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 
     quantization = None
@@ -61,19 +72,27 @@ def load_model(args):
     # The processor comes from the adapter directory: training saved it there, so
     # it carries the chat template and any added tokens the model was tuned with.
     # Falling back to the base would silently evaluate with a different tokenizer.
-    processor_src = args.adapter if (Path(args.adapter) / "preprocessor_config.json").is_file() \
-        else args.base_model
+    # A baseline run has no adapter, so the base's own processor is correct — and
+    # is also what makes the two runs comparable.
+    processor_src = args.base_model
+    if args.adapter and (Path(args.adapter) / "preprocessor_config.json").is_file():
+        processor_src = args.adapter
     processor = AutoProcessor.from_pretrained(
         processor_src, trust_remote_code=True, max_pixels=args.max_pixels,
     )
     if processor.tokenizer.pad_token_id is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
-    base = AutoModelForImageTextToText.from_pretrained(
+    model = AutoModelForImageTextToText.from_pretrained(
         args.base_model, quantization_config=quantization, dtype=torch.bfloat16,
         device_map={"": 0}, trust_remote_code=True,
     )
-    model = PeftModel.from_pretrained(base, args.adapter)
+    if args.adapter:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, args.adapter)
+    else:
+        print("BASELINE: evaluating the un-adapted base model", flush=True)
     model.eval()
     return model, processor
 
@@ -124,7 +143,10 @@ def main(argv: list[str] | None = None) -> int:
     report = score.as_report()
     report.update({
         "base_model": args.base_model,
+        # Named unambiguously so a baseline report can never be mistaken for a
+        # fine-tune's, or vice versa, once the two files sit side by side.
         "adapter": args.adapter,
+        "is_baseline": args.adapter is None,
         "granularity": args.granularity,
         "prompt": args.prompt,
         # Named so a reader cannot mistake a capped run for a full one.
