@@ -36,11 +36,33 @@ base. Most of that gap is the model learning to stop at the line rather than lea
 read — see [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md), which states the caveat
 alongside the number.
 
+### The pipeline runs; its numbers are not yet trustworthy
+
+Three runs have completed end to end. None produced a usable model, and **why** is an
+open question rather than a known answer — [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) §9
+records the measurements in full:
+
+| run | CER | insertions | deletions |
+|---|---|---|---|
+| `kraken-thun-missiven-v1` | 0.9838 | 11,191 | 2 |
+| `kraken-medieval-scripts-v1` | 0.7074 | 5,381 | 48 |
+| `qwen3vl-thun-smoke` | 0.466 (base 1.837) | — | — |
+
+Every model tried, CTC and autoregressive alike, **emits more characters than the
+reference contains** — one signature across two architectures on one eval set. That is
+either a training-design problem (mixed corpora scored on an alien eval set) or an
+eval-material problem (crops paired with short or offset references), and validation
+cannot tell them apart because both stages read the same data. **#52** settles it by
+scoring a published Zenodo model — one that never saw this corpus — on the same
+material. Until it does, no CER here should be quoted, compared across runs, or
+published, and nothing has been pushed to the hub.
+
 Open work is grouped into three epics: **#49** — the training subsystem from "it runs"
-to "it is trustworthy" (promotion gate #36, per-epoch metrics #38, dataset preflight
-#46, 1..n datasets #40, chunked prepare #39, line-level sources #45, runbook + eval
-#37); **#41** — TrOCR fine-tuning as the third backend (#42–#44); and **#48** —
-deployment robustness. #30 and #32 remain open from production.
+to "it is trustworthy" (eval validation #52, promotion gate #36, per-epoch metrics #38
+and the `rich` constraint on it #51, `trained_root` orphans #50, dataset preflight #46,
+1..n datasets #40, chunked prepare #39, line-level sources #45, runbook + eval #37);
+**#41** — TrOCR fine-tuning as the third backend (#42–#44); and **#48** — deployment
+robustness. #30 and #32 remain open from production.
 
 ## Quickstart (dev)
 
@@ -186,10 +208,11 @@ serve them, so nothing appears in `/models` on the strength of having been train
 
 ### Publishing trained models to the HuggingFace Hub
 
-The register stage leaves each model's best-run weights and a `metadata.json`
-under `~/atr-cache/trained/<model_id>/`. `scripts/publish_to_hub.py` pushes those
-directories to `<org>/<model_id>`, generating the model card from that metadata —
-CER/WER, dataset selection, hyperparameters, job id.
+The register stage leaves each model's best-run weights and a `metadata.json` in one
+directory per model under `TrainerSettings.trained_root` — `~/atr-cache/trained/` by
+default, and on asterAIx the research share, wherever `.env` points it.
+`scripts/publish_to_hub.py` pushes those directories to `<org>/<model_id>`, generating
+the model card from that metadata — CER/WER, dataset selection, hyperparameters, job id.
 
 Each model is **linked to the ground truth it was trained on**: the card declares
 every training corpus in the frontmatter's `datasets:` key, which is what makes
@@ -221,6 +244,14 @@ A successful push is recorded in the model's `metadata.json`, so a second run is
 no-op — until that model is retrained, which rewrites the record and republishes.
 A model directory without `metadata.json` is reported and skipped, never uploaded:
 weights whose provenance and error rate cannot be stated do not belong on the hub.
+
+**Nothing has been published yet, and that is the tool working.** The first
+`--dry-run` on the box (2026-08-08) planned both registered models, skipped an
+unregistered directory (**#50**), and reported CERs of 0.71 and 0.47 — numbers that
+belong in an issue, not on a model card. Publishing is a manual step precisely so
+that judgement happens; it stays blocked on **#52**, which decides whether those CERs
+measure the models or the ground truth. Run `--list` and `--dry-run` first, always:
+neither contacts the hub, so neither needs `hf auth login`.
 
 ## Recognition API — page-level & line-level
 

@@ -421,3 +421,51 @@ things about it are worth knowing here, because they changed shared code:
 4. **Auth: the existing shared `X-API-Key`.** No separate training key.
 5. **Default architecture + schedule:** the `kraken+` spec, batch 256, `1cycle` @ 1e-4
    (§3a).
+
+---
+
+## 9. What the first real runs measured (2026-08-07/08)
+
+Two kraken runs and one VLM run have completed end to end on asterAIx. The pipeline
+works — jobs queue, train, score and register unattended, and a failure lands on the
+record with its reason. **The models it produced are not usable, and the reason is not
+yet established.** This section states what was measured rather than what was hoped,
+because the numbers below are the evidence three open issues rest on.
+
+| run | job | CER | insertions | deletions | substitutions |
+|---|---|---|---|---|---|
+| `kraken-thun-missiven-v1` | `20260807T161137Z` | **0.9838** | 11,191 | 2 | 186 |
+| `kraken-medieval-scripts-v1` | `20260807T212539Z` | **0.7074** | 5,381 | 48 | 2,753 |
+| `qwen3vl-thun-smoke` (VLM) | 2026-08-08 | **0.466** (base: 1.837) | — | — | — |
+
+Both kraken runs were scored on `GT_Thun-Test_(DEMO_TEST)` — identical `chars` (11,566),
+so identical material. `kraken-medieval-scripts-v1` trained on one small Thun project
+against seven large Leuven ones (`Itinera_Nova_100pages`, `SAL7305`–`SAL7370`) and was
+therefore scored purely on Bernese transfer; its `best_0.2925.mlmodel` agrees with the
+test's 29.26 % character accuracy to four digits, so validation and test see the same
+thing and the score is not a test-time artefact.
+
+**Every model tried, CTC and autoregressive alike, emits more characters than the
+reference contains.** Deletions are 2 and 48; insertions are 11,191 and 5,381; the
+un-adapted VLM base scores a CER above 1, which is only reachable by over-emitting.
+That is one signature across two architectures on one eval set, and it admits two
+readings with opposite fixes — a training-design problem (mixed corpora, alien eval
+set) or an eval-material problem (line crops paired with short or offset references).
+Validation cannot separate them, since both stages read the same data.
+
+**#52 settles it** by scoring a published Zenodo model — one that has never seen this
+corpus, and therefore does not depend on our pipeline being right — on the same
+material. Until it does, no CER in this repo should be quoted, compared across runs, or
+published: `scripts/publish_to_hub.py` is deliberately a manual step for this reason,
+and nothing has been pushed to the hub.
+
+Two further findings came out of the same runs:
+
+- **#50** — a register stage that fails after copying the weights leaves an orphan in
+  `trained_root` that no cleanup path can reach. `kraken-thun-missiven-v1` is one:
+  58 MB of a 98 %-CER model with no `metadata.json`, left by the `copy2`/`EPERM` bug
+  9219398 fixed. The bug is fixed; the ordering that let it leak is not.
+- **#51** — per-epoch metrics cannot be scraped from `train.log`. ketos renders progress
+  through `rich`, so into a redirected stdout the `val_accuracy:` labels arrive with
+  their values stripped. #38 must read the trainer's own output (`--logger`, or the
+  metric embedded in `checkpoint_<NN>-<val_metric>.ckpt`), not the log.
