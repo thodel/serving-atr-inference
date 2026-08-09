@@ -271,6 +271,9 @@ class TrainerClient:
     async def health(self) -> dict:
         return await self._request("GET", "/health")
 
+    async def curve(self, job_id: str) -> dict:
+        return await self._request("GET", f"/jobs/{job_id}/curve")
+
     async def verify(self, body: dict[str, Any]) -> dict:
         """Check a request's dataset against the hub. Queues nothing."""
         return await self._request("POST", "/jobs/verify", json=body)

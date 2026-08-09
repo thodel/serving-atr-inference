@@ -23,11 +23,11 @@ units (`deploy/systemd/`). What is done, and what the open issues still cover:
 | part | state |
 |---|---|
 | gateway `:8200` — registry (49 models), `/health`, `/models`, recognition routing | done |
-| engine services — kraken, TrOCR, party, vLLM (`engines/`) | done; **#30** open (3 of 7 engines 500 in production), **#32** open (party cannot load safetensors) |
+| engine services — kraken, TrOCR, party, vLLM (`engines/`) | done; **#30** open (3 of 7 engines 500 in production), **#32** fixed in code (both engines load safetensors via `kraken.models.load_models`), unverified on the box |
 | training service `:8204` — one supervisor, one queue, one GPU guard | done (M1–M3, #33–#35) |
 | kraken backend (`ketos`) | done; has produced real models |
 | VLM backend (QLoRA on Qwen3-VL) | done, and **verified on GPU end to end** (#47) — see the measured run below |
-| serving what we trained | partly — `local_path` specs and the disabled-by-default overlay are in; the promotion gate is **#36** |
+| serving what we trained | done (#36) — `local_path` specs, the overlay merged into `/models`, and a promotion gate that advertises only what has actually transcribed a page |
 | publishing trained models to HuggingFace | done (`scripts/publish_to_hub.py`) |
 
 First full VLM run (2026-08-08, Thun demo pair, `max_pages: 40`, 1 epoch): 52 pages →
@@ -61,8 +61,8 @@ Open work is grouped into three epics:
 
 - **#49** — the training subsystem from "it runs" to "it is trustworthy": eval
   validation #52 (**blocks the interpretation of every CER above**), metric
-  decomposition #55, promotion gate #36, per-epoch metrics #38 and the `rich`
-  constraint on it #51, `trained_root` orphans #50, 1..n datasets #40, chunked
+  decomposition #55, per-epoch metrics #38 and the `rich` constraint on it #51 (both
+  landed), `trained_root` orphans #50, 1..n datasets #40, chunked
   prepare #39, line-level sources #45, runbook + eval #37.
 - **#41** — TrOCR fine-tuning as the third backend: #42 (shared cropping) → #43
   (contracts + argv) → #44 (the engine). In practice #52 should land first, or a
@@ -194,6 +194,7 @@ is the only way in**. Same `X-API-Key` as recognition.
 | `GET /train/jobs` | `{jobs: [...]}` | Recent runs, newest first. |
 | `GET /train/jobs/{id}` | full job record | Status, stage, progress, metrics, error. |
 | `GET /train/jobs/{id}/log?stage=train&lines=200` | `{lines: [...]}` | Tail one stage's log. |
+| `GET /train/jobs/{id}/curve` | `training.json` | Per-epoch validation metrics (#38). |
 | `POST /train/jobs/{id}/cancel` | job record | SIGTERM the run's process group. |
 | `DELETE /train/jobs/{id}` | `{deleted: true}` | Drop artifacts; the record and the model survive. |
 
@@ -238,8 +239,28 @@ already-terminal job, `503` a backend whose venv was never built on this box,
 a `502` naming the URL, never a job id for a job that was not created.
 
 Trained models are registered **disabled** in the gitignored
-`config/models.local.yaml` until the promotion gate (#36) proves the host can
-serve them, so nothing appears in `/models` on the strength of having been trained.
+`config/models.local.yaml`, and the **promotion gate** (#36) is what advertises
+them: after registering, the trainer posts one held-out validation page to the
+gateway's `/ocr` with the new id, and only non-empty text flips the entry to
+`enabled: true`. Empty text does not — a `200` with `""` is exactly how the
+gateway used to answer for a model it could not run (#21). The gate goes through
+the gateway rather than the engine, because "can this box serve it" is a question
+about the path clients actually take.
+
+Failing the gate does **not** fail the job: the model trained, scored and is
+registered; it is simply not advertised. The VLM backend never even runs it and
+says so — a LoRA adapter is unservable by vLLM 0.11 until `scripts/merge_loras.py`
+bakes it into its base, which is a fact about serving, not about the run.
+
+`GET /train/jobs/{id}/curve` returns the per-epoch record. It is built from the
+checkpoint filenames (`checkpoint_<NN>-<val_metric>.ckpt`), because ketos renders
+its metrics through `rich` and the captured log keeps the labels but none of the
+numbers (#51) — there is no terminal width at which a progress bar becomes a
+metrics log. kraken keeps the top 10 checkpoints, so the curve is the best epochs
+rather than every epoch, and it says `complete: false` for that reason. Which
+epochs survived is the signal worth having: late ones mean the run was still
+improving when the epochs ran out, early ones mean it peaked and then got worse
+— the distinction a single final CER hides completely.
 
 ### Publishing trained models to the HuggingFace Hub
 

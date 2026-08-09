@@ -557,3 +557,28 @@ def test_a_streaming_run_does_not_care_where_the_cache_lives(client, settings, m
                         lambda *a, **k: called.append(1))
     assert client.post("/jobs", json=BODY).status_code == 202
     assert called == []
+
+
+# ── the per-epoch record (#38) ──────────────────────────────────────────────
+def test_the_curve_is_404_until_the_train_stage_writes_it(client):
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    resp = client.get(f"/jobs/{job_id}/curve")
+    assert resp.status_code == 404
+    assert "train stage" in resp.json()["detail"]
+
+
+def test_the_curve_is_served_once_written(client):
+    from atr_serving.training.curves import CURVE_FILENAME, curve_from_checkpoints, write_training_json
+
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    ckpt = Path(store_of(client).paths(job_id).root) / "ckpt"
+    ckpt.mkdir(parents=True)
+    for epoch, metric in ((48, "0.9000"), (50, "0.9200")):
+        (ckpt / f"checkpoint_{epoch}-{metric}.ckpt").write_bytes(b"CKPT")
+    write_training_json(Path(store_of(client).paths(job_id).root) / CURVE_FILENAME,
+                        curve_from_checkpoints(ckpt), job_id)
+
+    body = client.get(f"/jobs/{job_id}/curve").json()
+    assert body["best"] == {"epoch": 50, "val_metric": 0.92}
+    assert body["still_improving"] is True
+    assert body["complete"] is False        # top-10 only; never claims otherwise

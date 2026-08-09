@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import signal
@@ -38,6 +39,7 @@ from loguru import logger
 
 from atr_serving.training.backends import BACKENDS, UnknownBackend, backend_for
 from atr_serving.training.contracts import TrainJob, TrainRequest
+from atr_serving.training.curves import CURVE_FILENAME
 from atr_serving.training.hf_source import (
     DatasetSelectionError,
     VerificationUnavailable,
@@ -398,6 +400,20 @@ async def get_log(job_id: str, stage: str = Query("train"), lines: int = Query(2
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"no {stage} log for job {job_id}")
     return {"job_id": job_id, "stage": stage, "lines": tail(path, lines)}
+
+
+@app.get("/jobs/{job_id}/curve")
+async def get_curve(job_id: str) -> dict:
+    """The per-epoch record for a run (#38), or 404 before the train stage wrote it."""
+    job = _load(job_id)
+    path = _store().paths(job.id).root / CURVE_FILENAME
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(f"no {CURVE_FILENAME} for job {job_id} — it is written at the end of "
+                    "the train stage, so a job that has not trained yet has none"),
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @app.post("/jobs/{job_id}/cancel")

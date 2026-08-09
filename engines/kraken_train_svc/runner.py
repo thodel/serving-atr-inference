@@ -31,6 +31,7 @@ from atr_serving.training.ketos_cmd import (
     train_cmd,
     weights_suffix,
 )
+from atr_serving.training.curves import CURVE_FILENAME, curve_from_checkpoints, write_training_json
 from atr_serving.training.manifests import binary_manifest
 from atr_serving.training.promote import PromotionResult, held_out_page, http_recognizer, promote
 from atr_serving.training.overlay import set_enabled, upsert_entry
@@ -115,6 +116,21 @@ class Pipeline(BasePipeline):
                 f"training exited 0 but wrote no best_*{weights_suffix(params.weights_format)} "
                 f"in {ckpt_dir} — there is nothing to serve or evaluate"
             )
+        # The per-epoch record (#38), read off the checkpoint filenames because
+        # ketos renders its metrics through rich and the log keeps none of them
+        # (#51). Written here, while the checkpoint dir is still populated —
+        # DELETE /jobs/{id} removes it.
+        curve = curve_from_checkpoints(ckpt_dir)
+        write_training_json(self.store.paths(job.id).root / CURVE_FILENAME, curve, job.id)
+        if curve.best is not None:
+            job.progress.epoch = curve.last_epoch
+            job.progress.val_accuracy = curve.best.val_metric
+            self.store.save(job)
+            logger.info("curve: {} epochs kept, best {:.4f} at epoch {}{}",
+                        len(curve.points), curve.best.val_metric, curve.best.epoch,
+                        "" if curve.still_improving is None
+                        else (" — still improving" if curve.still_improving
+                              else " — peaked early"))
         logger.info("best weights: {}", weights)
         return weights
 

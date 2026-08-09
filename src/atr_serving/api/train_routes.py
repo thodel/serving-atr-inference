@@ -120,6 +120,12 @@ async def get_log(
     return await _forward(_client(request).log(job_id, stage, lines))
 
 
+@router.get("/jobs/{job_id}/curve")
+async def get_curve(request: Request, job_id: str) -> dict:
+    """Per-epoch metrics for a run (#38). 404 until the train stage has written them."""
+    return await _forward(_client(request).curve(job_id))
+
+
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(request: Request, job_id: str) -> dict:
     return await _forward(_client(request).cancel(job_id))
