@@ -180,3 +180,26 @@ def test_capping_the_examples_does_not_corrupt_the_counts(tmp_path):
     assert len(audit.examples) == 20             # display only
     assert audit.implausible_fraction == 1.0
     assert "96 of 96" in audit.verdict()
+
+
+# ── vertical lines ──────────────────────────────────────────────────────────
+def test_a_vertical_line_is_measured_along_its_reading_direction(tmp_path):
+    """Real lines from the Thun eval set are taller than wide — marginalia and
+    rotated regions. Dividing their width by their character count read 2-3
+    px/char and condemned correct ground truth."""
+    from atr_serving.training.eval_material import LineAudit
+
+    vertical = LineAudit(page="p.xml", index=0, chars=26, width=51, height=399,
+                         text="em Schulthn und Rat ze hn")
+    assert vertical.is_vertical
+    assert vertical.px_per_char == pytest.approx(399 / 26, rel=0.01)   # ~15, plausible
+    low, high = PX_PER_CHAR_PLAUSIBLE
+    assert low <= vertical.px_per_char <= high
+
+
+def test_a_horizontal_line_is_unaffected():
+    from atr_serving.training.eval_material import LineAudit
+
+    horizontal = LineAudit(page="p.xml", index=0, chars=40, width=880, height=60, text="x" * 40)
+    assert not horizontal.is_vertical
+    assert horizontal.px_per_char == pytest.approx(22.0, rel=0.01)
