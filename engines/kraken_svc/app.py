@@ -4,7 +4,8 @@ kraken 7.x flow (verified against the installed lib):
   - download a Zenodo model by DOI via ``htrmopo.get_model``
   - segment with ``blla.segment(im)`` (built-in default segmentation model)
   - recognise with ``rpred.rpred(net, im, segmentation)`` where the net comes
-    from ``kraken.lib.models.load_any``
+    from ``atr_serving.kraken_loader`` (``kraken.models.load_models``, which reads
+    safetensors as well as CoreML — see #32)
 
 Lazy-loads recognition models, keeps one resident (LRU-of-1).
 """
@@ -21,11 +22,11 @@ import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from kraken import blla, rpred
-from kraken.lib import models
 from loguru import logger
 from PIL import Image
 
 from atr_serving.contracts import Line, RecognitionResult, SegmentResponse
+from atr_serving.kraken_loader import load_recognition_model, resolve_weights
 
 KRAKEN_VERSION = _pkg_version("kraken")
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -40,15 +41,27 @@ _resident_net = None
 
 
 def _model_file(model_id: str) -> Path:
-    """Download (once) a kraken model by Zenodo DOI and return its .mlmodel path.
+    """A kraken model reference → a weights file on this box.
 
-    Each model gets its own cache subdir (htrmopo.get_model drops the .mlmodel +
-    metadata.json directly into ``path``, so a shared dir would mix models).
+    A **local path** (file or registered model directory) is used as-is: models
+    this box trained have no DOI, and the gateway sends their ``local_path`` as
+    the reference precisely because the engine has no registry to look one up in
+    (#36). Anything else is a Zenodo DOI, downloaded once.
+
+    Each downloaded model gets its own cache subdir (htrmopo.get_model drops the
+    weights + metadata.json directly into ``path``, so a shared dir would mix
+    models).
     """
     if model_id in _model_files:
         return _model_files[model_id]
+    local = resolve_weights(model_id)
+    if local is not None:
+        logger.info("Using local kraken weights for {}: {}", model_id, local)
+        _model_files[model_id] = local
+        return local
     dest = CACHE_DIR / model_id.replace("/", "_")
-    existing = sorted(dest.glob("*.mlmodel")) if dest.is_dir() else []
+    existing = (sorted(dest.glob("*.safetensors")) + sorted(dest.glob("*.mlmodel"))
+                if dest.is_dir() else [])
     if existing:
         p = existing[0]
     else:
@@ -72,7 +85,7 @@ def _load(model_id: str):
         return _resident_net
     path = _model_file(model_id)
     logger.info("Loading recognition model {} from {} on {}", model_id, path, DEVICE)
-    _resident_net = models.load_any(str(path), device=DEVICE)
+    _resident_net = load_recognition_model(path, device=DEVICE)
     _resident_id = model_id
     return _resident_net
 

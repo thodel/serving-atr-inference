@@ -1,7 +1,9 @@
 """Party engine — always-on HTR for zenodo 10.5281/zenodo.20642057.
 
 Loads the model through the kraken pipeline (``htrmopo.get_model`` +
-``models.load_any`` + ``blla.segment`` + ``rpred.rpred``). If the Zenodo model
+``atr_serving.kraken_loader`` + ``blla.segment`` + ``rpred.rpred``). The loader
+reads safetensors as well as CoreML, which is what #32 was: this service's own
+``model.safetensors`` could not be read by ``kraken.lib.models.load_any``. If the Zenodo model
 is NOT a kraken-format model, startup does not crash — ``/health`` reports
 ``model_loaded: false`` with the error, signalling that the standalone ``party``
 package is needed instead (see issue #3).
@@ -19,10 +21,10 @@ import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from kraken import blla, rpred
-from kraken.lib import models
 from loguru import logger
 from PIL import Image
 
+from atr_serving.kraken_loader import load_recognition_model
 from atr_serving.contracts import Line, RecognitionResult
 
 __version__ = "0.1.0"
@@ -42,7 +44,8 @@ _error: str | None = None
 def _model_file() -> Path:
     p = Path(htrmopo.get_model(MODEL_ID, path=str(CACHE_DIR)))
     if p.is_dir():
-        cands = sorted(p.rglob("*.mlmodel")) or [f for f in p.rglob("*") if f.is_file()]
+        cands = (sorted(p.rglob("*.safetensors")) or sorted(p.rglob("*.mlmodel"))
+                 or [f for f in p.rglob("*") if f.is_file()])
         if not cands:
             raise RuntimeError(f"no model file found under {p}")
         p = cands[0]
@@ -56,7 +59,7 @@ async def _startup():
         logger.info("Party: fetching {} ...", MODEL_ID)
         f = _model_file()
         logger.info("Party: loading {} on {}", f, DEVICE)
-        _net = models.load_any(str(f), device=DEVICE)
+        _net = load_recognition_model(f, device=DEVICE)
         _loaded = True
         logger.success("Party model resident on {}", DEVICE)
     except Exception as exc:  # noqa: BLE001 - keep the service up so /health is diagnosable

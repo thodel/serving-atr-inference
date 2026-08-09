@@ -73,6 +73,15 @@ class TrainerSettings(BaseSettings):
         """Interpreter for ``engine``'s detached runner."""
         return runner_python(engine, self.venvs_root)
 
+    # ── the promotion gate (#36) ──────────────────────────────────────────
+    #: The gate posts one held-out page here. Through the gateway, not straight
+    #: to the engine: "can this box serve it" is a question about the path real
+    #: clients take.
+    gateway_url: str = "http://127.0.0.1:8200"
+    #: Same shared key the gateway already requires. Empty disables the gate,
+    #: which leaves models registered-but-disabled rather than wrongly advertised.
+    gateway_api_key: str = ""
+
     # ── guards (docs/TRAINING_PLAN.md §5) ─────────────────────────────────
     #: PHYSICAL GPU index. GPU 0 is the shared RAG GPU and stays untouched;
     #: nvidia-smi enumerates physically and ignores CUDA_VISIBLE_DEVICES, so this

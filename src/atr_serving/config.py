@@ -38,6 +38,11 @@ class Settings(BaseSettings):
 
     # ── Registry ──────────────────────────────────────────────────────────
     models_config: Path = REPO_ROOT / "config" / "models.yaml"
+    #: Locally trained models, written by the trainer's register stage and
+    #: **gitignored** — the tracked registry above stays a reviewed artifact. Only
+    #: entries the promotion gate has proven servable (``enabled: true``) are
+    #: merged; a missing file is the normal state of a box that has not trained.
+    models_overlay: Path = REPO_ROOT / "config" / "models.local.yaml"
 
     # ── Engine backends (gateway -> engine services over localhost) ───────
     # Phase 0 only records them; routes that use them arrive in later phases.

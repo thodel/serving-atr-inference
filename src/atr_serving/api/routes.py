@@ -212,8 +212,14 @@ async def recognize(
     # Zenodo DOI, trocr loads by HF repo, vllm uses the registry id (= its
     # --served-model-name). If the model isn't in the registry (spec is None),
     # the caller already passed a raw ref (e.g. a DOI), so use it verbatim.
-    kraken_ref = (spec.zenodo_id or spec.id) if spec else model
-    trocr_ref = (spec.hf_repo or spec.id) if spec else model
+    #
+    # ``local_path`` comes FIRST for the engines that resolve a reference to a
+    # file: a model this box trained has no DOI and no hub repo, and the engine
+    # has no registry to look one up in (#36). The response still reports the
+    # registry id — the path is how the engine finds the weights, not what the
+    # caller asked for.
+    kraken_ref = (spec.local_path or spec.zenodo_id or spec.id) if spec else model
+    trocr_ref = (spec.local_path or spec.hf_repo or spec.id) if spec else model
 
     try:
         # kraken & party segment internally → one engine call.
@@ -287,12 +293,13 @@ async def ocr(
     ctype = image.content_type or "application/octet-stream"
     try:
         if engine == "kraken":
-            kraken_ref = (spec.zenodo_id or spec.id) if spec else model  # DOI for htrmopo
+            # local_path first: a trained model has no DOI (#36).
+            kraken_ref = (spec.local_path or spec.zenodo_id or spec.id) if spec else model
             result = await _kraken_client(request).recognize(
                 raw, filename, ctype, model=kraken_ref, lines=None,
             )
         elif engine == "trocr":
-            trocr_ref = (spec.hf_repo or spec.id) if spec else model
+            trocr_ref = (spec.local_path or spec.hf_repo or spec.id) if spec else model
             result = await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref)
         else:
             raise HTTPException(

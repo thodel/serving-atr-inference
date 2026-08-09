@@ -13,6 +13,7 @@ from atr_serving.api.train_routes import router as train_router
 from atr_serving.config import DEFAULT_INSECURE_KEY, Settings, get_settings
 from atr_serving.manager import ModelManager
 from atr_serving.registry import Registry, load_registry
+from atr_serving.training.overlay import load_overlay, merge
 
 
 def _check_auth_hardening(settings: Settings) -> None:
@@ -32,6 +33,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     registry: Registry = load_registry(settings.models_config)
     logger.info("Loaded {} models from {}", len(registry), settings.models_config)
+
+    # Locally trained models join the registry here, and only if the promotion
+    # gate has proven them servable — `merge` drops anything still disabled. An
+    # id that exists in both files is a hard error rather than a silent shadow:
+    # when two sets of weights answer to one name you cannot tell which one
+    # transcribed a page, which is #30/#31 with extra steps.
+    trained = load_overlay(settings.models_overlay)
+    if trained:
+        tracked = len(registry)
+        registry = merge(registry, trained)
+        logger.info("Merged {} of {} trained model(s) from {} ({} still awaiting the "
+                    "promotion gate)", len(registry) - tracked, len(trained),
+                    settings.models_overlay,
+                    len(trained) - (len(registry) - tracked))
     _check_auth_hardening(settings)
 
     manager = ModelManager(registry, settings)

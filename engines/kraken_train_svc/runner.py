@@ -32,7 +32,8 @@ from atr_serving.training.ketos_cmd import (
     weights_suffix,
 )
 from atr_serving.training.manifests import binary_manifest
-from atr_serving.training.overlay import upsert_entry
+from atr_serving.training.promote import PromotionResult, held_out_page, http_recognizer, promote
+from atr_serving.training.overlay import set_enabled, upsert_entry
 from atr_serving.training.runner_base import (
     BasePipeline,
     Cancelled,
@@ -223,6 +224,30 @@ class Pipeline(BasePipeline):
             shutil.rmtree(entry)
             removed += 1
         return removed
+
+
+    def _promote(self, job: TrainJob, model_path: Path) -> PromotionResult:
+        """Serve one held-out page through the gateway; advertise only if it works.
+
+        kraken models are servable the moment they are registered — the engine
+        resolves ``local_path`` to the weights directly (#36) — so this backend
+        can actually run the gate, unlike the VLM one whose adapters need merging
+        first.
+        """
+        if not self.settings.gateway_api_key:
+            return PromotionResult(
+                False, "no gateway_api_key configured, so the gate could not run; the "
+                       "model stays registered but disabled (set ATR_TRAIN_GATEWAY_API_KEY)"
+            )
+        page = held_out_page(self.store.paths(job.id).data)
+        verdict = promote(
+            job.request.model_id, page,
+            http_recognizer(self.settings.gateway_url, self.settings.gateway_api_key),
+        )
+        if verdict.promoted:
+            set_enabled(self.settings.overlay_path, job.request.model_id, True)
+            logger.info("{} promoted: {!r}", job.request.model_id, verdict.sample)
+        return verdict
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process entry point

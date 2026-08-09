@@ -37,6 +37,7 @@ from atr_serving.training.contracts import Metrics, StageRecord, TrainJob, utcno
 from atr_serving.training.cropping import write_crops
 from atr_serving.training.manifests import read_manifest
 from atr_serving.training.overlay import upsert_entry
+from atr_serving.training.promote import PromotionResult
 from atr_serving.training.runner_base import BasePipeline, StageFailed, run_job
 from atr_serving.training.vlm_cmd import (
     evaluate_cmd,
@@ -215,6 +216,22 @@ class Pipeline(BasePipeline):
         logger.info("registered {} -> {} (disabled until merged and promoted)",
                     model_id, dest_dir)
         return dest_dir
+
+
+    def _promote(self, job: TrainJob, model_path: Path) -> PromotionResult:
+        """Never promotes, and says why.
+
+        The gap between "trained" and "servable" is wider here than a smoke test:
+        vLLM 0.11 refuses a LoRA that touches the vision tower, so this adapter
+        cannot be served at all until ``scripts/merge_loras.py`` bakes it into its
+        base. Running the gate would fail for a reason that has nothing to do with
+        the model's quality, so it does not run — and the record says that rather
+        than implying the run was bad.
+        """
+        return PromotionResult(
+            False, "a LoRA adapter is not servable by vLLM 0.11 until it is merged "
+                   "into its base: run scripts/merge_loras.py, then promote it"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process entry point

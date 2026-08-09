@@ -31,6 +31,7 @@ __all__ = [
     "load_overlay",
     "save_overlay",
     "upsert_entry",
+    "set_enabled",
     "merge",
 ]
 
@@ -89,6 +90,21 @@ def upsert_entry(path: str | Path, spec: ModelSpec) -> list[ModelSpec]:
     specs.append(spec)
     save_overlay(path, specs)
     return specs
+
+
+def set_enabled(path: str | Path, model_id: str, enabled: bool = True) -> bool:
+    """Flip one overlay entry's ``enabled`` flag. Returns False if it is not there.
+
+    The only thing the promotion gate is allowed to write: it proves a model can
+    be served, so it may advertise that model and nothing else.
+    """
+    specs = load_overlay(path)
+    for spec in specs:
+        if spec.id == model_id:
+            spec.enabled = enabled
+            save_overlay(path, specs)
+            return True
+    return False
 
 
 def merge(

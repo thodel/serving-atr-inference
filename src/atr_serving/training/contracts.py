@@ -439,6 +439,11 @@ class TrainJob(BaseModel):
     log_tail: list[str] = Field(default_factory=list)
     #: Populated by the register stage.
     model_path: str | None = None
+    #: The promotion gate (#36): True once a real transcription came back through
+    #: the gateway for this model. False with a reason is a normal outcome, not a
+    #: failure — the model is trained and registered, it is simply not advertised.
+    promoted: bool | None = None
+    promotion_reason: str | None = None
     #: Local scratch holding this run's checkpoints (outside the job directory —
     #: see TrainerSettings.checkpoint_root). Recorded so it is discoverable and
     #: can be cleaned up with the job.

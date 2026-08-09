@@ -36,6 +36,7 @@ from atr_serving.training.hf_source import data_files_for
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.manifests import split_pages, write_manifest
 from atr_serving.training.prepare import HFPageSource, PageSource, materialize
+from atr_serving.training.promote import PromotionResult
 from atr_serving.training.settings import TrainerSettings
 
 __all__ = [
@@ -209,6 +210,20 @@ class BasePipeline(ABC):
         """Copy the model out of the job's scratch and add it to the overlay,
         ``enabled: false`` until something has actually served it."""
 
+    def _promote(self, job: TrainJob, model_artifact: Path) -> PromotionResult:
+        """The promotion gate (#36): prove the box can serve this, then advertise it.
+
+        The default refuses, because "we did not check" must never read as "it
+        works" — a backend that can be served says so by overriding this. The
+        outcome never fails the job: the model trained and is registered; whether
+        the serving side can run it today is a different fact, and one that
+        ``/models`` reflects by staying quiet.
+        """
+        return PromotionResult(
+            False, f"the {self.engine} backend has no promotion gate; the model stays "
+                   "registered but disabled"
+        )
+
     # ── entry point ─────────────────────────────────────────────────────────
     def execute(self, job_id: str) -> TrainJob:
         job = self.store.load(job_id)
@@ -236,7 +251,19 @@ class BasePipeline(ABC):
 
             self.store.advance(job, "registering")
             with self._stage(job, "register"):
-                self._register(job, model, job.metrics)
+                model_path = self._register(job, model, job.metrics)
+
+            # Outside the stage: a model that will not serve is not a failed run,
+            # so this may not take the job down with it (see training/promote.py).
+            try:
+                verdict = self._promote(job, model_path)
+            except BaseException as exc:  # noqa: BLE001 - never let the gate fail a run
+                verdict = PromotionResult(False, f"{type(exc).__name__}: {exc}")
+            job.promoted = verdict.promoted
+            job.promotion_reason = verdict.reason
+            logger.info("promotion gate: {} — {}",
+                        "PASSED" if verdict.promoted else "not promoted", verdict.reason)
+            self.store.save(job)
 
             return self.store.advance(job, "completed")
 
