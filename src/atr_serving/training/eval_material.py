@@ -65,25 +65,8 @@ class LineAudit:
     text: str
 
     @property
-    def reading_length(self) -> int:
-        """Extent along the reading direction — the longer side of the box.
-
-        Not always the width: this corpus contains vertical lines (marginalia, and
-        rotated regions). Real examples from the Thun eval set, 64x310 px and
-        51x399 px, are read top-to-bottom, and dividing their *width* by their
-        character count gave 3.2 and 2.0 px/char — flagging perfectly good ground
-        truth as "reference too long for its crop". The longer side is the one
-        the glyphs run along, whichever way the line is turned.
-        """
-        return max(self.width, self.height)
-
-    @property
-    def is_vertical(self) -> bool:
-        return self.height > self.width
-
-    @property
     def px_per_char(self) -> float | None:
-        return self.reading_length / self.chars if self.chars else None
+        return self.width / self.chars if self.chars else None
 
 
 def percentiles(values: list[float], points: Iterable[int] = (5, 25, 50, 75, 95)) -> dict[str, float]:
@@ -252,8 +235,7 @@ def report(audit: MaterialAudit, as_json: bool = False) -> str:
         lines += ["", "worst lines (widest per character):"]
         for ln in audit.examples[:10]:
             lines.append(
-                f"  {ln.px_per_char:7.1f} px/char  {ln.width:5d}x{ln.height:<4d} px"
-                f"{' (vertical)' if ln.is_vertical else '           '}  "
-                f"{ln.chars:3d} chars  {ln.page}#{ln.index}  {ln.text[:56]!r}"
+                f"  {ln.px_per_char:7.1f} px/char  {ln.width:5d}x{ln.height:<4d} px  "
+                f"{ln.chars:3d} chars  {ln.page}#{ln.index}  {ln.text[:60]!r}"
             )
     return "\n".join(lines)
