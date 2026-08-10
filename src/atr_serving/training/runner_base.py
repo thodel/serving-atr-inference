@@ -21,6 +21,7 @@ fakes, without a GPU or a network.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -31,6 +32,7 @@ from typing import Any, ClassVar, Protocol
 
 from loguru import logger
 
+from atr_serving.training.chunking import CHUNK_PLAN_FILENAME
 from atr_serving.training.contracts import (
     DatasetCounts,
     DatasetSelectionError,
@@ -112,6 +114,10 @@ class BasePipeline(ABC):
 
     #: The engine this pipeline trains; used in messages and to pick an interpreter.
     engine: ClassVar[str] = "unknown"
+    #: Can this backend compile a chunk at a time, so pages can be discarded as it
+    #: goes (#39)? Only kraken can today: ``ketos train -t`` reads a manifest of
+    #: several binary datasets as one set, so the chunks recombine for free.
+    supports_chunked_prepare: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -184,8 +190,66 @@ class BasePipeline(ABC):
         # Multi-dataset: page-level only for now (line-level multi-dataset is TBD).
         return self._prepare_multi(job, datasets, paths)
 
+    def _chunked(self, spec) -> bool:
+        """Should this run materialize a chunk at a time?
+
+        Three conditions, and the third is a real restriction. Chunking defers the
+        train side to ``compile``, which means the validation pages cannot come
+        from splitting the train stream — they have to exist before the stream is
+        consumed and discarded. So chunking applies to specs with explicit
+        ``eval_projects``, which is how a corpus-scale run is selected anyway. A
+        spec without them falls back to materializing everything, and says so
+        rather than silently ignoring the setting.
+        """
+        if self.settings.chunk_pages <= 0 or not self.supports_chunked_prepare:
+            return False
+        if not spec.eval_projects:
+            logger.warning(
+                "chunk_pages={} is set but this spec has no eval_projects, so the "
+                "validation set can only come from splitting the train stream — "
+                "materializing everything instead", self.settings.chunk_pages)
+            return False
+        return True
+
+    def _prepare_chunked(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
+        """Materialize only the held-out side; leave the train side to ``compile``.
+
+        Peak page-disk is what this buys: materializing the whole selection first
+        costs ~6.96 TB for the 548,322-page corpus on a share with ~6.2 TB free
+        (#39). Deleting pages after a full materialize saves nothing — the peak has
+        already happened — so the train side is streamed, compiled and discarded a
+        chunk at a time inside ``compile``, and what prepare writes here is the
+        plan for doing that.
+        """
+        files = data_files_for(spec)
+        eval_set = materialize(
+            self.source.stream(spec.hf_repo, files["eval"], spec.revision),
+            paths.pages, role="eval", max_pages=spec.max_pages,
+            min_free_disk_gb=self.settings.min_free_disk_gb,
+        )
+        val_manifest = write_manifest(paths.data / "pages_val.lst",
+                                      [str(p) for p in eval_set.xml_paths])
+
+        plan = paths.data / CHUNK_PLAN_FILENAME
+        plan.write_text(json.dumps({
+            "hf_repo": spec.hf_repo,
+            "data_files": files["train"],
+            "revision": spec.revision,
+            "max_pages": spec.max_pages,
+            "chunk_pages": self.settings.chunk_pages,
+        }, indent=2), encoding="utf-8")
+
+        job.progress.pages_written = eval_set.pages_written
+        job.progress.lines_written = eval_set.lines
+        self.store.save(job)
+        logger.info("prepared {} val pages; train side deferred to compile in "
+                    "chunks of {}", eval_set.pages_written, self.settings.chunk_pages)
+        return plan, val_manifest
+
     def _prepare_pages_single(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
         """Page-level materialize + split for one dataset (original behaviour)."""
+        if self._chunked(spec):
+            return self._prepare_chunked(job, spec, paths)
         files = data_files_for(spec)
 
         train_set = materialize(

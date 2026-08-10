@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
+from typing import Iterable
 
 __all__ = ["SplitError", "write_manifest", "read_manifest", "split_pages", "binary_manifest"]
 
@@ -61,6 +62,14 @@ def split_pages(
     return shuffled[:cut], shuffled[cut:]
 
 
-def binary_manifest(path: str | Path, arrow: str | Path) -> Path:
-    """Manifest for a compiled dataset: a single line naming the ``.arrow`` file."""
-    return write_manifest(path, [arrow])
+def binary_manifest(path: str | Path, arrow: str | Path | Iterable[str | Path]) -> Path:
+    """Manifest for compiled dataset(s): one ``.arrow`` path per line.
+
+    Several are the chunked case (#39): the selection is materialized and compiled
+    a chunk at a time, and kraken reads the resulting arrows as one training set —
+    ``ketos train -t`` takes a manifest of binary datasets, not a single file.
+    """
+    arrows = [arrow] if isinstance(arrow, (str, Path)) else list(arrow)
+    if not arrows:
+        raise SplitError(f"{path}: a binary manifest needs at least one .arrow file")
+    return write_manifest(path, arrows)

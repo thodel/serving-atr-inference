@@ -32,7 +32,9 @@ from atr_serving.training.ketos_cmd import (
     weights_suffix,
 )
 from atr_serving.training.curves import CURVE_FILENAME, curve_from_checkpoints, write_training_json
-from atr_serving.training.manifests import binary_manifest
+from atr_serving.training.chunking import chunks, is_plan, read_plan
+from atr_serving.training.manifests import binary_manifest, write_manifest
+from atr_serving.training.prepare import materialize
 from atr_serving.training.promote import PromotionResult, held_out_page, http_recognizer, promote
 from atr_serving.training.overlay import set_enabled, upsert_entry
 from atr_serving.training.runner_base import (
@@ -55,9 +57,15 @@ class Pipeline(BasePipeline):
     """Executes one kraken job."""
 
     engine = "kraken"
+    #: kraken can compile a chunk at a time: ``ketos train -t`` reads a manifest of
+    #: several binary datasets as one training set, so chunks recombine for free
+    #: and the pages behind them can be deleted as we go (#39).
+    supports_chunked_prepare = True
 
     def _compile(self, job: TrainJob, pages_train: Path, pages_val: Path,
                  record: StageRecord) -> tuple[Path, Path]:
+        if is_plan(pages_train):
+            return self._compile_chunked(job, read_plan(pages_train), pages_val, record)
         paths = self.store.paths(job.id)
         out = []
         for name, manifest in (("train", pages_train), ("val", pages_val)):
@@ -75,6 +83,85 @@ class Pipeline(BasePipeline):
                 )
             out.append(binary_manifest(paths.data / f"{name}_bin.lst", arrow))
         return out[0], out[1]
+
+    def _compile_one(self, job: TrainJob, manifest: Path, arrow: Path,
+                     record: StageRecord, what: str) -> Path:
+        """``ketos compile`` one page manifest into one ``.arrow``."""
+        self._run(job, "compile",
+                  compile_cmd(self.settings.ketos, manifest=manifest, output=arrow,
+                              device=job.request.params.device,
+                              workers=job.request.params.workers),
+                  record)
+        if not arrow.exists() or arrow.stat().st_size == 0:
+            raise StageFailed(
+                f"compile produced no {what} dataset at {arrow} — ketos exited 0 but "
+                "wrote nothing, which usually means every line was empty or the "
+                "images could not be resolved from the PageXML"
+            )
+        return arrow
+
+    def _compile_chunked(self, job: TrainJob, plan, pages_val: Path,
+                         record: StageRecord) -> tuple[Path, Path]:
+        """Materialize, compile and discard the train side a chunk at a time.
+
+        Peak page-disk is one chunk. The stream is consumed once across all
+        chunks — a fresh stream per chunk would re-download the parquet shards
+        every time, which is the disk problem again as a bandwidth problem.
+
+        Each chunk's pages are removed **after** its arrow exists and is
+        non-empty, so a failure leaves the pages that produced it in place to be
+        looked at.
+        """
+        paths = self.store.paths(job.id)
+        rows = self.source.stream(plan.hf_repo, plan.data_files, plan.revision)
+        arrows: list[Path] = []
+        pages_total = lines_total = 0
+        remaining = plan.max_pages
+
+        for index, batch in enumerate(chunks(rows, plan.chunk_pages)):
+            if remaining is not None and remaining <= 0:
+                break
+            chunk_dir = paths.pages / f"chunk_{index:04d}"
+            written = materialize(
+                iter(batch), chunk_dir, role="train",
+                max_pages=remaining, start_index=pages_total,
+                min_free_disk_gb=self.settings.min_free_disk_gb,
+            )
+            if not written.pages_written:
+                shutil.rmtree(chunk_dir, ignore_errors=True)
+                continue
+
+            manifest = write_manifest(paths.data / f"pages_train_{index:04d}.lst",
+                                      [str(p) for p in written.xml_paths])
+            arrows.append(self._compile_one(
+                job, manifest, paths.data / f"train_{index:04d}.arrow", record,
+                f"train chunk {index}"))
+
+            pages_total += written.pages_written
+            lines_total += written.lines
+            if remaining is not None:
+                remaining -= written.pages_written
+            # Only now: the arrow is written and non-empty, so these pages have
+            # been turned into something durable.
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+            job.progress.pages_written = pages_total
+            job.progress.lines_written = lines_total
+            job.progress.train_lines = lines_total
+            self.store.save(job)
+            logger.info("chunk {}: {} pages → {} (pages discarded)",
+                        index, written.pages_written, arrows[-1].name)
+
+        if not arrows:
+            raise StageFailed(
+                f"chunked compile produced no training data from {plan.hf_repo} — "
+                "the stream yielded no page with a transcribed line"
+            )
+
+        val_arrow = self._compile_one(job, pages_val, paths.data / "val.arrow",
+                                      record, "val")
+        logger.info("compiled {} train chunk(s) ({} pages) + val", len(arrows), pages_total)
+        return (binary_manifest(paths.data / "train_bin.lst", arrows),
+                binary_manifest(paths.data / "val_bin.lst", val_arrow))
 
     def _resolve_base_model(self, base_model: str) -> Path:
         """A local weights file, or a Zenodo DOI fetched through htrmopo (the same

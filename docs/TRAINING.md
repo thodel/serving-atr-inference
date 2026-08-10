@@ -438,6 +438,41 @@ This sends `SIGTERM` to the process group. The job record is moved to
 
 ---
 
+## 8b. Corpus-scale runs: chunking (#39)
+
+`prepare` normally materializes every selected page before `compile` runs, so
+peak disk is the whole selection. That is fine for the 238-page test case and
+impossible for the full corpus — 548,322 pages is **~6.96 TB** of pages on top of
+a ~6.6 TB hub cache, on a share with ~6.2 TB free.
+
+Set `ATR_TRAIN_CHUNK_PAGES` (default `0` = off) and the kraken backend
+materializes, compiles and **discards** the train side a chunk at a time, so peak
+page-disk is one chunk instead of the selection:
+
+```bash
+systemctl --user set-environment ATR_TRAIN_CHUNK_PAGES=5000
+systemctl --user restart atr-train
+```
+
+Each chunk becomes its own `train_<k>.arrow`, and `train_bin.lst` lists them all —
+`ketos train -t` reads a manifest of binary datasets as one training set, so the
+chunks never have to be merged. A chunk's pages are deleted only *after* its
+arrow exists and is non-empty, so a failure leaves the pages that caused it.
+
+Two limits worth knowing before you rely on it:
+
+- **It needs explicit `eval_projects`.** The validation pages cannot come from
+  splitting a stream that is being consumed and discarded. A spec without them
+  falls back to materializing everything and logs why.
+- **Only the kraken backend does this.** The VLM and TrOCR backends compile by
+  cropping, and `supports_chunked_prepare` is False for them, so the setting is
+  ignored rather than half-applied.
+
+Also relevant at this scale: ~548 K pages is ~8 M lines, and at the throughput
+measured on the box one epoch is roughly **15 hours**. A full-corpus run is a
+multi-day job, and the step-count guard (#72) will hold you to a configuration
+that can actually converge at that size.
+
 ## 9. Troubleshooting
 
 ### OOM during training at batch 256

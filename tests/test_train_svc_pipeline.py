@@ -482,3 +482,85 @@ class TestConvergenceGuard:
         job = run_pipeline(store, settings, source, FakeRunner(),
                            request=request_with(force=True))
         assert job.progress.train_lines < job.progress.lines_written
+
+
+# ── chunked prepare → compile → discard (#39) ───────────────────────────────
+class TestChunkedCompile:
+    """Peak page-disk is the whole point. Materializing everything and deleting
+    afterwards saves nothing — the peak has already happened."""
+
+    @staticmethod
+    def chunking_settings(settings, chunk_pages=2):
+        settings.chunk_pages = chunk_pages
+        return settings
+
+    class WatchingRunner(FakeRunner):
+        """Records how many page files exist at each compile call."""
+
+        def __init__(self, pages_root, **kw):
+            super().__init__(**kw)
+            self.pages_root = pages_root
+            self.pages_on_disk: list[int] = []
+
+        def run(self, cmd, log_path, env=None):
+            if "compile" in cmd:
+                self.pages_on_disk.append(len(list(Path(self.pages_root).rglob("*.jpg"))))
+            return super().run(cmd, log_path, env)
+
+    def test_peak_page_disk_never_exceeds_one_chunk(self, store, settings):
+        """The assertion #39 asks for. Six train pages at chunk 2: no compile call
+        ever sees more than one chunk's pages plus the held-out set."""
+        settings = self.chunking_settings(settings, chunk_pages=2)
+        source = FakeSource({"train": 6, "eval": 2})
+        job = store.create(request_with(force=True))
+        runner = self.WatchingRunner(store.paths(job.id).pages)
+        Pipeline(store, settings, runner=runner, source=source).execute(job.id)
+
+        train_peaks = runner.pages_on_disk[:-1]          # the last call is val
+        assert train_peaks, "no chunk was compiled"
+        assert max(train_peaks) <= 2 + 2                 # one chunk + the eval pages
+
+    def test_every_chunk_is_compiled_and_listed_as_one_training_set(self, store, settings):
+        """kraken reads a manifest of several binary datasets as one set, so the
+        chunks never have to be merged."""
+        settings = self.chunking_settings(settings, chunk_pages=2)
+        source = FakeSource({"train": 6, "eval": 2})
+        job = store.create(request_with(force=True))
+        runner = FakeRunner()
+        job = Pipeline(store, settings, runner=runner, source=source).execute(job.id)
+
+        assert job.status == "completed"
+        arrows = (store.paths(job.id).data / "train_bin.lst").read_text().split()
+        assert len(arrows) == 3                          # 6 pages / chunk 2
+        assert all(a.endswith(".arrow") for a in arrows)
+
+    def test_the_pages_are_gone_afterwards(self, store, settings):
+        settings = self.chunking_settings(settings, chunk_pages=2)
+        source = FakeSource({"train": 6, "eval": 2})
+        job = store.create(request_with(force=True))
+        Pipeline(store, settings, runner=FakeRunner(), source=source).execute(job.id)
+
+        chunk_dirs = list((store.paths(job.id).pages).glob("chunk_*"))
+        assert chunk_dirs == []
+
+    def test_without_eval_projects_it_falls_back_and_says_so(self, store, settings):
+        """The validation set cannot come from splitting a stream that is being
+        consumed and discarded, so a spec without eval_projects materializes
+        everything rather than silently ignoring the setting."""
+        settings = self.chunking_settings(settings, chunk_pages=2)
+        source = FakeSource({"train": 4})
+        request = request_with(
+            force=True,
+            dataset=DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
+        )
+        job = run_pipeline(store, settings, source, FakeRunner(), request=request)
+
+        assert job.status == "completed"
+        assert not (store.paths(job.id).data / "train_plan.json").exists()
+
+    def test_chunking_off_is_the_old_single_compile(self, store, settings):
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=True))
+        arrows = (store.paths(job.id).data / "train_bin.lst").read_text().split()
+        assert len(arrows) == 1

@@ -98,6 +98,13 @@ class TrainerSettings(BaseSettings):
     #: `/` is ~80 % full on asterAIx — never materialize a dataset into the last
     #: of it.
     min_free_disk_gb: int = 50
+    #: Pages materialized before a chunk is compiled and deleted (#39). 0 = off,
+    #: which materializes the whole selection first — right for the 238-page test
+    #: case, impossible for the full corpus: 548,322 pages is ~6.96 TB of pages on
+    #: top of a ~6.6 TB hub cache, on a share with ~6.2 TB free. With chunking on,
+    #: peak page-disk is one chunk instead of the whole selection.
+    chunk_pages: int = 0
+
     #: Training and inference do not share the card politely; one job at a time.
     max_concurrent: int = 1
     #: How often the scheduler reconciles jobs and starts a queued one.
