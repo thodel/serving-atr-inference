@@ -128,10 +128,18 @@ def store(settings: TrainerSettings) -> JobStore:
 
 
 def request_with(**kw) -> TrainRequest:
+    """A request for the pipeline tests.
+
+    ``force=True`` by default: these fixtures run two or three fake pages through
+    the whole lifecycle, which is far below what the step-count guard (#72) will
+    let through — and rightly so. The guard has its own suite
+    (tests/test_training_convergence.py) and its own pipeline tests below; these
+    are about the stages, so they opt out rather than pretending to be real runs.
+    """
     dataset = kw.pop("dataset", DatasetSpec(
         hf_repo=REPO, train_projects=[THUN_TRAIN], eval_projects=[THUN_TEST]))
     return TrainRequest(model_id=kw.pop("model_id", "kraken-thun-missiven-v1"),
-                        dataset=dataset, **kw)
+                        dataset=dataset, force=kw.pop("force", True), **kw)
 
 
 def run_pipeline(store, settings, source, runner, request=None):
@@ -407,3 +415,70 @@ def test_a_subprocess_stage_still_prefers_its_own_log(store, settings):
     assert done.status == "failed"
     assert any("boom in train" in line for line in done.log_tail)
     assert not any("runner noise" in line for line in done.log_tail)
+
+
+# ── the step-count guard (#72) ──────────────────────────────────────────────
+class TestConvergenceGuard:
+    """The guard that would have stopped kraken-thun-missiven-v1 before it spent
+    three GPU-hours producing CER 0.98."""
+
+    def test_a_doomed_configuration_never_reaches_compile(self, store, settings):
+        """Refused after prepare: compile costs real time and produces nothing
+        worth having if the run cannot converge."""
+        source = FakeSource({"train": 6, "eval": 2})
+        runner = FakeRunner()
+        job = run_pipeline(store, settings, source, runner,
+                           request=request_with(force=False))
+
+        assert job.status == "failed"
+        assert runner.commands_named("compile") == []
+        assert runner.commands_named("train") == []
+
+    def test_the_refusal_carries_the_arithmetic(self, store, settings):
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=False))
+
+        assert "step(s) per epoch" in job.error
+        assert "optimizer steps" in job.error
+        assert "base_model" in job.error          # and how to fix it
+
+    def test_force_runs_it_anyway_and_says_so_on_the_record(self, store, settings):
+        """A deliberate smoke test must stay possible — but a CER from a run known
+        not to converge should never be read as an ordinary one."""
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=True))
+
+        assert job.status == "completed"
+        assert job.convergence_override is not None
+        assert "optimizer steps" in job.convergence_override
+
+    def test_a_configuration_that_converges_is_left_alone(self, store, settings):
+        """Same pages, batch 1, 500 epochs — enough steps to clear even the
+        from-scratch floor, so the guard has nothing to say."""
+        source = FakeSource({"train": 6, "eval": 2})
+        request = request_with(
+            force=False,
+            params=KrakenTrainParams(batch_size=1, epochs=500),
+        )
+        job = run_pipeline(store, settings, source, FakeRunner(), request=request)
+
+        assert job.status == "completed"
+        assert job.convergence_override is None
+        assert job.progress.total_steps and job.progress.total_steps >= 500
+
+    def test_the_planned_cost_is_recorded_either_way(self, store, settings):
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=True))
+        assert job.progress.steps_per_epoch == 1
+        assert job.progress.total_steps == job.request.params.epochs
+
+    def test_training_lines_exclude_the_held_out_side(self, store, settings):
+        """The guard divides by what is trained on; counting the eval lines too
+        would flatter every configuration."""
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=True))
+        assert job.progress.train_lines < job.progress.lines_written

@@ -147,6 +147,12 @@ The response is `202` with the job id:
 > unconverged CTC network has not learned blank-dominance and emits a character at
 > nearly every timestep.
 >
+> **The trainer now enforces this.** A configuration whose line count and batch
+> size yield too few optimizer steps is refused between `prepare` and `compile`,
+> before any GPU time is spent, with the arithmetic and the remedies in
+> `job.error` (#72). A deliberate smoke test can pass `"force": true`; the
+> override is recorded on the job so its CER is never read as an ordinary one.
+>
 > Two rules follow, and this example applies both: **fine-tune rather than train from
 > scratch below ~100 K lines** (`base_model` + `resize: "union"`), and **scale
 > `batch_size` to the corpus**. Before believing any CER, run

@@ -78,10 +78,10 @@ of these three CERs should be quoted; nothing has been pushed to the hub.
 Open work is grouped into three epics:
 
 - **#49** — the training subsystem from "it runs" to "it is trustworthy": #52 is
-  diagnosed and what remains of it is a **step-count guard at submit** (`lines /
-  batch_size × epochs` is computable the moment prepare reports a line count, and
-  "this configuration will take 367 optimizer steps" would have saved two runs);
-  then metric decomposition #55, 1..n datasets #40, chunked prepare #39, line-level
+  diagnosed and its **step-count guard has landed** (#72 — a run whose lines,
+  batch size and epochs yield too few optimizer steps is refused between prepare
+  and compile, before any GPU time, with the arithmetic in the error); then
+  metric decomposition #55, 1..n datasets #40, chunked prepare #39, line-level
   sources #45, runbook + eval #37.
 - **#41** — TrOCR fine-tuning as the third backend: #42 (shared cropping) → #43
   (contracts + argv) → #44 (the engine). No longer blocked — the three bad CERs are

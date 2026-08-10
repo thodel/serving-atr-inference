@@ -32,6 +32,7 @@ from typing import Any, ClassVar, Protocol
 from loguru import logger
 
 from atr_serving.training.contracts import JobStage, Metrics, StageRecord, TrainJob, utcnow
+from atr_serving.training.convergence import check_convergence
 from atr_serving.training.hf_source import data_files_for, granularity_files
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.manifests import split_pages, write_manifest
@@ -177,6 +178,10 @@ class BasePipeline(ABC):
         )
         job.progress.pages_written = train_set.pages_written
         job.progress.lines_written = train_set.lines
+        # Held separately from lines_written, which goes on to include the eval
+        # side: the step-count guard (#72) divides by the lines actually trained
+        # on, and counting the held-out ones would flatter every configuration.
+        job.progress.train_lines = train_set.lines
 
         if "eval" in files:
             eval_set = materialize(
@@ -193,6 +198,10 @@ class BasePipeline(ABC):
             train_pages, val_pages = split_pages(
                 [str(p) for p in train_set.xml_paths], spec.partition, spec.seed
             )
+            # The split is by page, so the line count follows it only
+            # approximately — good enough to tell 400 steps from 5,900, which is
+            # the distinction the guard exists to make.
+            job.progress.train_lines = round(train_set.lines * spec.partition)
         self.store.save(job)
 
         train_manifest = write_manifest(paths.data / "pages_train.lst", train_pages)
@@ -228,12 +237,55 @@ class BasePipeline(ABC):
         # count puts a false statement on the hub.
         job.progress.samples_written = pool.samples_written
         job.progress.lines_written = pool.samples_written
+        job.progress.train_lines = round(pool.samples_written * spec.partition)
         job.progress.pages_written = None
         self.store.save(job)
 
         logger.info("prepared {} line samples → {} / {}",
                     pool.samples_written, train_manifest.name, val_manifest.name)
         return train_manifest, val_manifest
+
+    # ── the guard between prepare and the expensive part ────────────────────
+    def _guard_convergence(self, job: TrainJob) -> None:
+        """Refuse a configuration that cannot converge (#72).
+
+        Runs after ``prepare``, which is the first moment the line count exists,
+        and before ``compile`` — the issue says "before train", but compile costs
+        real time and produces nothing worth having if the run is doomed.
+
+        A missing line count is not a refusal: that would block a job for a reason
+        about us rather than about the configuration.
+        """
+        params = job.request.params
+        verdict = check_convergence(
+            engine=job.request.engine,
+            from_scratch=not job.request.base_model,
+            train_lines=job.progress.train_lines,
+            effective_batch=params.effective_batch_size,
+            epochs=params.epochs,
+        )
+        if verdict is None:
+            return
+
+        job.progress.steps_per_epoch = verdict.budget.steps_per_epoch
+        job.progress.total_steps = verdict.budget.total_steps
+        self.store.save(job)
+
+        if verdict.ok:
+            logger.info("convergence: {} steps/epoch × {} epochs = {} steps (floor {})",
+                        verdict.budget.steps_per_epoch, verdict.budget.epochs,
+                        verdict.budget.total_steps, verdict.floor)
+            return
+
+        if job.request.force:
+            # Deliberate smoke test. Recorded, so a CER from a run known not to
+            # converge is never read as an ordinary one.
+            job.convergence_override = verdict.reason
+            self.store.save(job)
+            logger.warning("convergence guard OVERRIDDEN by force=true: {}", verdict.reason)
+            return
+
+        raise StageFailed(verdict.reason)
 
     # ── the stages a backend supplies ───────────────────────────────────────
     @abstractmethod
@@ -289,6 +341,8 @@ class BasePipeline(ABC):
             self.store.advance(job, "preparing")
             with self._stage(job, "prepare"):
                 pages_train, pages_val = self._prepare(job)
+
+            self._guard_convergence(job)
 
             self.store.advance(job, "compiling")
             with self._stage(job, "compile") as rec:

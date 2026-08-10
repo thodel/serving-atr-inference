@@ -323,6 +323,10 @@ class TrainRequest(BaseModel):
     params: KrakenTrainParams | TrOCRTrainParams | VlmTrainParams = Field(
         default_factory=KrakenTrainParams
     )
+    #: Run even when the step-count guard says the configuration cannot converge
+    #: (#72). For a deliberate smoke test; the override is recorded on the job so
+    #: the resulting CER is never read as an ordinary one.
+    force: bool = False
     notes: str | None = None
 
     @model_validator(mode="before")
@@ -405,6 +409,14 @@ class Progress(BaseModel):
     val_accuracy: float | None = None
     pages_written: int | None = None
     lines_written: int | None = None
+    #: Training lines after the split — what the step-count guard divides by.
+    #: Distinct from ``lines_written``, which counts every transcribed line found,
+    #: evaluation included.
+    train_lines: int | None = None
+    #: What the configuration will actually cost, computed once prepare knows the
+    #: line count (#72).
+    steps_per_epoch: int | None = None
+    total_steps: int | None = None
     #: VLM backend: training examples built in ``compile`` (one per cropped line,
     #: or one per page at ``granularity: page``). Distinct from ``lines_written``,
     #: which counts transcribed lines found while materializing — the two differ
@@ -453,6 +465,10 @@ class TrainJob(BaseModel):
     #: failure — the model is trained and registered, it is simply not advertised.
     promoted: bool | None = None
     promotion_reason: str | None = None
+    #: Set when the step-count guard refused the configuration and ``force`` ran it
+    #: anyway (#72) — so a CER from a run that was known not to converge is never
+    #: mistaken for an ordinary one.
+    convergence_override: str | None = None
     #: Local scratch holding this run's checkpoints (outside the job directory —
     #: see TrainerSettings.checkpoint_root). Recorded so it is discoverable and
     #: can be cleaned up with the job.

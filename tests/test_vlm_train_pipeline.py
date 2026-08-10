@@ -143,10 +143,18 @@ def store(settings: TrainerSettings) -> JobStore:
 
 
 def request_with(**kw) -> TrainRequest:
+    """A request for the pipeline tests.
+
+    ``force=True`` by default: these fixtures run two or three fake pages through
+    the whole lifecycle, which is far below what the step-count guard (#72) will
+    let through — and rightly so. The guard has its own suite
+    (tests/test_training_convergence.py) and its own pipeline tests below; these
+    are about the stages, so they opt out rather than pretending to be real runs.
+    """
     dataset = kw.pop("dataset", DatasetSpec(
         hf_repo=REPO, train_projects=[THUN_TRAIN], eval_projects=[THUN_TEST]))
     return TrainRequest(engine="vllm", model_id=kw.pop("model_id", "qwen3vl-thun-v1"),
-                        dataset=dataset, **kw)
+                        dataset=dataset, force=kw.pop("force", True), **kw)
 
 
 def run_pipeline(store, settings, source, runner, request=None):
