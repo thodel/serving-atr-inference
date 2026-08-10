@@ -1,0 +1,31 @@
+# TrOCR fine-tune venv (.venvs/trocraft-train).
+#
+# Separate from kraken-train and vlm-train for the usual reason
+# (IMPLEMENTATION_PLAN §3): each engine needs a different transformers/torch
+# version range. TrOCR (microsoft/trocraft-*) needs the widest range, but must
+# still be pinned at both ends so a silent major-version arrival cannot break
+# the training script's API surface.
+#
+# torch is PINNED and installed from the cu128 index by make_venvs.sh BEFORE this
+# file. Do not loosen:
+#   * `torch>=2.2.0` resolves to the newest release (2.13 at time of writing),
+#     which drags in CUDA 12.9 wheels — multiple GB of download on a box whose
+#     root partition is the binding constraint, and an untested CUDA level for
+#     driver 565 / CUDA 12.7.
+#   * 2.8.0+cu128 is the build proven on this driver by the vLLM venv
+#     (docs/asteraix-environment.md), so the trainer reuses it.
+torch==2.8.0
+torchvision==0.23.0
+transformers>=4.41,<5
+# The token-classification and seq2seq Trainer surface used here landed in
+# transformers 4.41. The upper bound follows the pattern in vlm_train_svc:
+# a major-version arrival silently breaks the code that drives it.
+sentencepiece>=0.2
+# Ground truth comes from the HuggingFace hub as streamed parquet — never a full
+# repo download. Same upper bound as kraken-train and vlm-train.
+datasets>=3.0,<4
+huggingface_hub>=0.25
+# Training runs as a subprocess, so loguru is only needed in this venv.
+loguru>=0.7
+# Optional: only imported when a job sets params.wandb_run.
+wandb
