@@ -42,15 +42,22 @@ def test_without_eval_projects_only_train_is_selected():
 
 
 def test_empty_selection_is_refused():
-    """Empty ``train_projects`` now means whole-dataset selection (no project dirs).
+    """The whole point: no projects must never mean 'download everything'.
 
-    The guard against unbounded selection is ``all_projects=True`` — it requires
-    ``max_pages`` and raises at construction time. ``train_projects=[]`` is a
-    valid whole-dataset spec, not an error.
+    #40 briefly made an empty selection resolve to the whole split, which is both
+    inconsistent with its own ``all_projects`` (that one requires ``max_pages``)
+    and silent on a per-project repo, where the resulting glob matches nothing and
+    the job dies pages later. Asking for everything is spelled ``all_projects``.
     """
     spec = DatasetSpec(hf_repo=REPO)
-    # Empty train_projects → whole split; data_files_for resolves to a glob.
-    assert data_files_for(spec) == {"train": ["data/train/*.parquet"]}
+    with pytest.raises(DatasetSelectionError, match="selects no train_projects"):
+        data_files_for(spec)
+
+
+def test_the_refusal_names_the_deliberate_way_to_ask_for_everything():
+    with pytest.raises(DatasetSelectionError) as exc:
+        data_files_for(DatasetSpec(hf_repo=REPO))
+    assert "all_projects" in str(exc.value) and "max_pages" in str(exc.value)
 
 
 def test_all_projects_without_max_pages_is_refused():

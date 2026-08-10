@@ -70,12 +70,12 @@ IMAGE_COLUMNS = ("image",)
 TEXT_COLUMNS = ("text", "transcription", "content")
 
 
-class DatasetSelectionError(ValueError):
-    """Raised when a DatasetSpec selects nothing, or something unsafe."""
-
-
-class DatasetNotOnHub(LookupError):
-    """The repo (or the pinned revision) is not there. A fact about the spec."""
+# DatasetSelectionError and DatasetNotOnHub live in contracts (#40 moved them
+# there so DatasetSpec's own validators can raise them) and are imported above.
+# They were *also* still defined here, which meant two distinct classes sharing a
+# name: `except DatasetSelectionError` in one module would not catch the other's,
+# and which one you got depended on where you imported from. Re-exported through
+# __all__ so `from ...hf_source import DatasetSelectionError` keeps working.
 
 
 class VerificationUnavailable(RuntimeError):
@@ -178,8 +178,19 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
     resolved = expand_all_projects(spec) if spec.all_projects else spec
 
     if not resolved.train_projects:
-        # Whole-dataset selection: no project directories, use the split directly.
-        files = {"train": [f"data/{resolved.split}/*.parquet"]}
+        # Restored guard (docs/TRAINING_PLAN.md §1): an empty selection must never
+        # silently mean "everything". #40 made this the whole split, which is
+        # inconsistent with its own `all_projects` — that path requires max_pages,
+        # so the *explicit* way to ask for everything is capped while the implicit
+        # one was not. It also fails far from its cause: on a repo laid out as
+        # data/<split>/<project>/, `data/<split>/*.parquet` matches nothing, so the
+        # job dies pages later with an empty stream instead of here with a reason.
+        raise DatasetSelectionError(
+            f"DatasetSpec for {resolved.hf_repo!r} selects no train_projects. Name "
+            "the projects, or set `all_projects: true` (which requires `max_pages`) "
+            "to train on everything deliberately. A line-level dataset has no "
+            "project directories and is selected with `granularity: \"line\"`."
+        )
     else:
         overlap = sorted(set(resolved.train_projects) & set(resolved.eval_projects))
         if overlap:

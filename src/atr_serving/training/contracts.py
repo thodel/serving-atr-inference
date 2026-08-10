@@ -94,6 +94,14 @@ class DatasetNotOnHub(LookupError):
     """The repo (or the pinned revision) is not there."""
 
 
+class MultipleDatasets(AttributeError):
+    """Raised when single-dataset code meets a job that has several (#40).
+
+    An AttributeError subclass so it reads naturally where ``.dataset`` used to
+    be an attribute, and so ``getattr(req, "dataset", None)`` still degrades.
+    """
+
+
 class DatasetSelectionError(ValueError):
     """Raised when a DatasetSpec selects nothing, or something unsafe."""
 
@@ -379,6 +387,27 @@ class TrainRequest(BaseModel):
     #: For backwards compatibility a single ``dataset`` field is also accepted
     #: and normalised to a one-element list.
     datasets: list[DatasetSpec] = Field(min_length=1)
+
+    @property
+    def dataset(self) -> DatasetSpec:
+        """The single dataset — for the paths that only make sense with one.
+
+        Reading this on a multi-dataset job **raises** rather than quietly
+        returning the first. Most of the subsystem was written when a job had
+        exactly one dataset, and silently handing back ``datasets[0]`` would turn
+        every un-migrated call site into a wrong answer instead of an error: a
+        model card naming one corpus for a model trained on three, a spec
+        verified while two others were not. Loud is the whole point — this repo's
+        recurring failure is a plausible number from a path nobody checked.
+        """
+        if len(self.datasets) != 1:
+            raise MultipleDatasets(
+                f"this job has {len(self.datasets)} datasets, so `.dataset` is "
+                "ambiguous. The caller needs to handle `.datasets` explicitly — "
+                "verifying, reporting or publishing only the first would be wrong "
+                "in a way that reads as correct."
+            )
+        return self.datasets[0]
     #: kraken: registry id or raw Zenodo DOI to fine-tune from, None = from
     #: scratch. vllm: the HF base checkpoint the LoRA adapts — never None, since
     #: there is no such thing as training a VLM from scratch here; it defaults to
