@@ -111,6 +111,15 @@ class DatasetSpec(BaseModel):
     partition: float = Field(default=0.9, gt=0.0, lt=1.0)
     seed: int = 42
     revision: str | None = None
+    #: Source shape. ``page`` — the standard dh-unibe layout with PageXML columns —
+    #: goes through materialization and cropping. ``line`` — a dataset that already
+    #: has one row per line crop with a plain text column — skips cropping entirely
+    #: (there is nothing to crop). The declared value is validated against the
+    #: actual dataset schema on the hub before any data is downloaded, so a mismatch
+    #: between what the user wrote and what the dataset actually has is an error,
+    #: not a silent failure that surfaces 47 rows in, as the original lassberg
+    #: config did.
+    granularity: Literal["page", "line"] = "page"
 
 
 class KrakenTrainParams(BaseModel):

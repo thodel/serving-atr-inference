@@ -32,10 +32,17 @@ from typing import Any, ClassVar, Protocol
 from loguru import logger
 
 from atr_serving.training.contracts import JobStage, Metrics, StageRecord, TrainJob, utcnow
-from atr_serving.training.hf_source import data_files_for
+from atr_serving.training.hf_source import data_files_for, granularity_files
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.manifests import split_pages, write_manifest
-from atr_serving.training.prepare import HFPageSource, PageSource, materialize
+from atr_serving.training.prepare import (
+    HFPageSource,
+    LinePreparedSet,
+    PageSource,
+    materialize,
+    materialize_lines,
+    split_line_samples,
+)
 from atr_serving.training.promote import PromotionResult
 from atr_serving.training.settings import TrainerSettings
 
@@ -145,9 +152,22 @@ class BasePipeline(ABC):
         line level would put lines from the same page — same hand, same layout,
         often the same words — on both sides and quietly flatter the score,
         whether those lines end up as kraken crops or as VLM samples.
+
+        At ``granularity='line'`` the dataset is already one-row-per-line (e.g.
+        towerbooks). No page files are written; a JSONL manifest is produced
+        instead and the page-level train/val split is skipped (the lines ARE the
+        samples, not an intermediate representation).
         """
         paths = self.store.paths(job.id)
         spec = job.request.dataset
+
+        if spec.granularity == "line":
+            return self._prepare_lines(job, spec, paths)
+        else:
+            return self._prepare_pages(job, spec, paths)
+
+    def _prepare_pages(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
+        """Page-level materialize + split (original behaviour, preserved exactly)."""
         files = data_files_for(spec)
 
         train_set = materialize(
@@ -170,7 +190,6 @@ class BasePipeline(ABC):
             job.progress.pages_written += eval_set.pages_written
             job.progress.lines_written += eval_set.lines
         else:
-            # No dedicated eval projects → seeded page-level split of what we have.
             train_pages, val_pages = split_pages(
                 [str(p) for p in train_set.xml_paths], spec.partition, spec.seed
             )
@@ -179,6 +198,41 @@ class BasePipeline(ABC):
         train_manifest = write_manifest(paths.data / "pages_train.lst", train_pages)
         val_manifest = write_manifest(paths.data / "pages_val.lst", val_pages)
         logger.info("prepared {} train / {} val pages", len(train_pages), len(val_pages))
+        return train_manifest, val_manifest
+
+    def _prepare_lines(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
+        """Line-level source: rows are already crops, so nothing is cropped.
+
+        The rows are written to one pool and then split into **disjoint** train
+        and validation manifests, by source page wherever the dataset records one
+        (see :func:`prepare.split_line_samples`). The split is the whole point:
+        evaluating on the lines you trained on returns a number that looks like a
+        result and is not one.
+        """
+        files = granularity_files(spec)
+
+        pool: LinePreparedSet = materialize_lines(
+            self.source.stream(spec.hf_repo, files["train"], spec.revision),
+            paths.data, root=paths.root, role="pool",
+            max_lines=spec.max_pages,  # reused as sample cap at line granularity
+            min_free_disk_gb=self.settings.min_free_disk_gb,
+        )
+        assert pool.manifest_path is not None
+        train_manifest, val_manifest = split_line_samples(
+            pool.manifest_path, paths.data, spec.partition, spec.seed
+        )
+
+        # lines, not pages: a line-level dataset materializes no page scans, and
+        # `pages_written` is published — publish_to_hub prints "Materialized from
+        # that selection: N pages" onto the model card, so filling it with a line
+        # count puts a false statement on the hub.
+        job.progress.samples_written = pool.samples_written
+        job.progress.lines_written = pool.samples_written
+        job.progress.pages_written = None
+        self.store.save(job)
+
+        logger.info("prepared {} line samples → {} / {}",
+                    pool.samples_written, train_manifest.name, val_manifest.name)
         return train_manifest, val_manifest
 
     # ── the stages a backend supplies ───────────────────────────────────────

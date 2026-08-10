@@ -4,7 +4,11 @@ import pytest
 
 from atr_serving.training.contracts import DatasetSpec
 from atr_serving.training.hf_source import (
+    TEXT_COLUMNS,
     DatasetNotOnHub,
+    LineRow,
+    granularity_files,
+    row_to_line,
     VerificationUnavailable,
     DatasetSelectionError,
     data_files_for,
@@ -355,3 +359,169 @@ class TestVerifyDatasetSpec:
             list_repo_files_fn=fake_list, paths_size_fn=unreachable,
         )
         assert errors == []
+
+
+# ── line-level support (#45) ──────────────────────────────────────────────────
+
+
+def test_granularity_files_returns_whole_split_glob():
+    from atr_serving.training.contracts import DatasetSpec
+    spec = DatasetSpec(hf_repo="owner/towerbooks", split="train", granularity="line")
+    globs = granularity_files(spec)
+    assert globs == {"train": ["data/train/*.parquet"]}
+
+
+def test_granularity_files_rejects_page_level():
+    from atr_serving.training.contracts import DatasetSpec
+    from atr_serving.training.hf_source import DatasetSelectionError
+    spec = DatasetSpec(hf_repo="owner/pages", split="train", granularity="page",
+                       train_projects=["p"])
+    with pytest.raises(DatasetSelectionError, match="only.*granularity='line'"):
+        granularity_files(spec)
+
+
+def test_row_to_line_extracts_text_and_image():
+    row = {
+        "image": {"bytes": b"\xff\xd8crop", "path": "line.jpg"},
+        "text": "hello world",
+        "filename": "line.jpg",
+        "page_filename": "page001.jpg",
+    }
+    line = row_to_line(0, row)
+    assert isinstance(line, LineRow)
+    assert line.image == b"\xff\xd8crop"
+    assert line.text == "hello world"
+    assert line.source_filename == "line.jpg"
+    assert line.page_filename == "page001.jpg"
+
+
+def test_row_to_line_accepts_transcription_column():
+    row = {
+        "image": {"bytes": b"\xff\xd8crop", "path": "x.jpg"},
+        "transcription": "typed text",
+    }
+    line = row_to_line(1, row)
+    assert line.text == "typed text"
+
+
+def test_row_to_line_rejects_missing_text():
+    from atr_serving.training.hf_source import DatasetSelectionError
+    row = {"image": {"bytes": b"x", "path": "x.jpg"}, "filename": "x.jpg"}
+    with pytest.raises(DatasetSelectionError, match="no usable text"):
+        row_to_line(0, row)
+
+
+def test_row_to_line_rejects_empty_text():
+    from atr_serving.training.hf_source import DatasetSelectionError
+    row = {"image": {"bytes": b"x", "path": "x.jpg"}, "text": "   ", "filename": "x.jpg"}
+    with pytest.raises(DatasetSelectionError, match="no usable text"):
+        row_to_line(0, row)
+
+
+def test_row_to_line_rejects_decoded_image():
+    from atr_serving.training.hf_source import DatasetSelectionError
+    # A decoded PIL image (list) instead of bytes is a usage error
+    row = {"image": [1, 2, 3], "text": "ok", "filename": "x.jpg"}
+    with pytest.raises(DatasetSelectionError, match="unsupported image cell"):
+        row_to_line(0, row)
+
+
+def test_TEXT_COLUMNS_includes_expected_names():
+    assert TEXT_COLUMNS == ("text", "transcription", "content")
+
+
+# ── line-level: the split that was a placeholder (#45) ──────────────────────
+class TestLineLevelSplit:
+    """The first cut returned one manifest for both roles, so every line trained
+    on was also evaluated on. These pin the properties that must hold instead."""
+
+    @staticmethod
+    def pool(tmp_path, samples):
+        import json
+        path = tmp_path / "lines_pool.jsonl"
+        path.write_text("\n".join(json.dumps(s) for s in samples) + "\n", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def read(path):
+        import json
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def test_train_and_val_are_disjoint(self, tmp_path):
+        from atr_serving.training.prepare import split_line_samples
+
+        samples = [{"image": f"l{i}.jpg", "text": f"line {i}", "page": f"p{i // 4}"}
+                   for i in range(40)]
+        train, val = split_line_samples(self.pool(tmp_path, samples), tmp_path, 0.9, 42)
+
+        train_images = {s["image"] for s in self.read(train)}
+        val_images = {s["image"] for s in self.read(val)}
+        assert train_images and val_images
+        assert train_images & val_images == set()
+        assert len(train_images | val_images) == 40      # nothing dropped either
+
+    def test_lines_from_one_page_never_straddle_the_split(self, tmp_path):
+        """Same hand, same layout, often the same words — the reason
+        manifests.split_pages splits at page level in the first place."""
+        from atr_serving.training.prepare import split_line_samples
+
+        samples = [{"image": f"l{i}.jpg", "text": "x", "page": f"page-{i // 5}"}
+                   for i in range(50)]
+        train, val = split_line_samples(self.pool(tmp_path, samples), tmp_path, 0.8, 7)
+
+        train_pages = {s["page"] for s in self.read(train)}
+        val_pages = {s["page"] for s in self.read(val)}
+        assert train_pages & val_pages == set()
+
+    def test_a_dataset_without_pages_still_splits(self, tmp_path):
+        """Weaker, and warned about in the log — but never train==val."""
+        from atr_serving.training.prepare import split_line_samples
+
+        samples = [{"image": f"l{i}.jpg", "text": "x", "page": None} for i in range(20)]
+        train, val = split_line_samples(self.pool(tmp_path, samples), tmp_path, 0.9, 42)
+        assert self.read(train) and self.read(val)
+        assert ({s["image"] for s in self.read(train)}
+                & {s["image"] for s in self.read(val)}) == set()
+
+    def test_the_split_is_deterministic(self, tmp_path):
+        from atr_serving.training.prepare import split_line_samples
+
+        samples = [{"image": f"l{i}.jpg", "text": "x", "page": f"p{i // 3}"} for i in range(30)]
+        first = split_line_samples(self.pool(tmp_path, samples), tmp_path, 0.9, 42)
+        first_val = {s["image"] for s in self.read(first[1])}
+        second = split_line_samples(self.pool(tmp_path, samples), tmp_path, 0.9, 42)
+        assert {s["image"] for s in self.read(second[1])} == first_val
+
+    def test_one_sample_cannot_be_split_and_says_so(self, tmp_path):
+        from atr_serving.training.preflight import PreflightError
+        from atr_serving.training.prepare import split_line_samples
+
+        with pytest.raises(PreflightError, match="at least 2"):
+            split_line_samples(self.pool(tmp_path, [{"image": "a.jpg", "text": "x"}]),
+                               tmp_path, 0.9, 42)
+
+
+class TestLineImagesAreWritten:
+    def test_the_crop_bytes_land_on_disk_at_the_recorded_path(self, tmp_path):
+        """`image` is a path the trainer opens, resolved against the job root.
+        Recording a filename without writing the file gives a JSONL that looks
+        right and fails at the first batch."""
+        import json
+
+        from atr_serving.training.prepare import materialize_lines
+
+        rows = [{"image": {"bytes": b"\xff\xd8JPEG-A", "path": "a.jpg"},
+                 "text": "erste zeile", "filename": "a.jpg", "page_filename": "scan1.jpg"},
+                {"image": {"bytes": b"\xff\xd8JPEG-B", "path": "b.jpg"},
+                 "text": "zweite zeile", "filename": "b.jpg", "page_filename": "scan1.jpg"}]
+
+        data = tmp_path / "data"
+        out = materialize_lines(iter(rows), data, root=tmp_path, min_free_disk_gb=0.0)
+
+        assert out.samples_written == 2
+        for sample in (json.loads(x) for x in
+                       out.manifest_path.read_text(encoding="utf-8").splitlines()):
+            written = tmp_path / sample["image"]
+            assert written.exists(), f"{sample['image']} was recorded but never written"
+            assert written.read_bytes().startswith(b"\xff\xd8")
+            assert sample["page"] == "scan1.jpg"       # kept, so the split can group

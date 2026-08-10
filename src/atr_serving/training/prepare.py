@@ -16,18 +16,34 @@ would degrade every training line for no reason.
 
 from __future__ import annotations
 
+import json
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Protocol
 
 from loguru import logger
 
-from atr_serving.training.hf_source import hub_cache_dir, row_to_page
+from atr_serving.training.hf_source import (
+    hub_cache_dir,
+    page_stem,
+    row_to_line,
+    row_to_page,
+)
+from atr_serving.training.manifests import split_pages
 from atr_serving.training.pagexml import page_stats, rewrite_image_filename
 
 from atr_serving.training.preflight import PreflightError, free_disk_gb
 
-__all__ = ["PageSource", "HFPageSource", "PreparedSet", "materialize"]
+__all__ = [
+    "LinePreparedSet",
+    "PageSource",
+    "HFPageSource",
+    "PreparedSet",
+    "materialize",
+    "materialize_lines",
+    "split_line_samples",
+]
 
 
 class PageSource(Protocol):
@@ -200,3 +216,176 @@ def materialize(
         )
     logger.info(out.summary)
     return out
+
+
+@dataclass
+class LinePreparedSet:
+    """Counters and manifest paths for a line-level materialize run."""
+
+    role: str
+    manifest_path: Path | None = None
+    samples_written: int = 0
+    chars: int = 0
+    charset: set[str] = field(default_factory=set)
+    bytes_written: int = 0
+
+    @property
+    def summary(self) -> str:
+        return (
+            f"{self.role}: {self.samples_written} line samples, "
+            f"{self.chars} chars, {len(self.charset)} distinct characters, "
+            f"{self.bytes_written / 1e6:.1f} MB"
+        )
+
+
+def materialize_lines(
+    rows: Iterable[dict],
+    dest: Path,
+    *,
+    root: Path | None = None,
+    role: str = "pool",
+    max_lines: int | None = None,
+    min_free_disk_gb: float = 50.0,
+    disk_check_every: int = 100,
+    free_gb: Callable[[str | Path], float] = free_disk_gb,
+) -> LinePreparedSet:
+    """Write line-level samples (image + text) to a JSONL manifest.
+
+    Each dataset row IS the training sample — there is no page scan to crop,
+    no PageXML to parse, no materialization step in the kraken sense. The image
+    bytes are written directly as the sample image, and the text is the label.
+    The output is a JSONL file suitable for the VLM backend's ``compile`` stage
+    (which calls :func:`vlm_dataset.write_jsonl` to produce the same format).
+
+    Parameters
+    ----------
+    rows
+        Stream of dataset rows, each one a line crop with ``image`` + text column.
+    dest
+        Job data directory. The manifest is written as ``lines_<role>.jsonl``.
+    max_lines
+        Cap on samples written. None = all rows that pass validation.
+    """
+    out = LinePreparedSet(role=role)
+    index = 0
+    root = Path(root) if root is not None else Path(dest)
+
+    manifest_path = dest / f"lines_{role}.jsonl"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    # The row's image bytes ARE the training crop, but they still have to land on
+    # disk: Sample.image is a path the trainer opens, resolved against the job
+    # root. Recording a filename without writing the file gives a JSONL that
+    # looks right and fails at the first batch.
+    images_dir = dest / f"line_images_{role}"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    with manifest_path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            if max_lines is not None and out.samples_written >= max_lines:
+                logger.info("Reached max_lines={} for role {}", max_lines, role)
+                break
+
+            line_row = row_to_line(index, row)
+            index += 1
+
+            text = line_row.text
+            if not text or not text.strip():
+                continue  # skip empty transcriptions
+
+            if out.samples_written % disk_check_every == 0:
+                free = free_gb(dest)
+                if free < min_free_disk_gb:
+                    raise PreflightError(
+                        f"only {free:.1f} GB free while writing {role} "
+                        f"({out.samples_written} samples written); need "
+                        f"{min_free_disk_gb:.0f} GB. Lower max_lines or free space."
+                    )
+
+            image_path = images_dir / f"{page_stem(index, line_row.source_filename)}.jpg"
+            image_path.write_bytes(line_row.image)
+
+            # One JSON object per line, the shape vlm_dataset.write_jsonl produces,
+            # so the compile stage is unchanged. `image` is relative to the job
+            # root, like every other sample's.
+            fh.write(json.dumps({
+                "image": str(image_path.relative_to(root)),
+                "text": text,
+                "source_type": "line",
+                "bbox": None,
+                "page": line_row.page_filename,
+            }, ensure_ascii=False) + "\n")
+
+            out.samples_written += 1
+            out.chars += len(text)
+            out.charset |= set(text)
+            out.bytes_written += len(line_row.image)
+
+    if not out.samples_written:
+        raise PreflightError(
+            f"role {role}: no usable line samples — every row was empty or "
+            "the dataset contains no transcription column"
+        )
+
+    out.manifest_path = manifest_path
+    logger.info(out.summary)
+    return out
+
+
+def split_line_samples(
+    pool: Path, dest: Path, partition: float = 0.9, seed: int = 42
+) -> tuple[Path, Path]:
+    """Split a line-level pool into disjoint train/val manifests.
+
+    The first cut of #45 returned the same manifest for both roles, with the
+    comment ``# train==val placeholder``. That is not a placeholder — it is a CER
+    measured on the training data, arriving as a plausible-looking number rather
+    than a crash, in a subsystem whose numbers are already the open question
+    (#52).
+
+    **The split is by page wherever the page is known.** Lines cropped from one
+    scan share a hand, a layout and often whole words, so putting some of a
+    page's lines in train and the rest in validation flatters the score for
+    exactly the reason ``manifests.split_pages`` exists. Line-level datasets
+    usually carry the source scan (towerbooks does, as ``page_filename``), and
+    :func:`hf_source.row_to_line` keeps it on every sample.
+
+    When no page is known the split falls back to lines, which is weaker and is
+    logged as such — a caller who sees that line in the log knows the score is
+    optimistic, instead of discovering it later.
+    """
+    samples = [json.loads(line) for line in pool.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(samples) < 2:
+        raise PreflightError(
+            f"{pool.name} holds {len(samples)} sample(s); at least 2 are needed to "
+            "hold anything back for validation"
+        )
+
+    groups: dict[str, list[dict]] = {}
+    for index, sample in enumerate(samples):
+        # No page → every line is its own group, i.e. a line-level split.
+        key = sample.get("page") or f"\x00line-{index}"
+        groups.setdefault(str(key), []).append(sample)
+
+    grouped_by_page = any(not k.startswith("\x00") for k in groups)
+    train_keys, val_keys = split_pages(sorted(groups), partition, seed)
+
+    paths = []
+    for role, keys in (("train", train_keys), ("val", val_keys)):
+        path = dest / f"lines_{role}.jsonl"
+        with path.open("w", encoding="utf-8") as fh:
+            for key in keys:
+                for sample in groups[key]:
+                    fh.write(json.dumps(sample, ensure_ascii=False) + "\n")
+        paths.append(path)
+
+    train_n = sum(len(groups[k]) for k in train_keys)
+    val_n = sum(len(groups[k]) for k in val_keys)
+    if grouped_by_page:
+        logger.info("line split: {} train / {} val samples over {} pages (page-disjoint)",
+                    train_n, val_n, len(groups))
+    else:
+        logger.warning(
+            "line split: {} train / {} val samples, split PER LINE — this dataset "
+            "carries no page column, so lines from one scan may land on both sides "
+            "and the validation score is optimistic", train_n, val_n)
+    return paths[0], paths[1]
