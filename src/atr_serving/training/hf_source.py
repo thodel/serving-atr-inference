@@ -30,17 +30,20 @@ if TYPE_CHECKING:
 __all__ = [
     "DatasetNotOnHub",
     "DatasetSelectionError",
-    "VerificationUnavailable",
+    "LineRow",
     "PageRow",
     "IMAGE_COLUMNS",
     "PAGEXML_COLUMNS",
     "PROJECT_COLUMNS",
+    "TEXT_COLUMNS",
     "data_files_for",
+    "granularity_files",
     "hub_cache_dir",
     "project_glob",
     "page_stem",
     "pick_column",
     "row_to_page",
+    "row_to_line",
     "verify_dataset_spec",
 ]
 
@@ -54,6 +57,10 @@ __all__ = [
 PAGEXML_COLUMNS = ("xml_content", "xml")
 PROJECT_COLUMNS = ("project_name", "project")
 IMAGE_COLUMNS = ("image",)
+#: Columns that carry plain transcription text in a line-level dataset. The
+#: first present wins. A dataset with none of these columns is either page-level
+#: or corrupt — either way, not usable as line-level.
+TEXT_COLUMNS = ("text", "transcription", "content")
 
 
 class DatasetSelectionError(ValueError):
@@ -120,6 +127,29 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
     return files
 
 
+def granularity_files(spec: DatasetSpec) -> dict[str, list[str]]:
+    """``data_files`` globs for a ``granularity=line`` source.
+
+    Line-level datasets have no project directories — every row is a line crop,
+    all stored under the split root. The split is still page-level where a page
+    is known (so lines from one page stay on one side of the train/val split),
+    but when no ``filename`` column is present the split is random.
+
+    Unlike :func:`data_files_for`, ``train_projects`` is ignored for line-level:
+    there are no projects to select from. Instead the whole split is loaded,
+    constrained to the parquet files under ``data/<split>/``.
+    """
+    if spec.granularity != "line":
+        raise DatasetSelectionError(
+            f"granularity_files called with granularity={spec.granularity!r}; "
+            "only ``granularity='line'`` is supported here"
+        )
+    # The "never load the whole repo" guard: at 2.9 GB towerbooks is well within
+    # the disk budget. If a line-level dataset exceeds it, a future caller can
+    # add selective loading via a dataset config file or sub-directory convention.
+    return {"train": [f"data/{spec.split}/*.parquet"]}
+
+
 def hub_cache_dir(hf_repo: str, hf_home=None):
     """Where the standard HuggingFace cache keeps this dataset.
 
@@ -171,6 +201,17 @@ class PageRow:
     @property
     def xml_name(self) -> str:
         return f"{self.stem}.xml"
+
+
+@dataclass
+class LineRow:
+    """One line-level ground truth row: an image crop and its plain-text transcription."""
+
+    image: bytes
+    text: str
+    source_filename: str | None = None
+    page_filename: str | None = None  # which page scan this line was cropped from
+    project: str | None = None
 
 
 def _image_bytes(value: object) -> bytes:
@@ -231,6 +272,35 @@ def row_to_page(index: int, row: dict) -> PageRow:
         xml=xml,
         source_filename=filename if isinstance(filename, str) else None,
         project=project if isinstance(project, str) else None,
+    )
+
+
+def row_to_line(index: int, row: dict) -> LineRow:
+    """Convert one dataset row into a :class:`LineRow`.
+
+    Line-level datasets (e.g. towerbooks) have one row per line crop, a plain text
+    column instead of PageXML, and no project directories. The ``source_filename``
+    is the cropped-line image; ``page_filename`` is the page scan it was cropped
+    from (when that column is present, which it is in towerbooks).
+    """
+    image_val = row.get("image")
+    text_key = pick_column(row, TEXT_COLUMNS)
+    text = row.get(text_key) if text_key else None
+    if not isinstance(text, str) or not text.strip():
+        raise DatasetSelectionError(
+            f"row {index} has no usable text transcription. Looked for {TEXT_COLUMNS}; "
+            f"the row has {sorted(row)}. If this dataset stores PageXML it is "
+            "page-level ground truth — set granularity='page'."
+        )
+    filename = row.get("filename")
+    page_key = pick_column(row, ("page_filename", "page"))
+    project_key = pick_column(row, PROJECT_COLUMNS)
+    return LineRow(
+        image=_image_bytes(image_val),
+        text=text,
+        source_filename=filename if isinstance(filename, str) else None,
+        page_filename=row.get(page_key) if page_key else None,
+        project=row.get(project_key) if project_key and isinstance(row.get(project_key), str) else None,
     )
 
 
@@ -322,23 +392,21 @@ def verify_dataset_spec(
 
     errors: list[str] = []
 
-    # Structural validation (mirrors data_files_for guards)
-    if not spec.train_projects:
-        raise DatasetSelectionError(
-            f"DatasetSpec for {spec.hf_repo!r} selects no train_projects. Refusing to "
-            "load the whole repository — it is far larger than the disk."
-        )
-    overlap = sorted(set(spec.train_projects) & set(spec.eval_projects))
-    if overlap:
-        raise DatasetSelectionError(
-            f"projects appear in both train and eval: {overlap}. "
-            "That leaks evaluation pages into training."
-        )
+    # Structural validation for page-level (line-level skips train_projects check)
+    if spec.granularity == "page":
+        if not spec.train_projects:
+            raise DatasetSelectionError(
+                f"DatasetSpec for {spec.hf_repo!r} selects no train_projects. Refusing "
+                "to load the whole repository — it is far larger than the disk."
+            )
+        overlap = sorted(set(spec.train_projects) & set(spec.eval_projects or []))
+        if overlap:
+            raise DatasetSelectionError(
+                f"projects appear in both train and eval: {overlap}. "
+                "That leaks evaluation pages into training."
+            )
 
-    # 1. Repo existence. One listing serves this, the project check and the size
-    #    estimate — the first cut called it twice, which on a 694-project repo is
-    #    two full tree walks to learn the same thing.
-    #    VerificationUnavailable is not caught: it is not a fact about the spec.
+    # 1. Repo existence.
     try:
         all_files = list(list_repo_files_fn(spec.hf_repo, revision=spec.revision,
                                             repo_type="dataset"))
@@ -346,30 +414,30 @@ def verify_dataset_spec(
         revision_note = f" at revision {spec.revision!r}" if spec.revision else ""
         errors.append(f"hf_repo {spec.hf_repo!r}{revision_note} does not exist or is "
                       f"not accessible: {exc}")
-        return errors  # nothing further to check if the repo is missing
+        return errors
 
-    # 2. Project directories must exist under data/<split>/
+    # 2. Project directories must exist under data/<split>/ (page-level only)
     split_prefix = f"data/{spec.split}/"
-    available_dirs: set[str] = set()
-    for f in all_files:
-        if f.startswith(split_prefix):
-            # "data/split/project_namerest" → project_name is first path segment
-            rest = f[len(split_prefix):]
-            if rest:
-                project = rest.split("/", 1)[0]
-                if project:
-                    available_dirs.add(project)
+    if spec.granularity == "page":
+        available_dirs: set[str] = set()
+        for f in all_files:
+            if f.startswith(split_prefix):
+                rest = f[len(split_prefix):]
+                if rest:
+                    project = rest.split("/", 1)[0]
+                    if project:
+                        available_dirs.add(project)
 
-    all_projects = list(spec.train_projects) + list(spec.eval_projects or [])
-    for project in all_projects:
-        if project not in available_dirs:
-            avail = sorted(available_dirs) if available_dirs else "(could not list)"
-            errors.append(
-                f"project {project!r} not found under data/{spec.split}/ in "
-                f"{spec.hf_repo!r}. Available: {avail}"
-            )
+        all_projects = list(spec.train_projects) + list(spec.eval_projects or [])
+        for project in all_projects:
+            if project not in available_dirs:
+                avail = sorted(available_dirs) if available_dirs else "(could not list)"
+                errors.append(
+                    f"project {project!r} not found under data/{spec.split}/ in "
+                    f"{spec.hf_repo!r}. Available: {avail}"
+                )
 
-    # 3. Presence of parquet files (pagexml-hf converter always produces them)
+    # 3. Parquet files (pagexml-hf always produces them; line-level has no alternative)
     has_parquet = any(f.endswith(".parquet") for f in all_files)
     if not has_parquet:
         errors.append(
@@ -377,21 +445,20 @@ def verify_dataset_spec(
             f"data/<split>/<project>/*.parquet layout from the pagexml-hf converter."
         )
 
-    # 4. Size of THE SELECTION against the disk guard. Sizing the whole repo (what
-    #    the first cut computed) is meaningless here: `data/train/` of
-    #    image-text_medieval-scripts is ~6.6 TB, so every job on it would be
-    #    refused, including the 116 MB Thun pair that is the standard test case.
-    #    Selecting a few project directories out of hundreds is the entire design.
+    # 4. Size of THE SELECTION against the disk guard.
     if settings is not None and settings.min_free_disk_gb > 0 and not errors:
-        selected = [
-            f for f in all_files
-            if f.endswith(".parquet")
-            and f.startswith(split_prefix)
-            and f[len(split_prefix):].split("/", 1)[0] in set(all_projects)
-        ]
+        if spec.granularity == "page":
+            selected = [
+                f for f in all_files
+                if f.endswith(".parquet")
+                and f.startswith(split_prefix)
+                and f[len(split_prefix):].split("/", 1)[0] in set(all_projects)
+            ]
+        else:
+            # line-level: size the whole split (towerbooks is ~2.9 GB, within budget)
+            selected = [f for f in all_files if f.endswith(".parquet")]
+
         if selected:
-            # Best-effort: an unreachable hub here does not invalidate a spec whose
-            # repo and projects already checked out.
             try:
                 needed_gb = paths_size_fn(spec.hf_repo, selected, spec.revision,
                                           "dataset") / 1024 ** 3
@@ -401,9 +468,7 @@ def verify_dataset_spec(
                 errors.append(
                     f"the selection is ~{needed_gb:.1f} GB across {len(selected)} "
                     f"parquet shards, over the {settings.min_free_disk_gb} GB the "
-                    "trainer keeps free. Select fewer projects, or set max_pages — "
-                    "note that max_pages caps what is materialized, not what is "
-                    "downloaded (#39)."
+                    "trainer keeps free. Lower max_pages or free space."
                 )
 
     return errors

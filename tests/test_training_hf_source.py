@@ -355,3 +355,79 @@ class TestVerifyDatasetSpec:
             list_repo_files_fn=fake_list, paths_size_fn=unreachable,
         )
         assert errors == []
+
+
+# ── line-level support (#45) ──────────────────────────────────────────────────
+
+from atr_serving.training.hf_source import (
+    TEXT_COLUMNS,
+    LineRow,
+    granularity_files,
+    row_to_line,
+)
+
+
+def test_granularity_files_returns_whole_split_glob():
+    from atr_serving.training.contracts import DatasetSpec
+    spec = DatasetSpec(hf_repo="owner/towerbooks", split="train", granularity="line")
+    globs = granularity_files(spec)
+    assert globs == {"train": ["data/train/*.parquet"]}
+
+
+def test_granularity_files_rejects_page_level():
+    from atr_serving.training.contracts import DatasetSpec
+    from atr_serving.training.hf_source import DatasetSelectionError
+    spec = DatasetSpec(hf_repo="owner/pages", split="train", granularity="page",
+                       train_projects=["p"])
+    with pytest.raises(DatasetSelectionError, match="only.*granularity='line'"):
+        granularity_files(spec)
+
+
+def test_row_to_line_extracts_text_and_image():
+    row = {
+        "image": {"bytes": b"\xff\xd8crop", "path": "line.jpg"},
+        "text": "hello world",
+        "filename": "line.jpg",
+        "page_filename": "page001.jpg",
+    }
+    line = row_to_line(0, row)
+    assert isinstance(line, LineRow)
+    assert line.image == b"\xff\xd8crop"
+    assert line.text == "hello world"
+    assert line.source_filename == "line.jpg"
+    assert line.page_filename == "page001.jpg"
+
+
+def test_row_to_line_accepts_transcription_column():
+    row = {
+        "image": {"bytes": b"\xff\xd8crop", "path": "x.jpg"},
+        "transcription": "typed text",
+    }
+    line = row_to_line(1, row)
+    assert line.text == "typed text"
+
+
+def test_row_to_line_rejects_missing_text():
+    from atr_serving.training.hf_source import DatasetSelectionError
+    row = {"image": {"bytes": b"x", "path": "x.jpg"}, "filename": "x.jpg"}
+    with pytest.raises(DatasetSelectionError, match="no usable text"):
+        row_to_line(0, row)
+
+
+def test_row_to_line_rejects_empty_text():
+    from atr_serving.training.hf_source import DatasetSelectionError
+    row = {"image": {"bytes": b"x", "path": "x.jpg"}, "text": "   ", "filename": "x.jpg"}
+    with pytest.raises(DatasetSelectionError, match="no usable text"):
+        row_to_line(0, row)
+
+
+def test_row_to_line_rejects_decoded_image():
+    from atr_serving.training.hf_source import DatasetSelectionError
+    # A decoded PIL image (list) instead of bytes is a usage error
+    row = {"image": [1, 2, 3], "text": "ok", "filename": "x.jpg"}
+    with pytest.raises(DatasetSelectionError, match="unsupported image cell"):
+        row_to_line(0, row)
+
+
+def test_TEXT_COLUMNS_includes_expected_names():
+    assert TEXT_COLUMNS == ("text", "transcription", "content")

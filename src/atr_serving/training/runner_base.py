@@ -32,10 +32,16 @@ from typing import Any, ClassVar, Protocol
 from loguru import logger
 
 from atr_serving.training.contracts import JobStage, Metrics, StageRecord, TrainJob, utcnow
-from atr_serving.training.hf_source import data_files_for
+from atr_serving.training.hf_source import data_files_for, granularity_files
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.manifests import split_pages, write_manifest
-from atr_serving.training.prepare import HFPageSource, PageSource, materialize
+from atr_serving.training.prepare import (
+    HFPageSource,
+    LinePreparedSet,
+    PageSource,
+    materialize,
+    materialize_lines,
+)
 from atr_serving.training.promote import PromotionResult
 from atr_serving.training.settings import TrainerSettings
 
@@ -145,9 +151,22 @@ class BasePipeline(ABC):
         line level would put lines from the same page — same hand, same layout,
         often the same words — on both sides and quietly flatter the score,
         whether those lines end up as kraken crops or as VLM samples.
+
+        At ``granularity='line'`` the dataset is already one-row-per-line (e.g.
+        towerbooks). No page files are written; a JSONL manifest is produced
+        instead and the page-level train/val split is skipped (the lines ARE the
+        samples, not an intermediate representation).
         """
         paths = self.store.paths(job.id)
         spec = job.request.dataset
+
+        if spec.granularity == "line":
+            return self._prepare_lines(job, spec, paths)
+        else:
+            return self._prepare_pages(job, spec, paths)
+
+    def _prepare_pages(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
+        """Page-level materialize + split (original behaviour, preserved exactly)."""
         files = data_files_for(spec)
 
         train_set = materialize(
@@ -170,7 +189,6 @@ class BasePipeline(ABC):
             job.progress.pages_written += eval_set.pages_written
             job.progress.lines_written += eval_set.lines
         else:
-            # No dedicated eval projects → seeded page-level split of what we have.
             train_pages, val_pages = split_pages(
                 [str(p) for p in train_set.xml_paths], spec.partition, spec.seed
             )
@@ -180,6 +198,33 @@ class BasePipeline(ABC):
         val_manifest = write_manifest(paths.data / "pages_val.lst", val_pages)
         logger.info("prepared {} train / {} val pages", len(train_pages), len(val_pages))
         return train_manifest, val_manifest
+
+    def _prepare_lines(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
+        """Line-level materialize: image + text rows → JSONL manifest.
+
+        No page files are written; no page-level split is needed. The JSONL is
+        the artefact consumed by the VLM backend's compile stage.
+        """
+        files = granularity_files(spec)
+
+        line_set: LinePreparedSet = materialize_lines(
+            self.source.stream(spec.hf_repo, files["train"], spec.revision),
+            paths.data, role="train",
+            max_lines=spec.max_pages,  # reused as sample cap at line granularity
+            min_free_disk_gb=self.settings.min_free_disk_gb,
+        )
+        job.progress.samples_written = line_set.samples_written
+        job.progress.lines_written = line_set.samples_written
+        job.progress.pages_written = line_set.samples_written
+        self.store.save(job)
+
+        # For line-level, the "manifest" is the JSONL itself, used directly by the
+        # VLM backend's compile stage (which calls vlm_dataset.read_jsonl).
+        # kraken backend has no line-level path and raises if it reaches compile
+        # with line granularity (compile is not called for vllm with pages_val.lst).
+        logger.info("prepared {} train line samples", line_set.samples_written)
+        assert line_set.manifest_path is not None
+        return line_set.manifest_path, line_set.manifest_path  # train==val placeholder
 
     # ── the stages a backend supplies ───────────────────────────────────────
     @abstractmethod

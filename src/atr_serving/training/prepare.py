@@ -22,12 +22,12 @@ from typing import Callable, Iterable, Iterator, Protocol
 
 from loguru import logger
 
-from atr_serving.training.hf_source import hub_cache_dir, row_to_page
+from atr_serving.training.hf_source import hub_cache_dir, row_to_line, row_to_page
 from atr_serving.training.pagexml import page_stats, rewrite_image_filename
 
 from atr_serving.training.preflight import PreflightError, free_disk_gb
 
-__all__ = ["PageSource", "HFPageSource", "PreparedSet", "materialize"]
+__all__ = ["LinePreparedSet", "PageSource", "HFPageSource", "PreparedSet", "materialize", "materialize_lines"]
 
 
 class PageSource(Protocol):
@@ -198,5 +198,107 @@ def materialize(
             f"role {role}: no usable page in the selection — every row was empty or the "
             "projects contain no transcriptions"
         )
+    logger.info(out.summary)
+    return out
+
+
+@dataclass
+class LinePreparedSet:
+    """Counters and manifest paths for a line-level materialize run."""
+
+    role: str
+    manifest_path: Path | None = None
+    samples_written: int = 0
+    chars: int = 0
+    charset: set[str] = field(default_factory=set)
+    bytes_written: int = 0
+
+    @property
+    def summary(self) -> str:
+        return (
+            f"{self.role}: {self.samples_written} line samples, "
+            f"{self.chars} chars, {len(self.charset)} distinct characters, "
+            f"{self.bytes_written / 1e6:.1f} MB"
+        )
+
+
+def materialize_lines(
+    rows: Iterable[dict],
+    dest: Path,
+    *,
+    role: str = "train",
+    max_lines: int | None = None,
+    min_free_disk_gb: float = 50.0,
+    disk_check_every: int = 100,
+    free_gb: Callable[[str | Path], float] = free_disk_gb,
+) -> LinePreparedSet:
+    """Write line-level samples (image + text) to a JSONL manifest.
+
+    Each dataset row IS the training sample — there is no page scan to crop,
+    no PageXML to parse, no materialization step in the kraken sense. The image
+    bytes are written directly as the sample image, and the text is the label.
+    The output is a JSONL file suitable for the VLM backend's ``compile`` stage
+    (which calls :func:`vlm_dataset.write_jsonl` to produce the same format).
+
+    Parameters
+    ----------
+    rows
+        Stream of dataset rows, each one a line crop with ``image`` + text column.
+    dest
+        Job data directory. The manifest is written as ``lines_<role>.jsonl``.
+    max_lines
+        Cap on samples written. None = all rows that pass validation.
+    """
+    out = LinePreparedSet(role=role)
+    index = 0
+
+    manifest_path = dest / f"lines_{role}.jsonl"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with manifest_path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            if max_lines is not None and out.samples_written >= max_lines:
+                logger.info("Reached max_lines={} for role {}", max_lines, role)
+                break
+
+            line_row = row_to_line(index, row)
+            index += 1
+
+            text = line_row.text
+            if not text or not text.strip():
+                continue  # skip empty transcriptions
+
+            if out.samples_written % disk_check_every == 0:
+                free = free_gb(dest)
+                if free < min_free_disk_gb:
+                    raise PreflightError(
+                        f"only {free:.1f} GB free while writing {role} "
+                        f"({out.samples_written} samples written); need "
+                        f"{min_free_disk_gb:.0f} GB. Lower max_lines or free space."
+                    )
+
+            # Each line sample is one JSON object per line: the same shape
+            # vlm_dataset.write_jsonl produces, so the compile stage is unchanged.
+            import json
+            fh.write(json.dumps({
+                "image": line_row.source_filename or f"line_{index:07d}.jpg",
+                "text": text,
+                "source_type": "line",
+                "bbox": None,
+                "page": line_row.page_filename,
+            }, ensure_ascii=False) + "\n")
+
+            out.samples_written += 1
+            out.chars += len(text)
+            out.charset |= set(text)
+            out.bytes_written += len(line_row.image)
+
+    if not out.samples_written:
+        raise PreflightError(
+            f"role {role}: no usable line samples — every row was empty or "
+            "the dataset contains no transcription column"
+        )
+
+    out.manifest_path = manifest_path
     logger.info(out.summary)
     return out
