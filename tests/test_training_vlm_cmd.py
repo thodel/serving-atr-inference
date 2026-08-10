@@ -212,10 +212,13 @@ def test_an_explicit_base_model_is_kept():
 
 # ── backends ────────────────────────────────────────────────────────────────
 def test_each_backend_has_its_own_venv_and_runner():
-    assert set(BACKENDS) == {"kraken", "vllm"}
+    assert set(BACKENDS) == {"kraken", "trocr", "vllm"}
     venvs = {b.venv for b in BACKENDS.values()}
     modules = {b.runner_module for b in BACKENDS.values()}
-    assert len(venvs) == len(modules) == 2  # no shared dependency tree
+    # No shared dependency tree: kraken 7.0.2, a transformers new enough for
+    # Qwen3-VL, and TrOCR's own pin cannot coexist, and the supervising service
+    # imports none of them — it spawns each job with that engine's interpreter.
+    assert len(venvs) == len(modules) == len(BACKENDS)
 
 
 def test_runner_python_points_into_the_engine_s_venv():
@@ -224,5 +227,6 @@ def test_runner_python_points_into_the_engine_s_venv():
 
 
 def test_an_engine_without_a_backend_is_named():
-    with pytest.raises(UnknownBackend, match="trocr"):
-        backend_for("trocr")
+    """trocr was the example here until #44 gave it one."""
+    with pytest.raises(UnknownBackend, match="party"):
+        backend_for("party")

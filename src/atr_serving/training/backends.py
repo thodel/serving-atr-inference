@@ -58,6 +58,12 @@ BACKENDS: dict[str, Backend] = {
         venv="vlm-train",
         requirements="engines/vlm_train_svc/requirements.txt",
     ),
+    "trocr": Backend(
+        engine="trocr",
+        runner_module="trocr_train_svc.runner",
+        venv="trocr-train",
+        requirements="engines/trocr_train_svc/requirements.txt",
+    ),
 }
 
 

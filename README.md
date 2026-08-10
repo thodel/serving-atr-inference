@@ -191,7 +191,7 @@ runs the job on GPU 1, and registers the result in the gitignored overlay regist
 |---|---|---|---|
 | `kraken` | recognition models via `ketos`, from scratch or fine-tuned from Zenodo | `.venvs/kraken-train` | [`docs/TRAINING.md`](docs/TRAINING.md) (runbook) · [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) (plan) |
 | `vllm` | QLoRA fine-tunes of a Qwen3-VL base | `.venvs/vlm-train` | [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md) |
-| `trocr` | *planned* — epic **#41** | | |
+| `trocr` | fine-tunes a TrOCR base (`VisionEncoderDecoderModel`) on line crops | `.venvs/trocr-train` | epic **#41** |
 
 **One service, one queue, one GPU guard**, because there is one GPU: two services would
 each enforce `max_concurrent=1` against their own job list and start two runs into the

@@ -1,9 +1,9 @@
 """Score a fine-tuned TrOCR checkpoint: generate transcriptions, compute CER/WER.
 
 Run as a subprocess by ``trocr_train_svc.runner``; the argv is built by
-:func:`atr_serving.training.trocraft_cmd.evaluate_cmd`.
+:func:`atr_serving.training.trocr_cmd.evaluate_cmd`.
 
-    python -m trocr_train_svc.evaluate_trocraft --checkpoint … --val-manifest … --report …
+    python -m trocr_train_svc.evaluate_trocr --checkpoint … --val-manifest … --report …
 
 The result is written as **JSON to a file**, not printed: a generation loop emits
 progress that redraws in place, and the number that decides whether a job is

@@ -123,10 +123,18 @@ def test_list_get_log_cancel_delete(client, trainer):
 
 # ── validation happens before a job exists ──────────────────────────────────
 def test_unknown_engine_is_a_400_naming_what_is_supported(client, trainer):
-    resp = client.post("/train/jobs", json={**BODY, "engine": "trocr"}, headers=AUTH)
+    """`trocr` was the example here until #44 gave it a backend; `party` is a
+    real engine the gateway serves but cannot train, which is the same shape."""
+    resp = client.post("/train/jobs", json={**BODY, "engine": "party"}, headers=AUTH)
     assert resp.status_code == 400
     assert "kraken" in resp.json()["detail"]
     assert trainer.calls == []  # nothing was submitted
+
+
+def test_a_trocr_job_reaches_the_trainer_now_that_it_has_a_backend(client, trainer):
+    resp = client.post("/train/jobs", json={**BODY, "engine": "trocr"}, headers=AUTH)
+    assert resp.status_code == 202
+    assert [c[0] for c in trainer.calls] == ["submit"]
 
 
 def test_malformed_request_is_422_with_the_offending_field(client, trainer):

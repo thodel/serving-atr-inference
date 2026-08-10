@@ -1,8 +1,8 @@
-# TrOCR fine-tune venv (.venvs/trocraft-train).
+# TrOCR fine-tune venv (.venvs/trocr-train).
 #
 # Separate from kraken-train and vlm-train for the usual reason
 # (IMPLEMENTATION_PLAN §3): each engine needs a different transformers/torch
-# version range. TrOCR (microsoft/trocraft-*) needs the widest range, but must
+# version range. TrOCR (microsoft/trocr-*) needs the widest range, but must
 # still be pinned at both ends so a silent major-version arrival cannot break
 # the training script's API surface.
 #

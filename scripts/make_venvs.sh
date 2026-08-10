@@ -40,7 +40,7 @@ case "$(stat -f -c %T "${TMPDIR:-/tmp}" 2>/dev/null || echo unknown)" in
     echo "      TMPDIR=${TMPDIR}" >&2
     ;;
 esac
-ALL=(gateway kraken party trocr kraken-train vlm-train vllm)
+ALL=(gateway kraken party trocr kraken-train vlm-train trocr-train vllm)
 TARGETS=("$@")
 [ ${#TARGETS[@]} -eq 0 ] && TARGETS=("${ALL[@]}")
 
@@ -118,6 +118,17 @@ if wanted vlm-train; then
   "${VENVS}/vlm-train/bin/pip" install torch==2.8.0 torchvision==0.23.0 \
     --index-url https://download.pytorch.org/whl/cu128
   "${VENVS}/vlm-train/bin/pip" install -r "${ROOT}/engines/vlm_train_svc/requirements.txt"
+fi
+
+if wanted trocr-train; then
+  # TrOCR fine-tuning (#44). Its own venv for the same reason as the others: the
+  # serving trocr engine and this one pin transformers differently, and the
+  # supervising service imports neither — it spawns each job with the right
+  # interpreter (src/atr_serving/training/backends.py).
+  new_venv trocr-train
+  "${VENVS}/trocr-train/bin/pip" install torch==2.8.0 torchvision==0.23.0 \
+    --index-url https://download.pytorch.org/whl/cu128
+  "${VENVS}/trocr-train/bin/pip" install -r "${ROOT}/engines/trocr_train_svc/requirements.txt"
 fi
 
 if wanted vllm; then

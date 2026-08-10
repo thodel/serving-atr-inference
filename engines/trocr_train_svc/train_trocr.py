@@ -1,16 +1,16 @@
 """Fine-tune a TrOCR base on compiled line-level samples.
 
 Run as a subprocess by ``trocr_train_svc.runner``; every argument is built by
-:func:`atr_serving.training.trocraft_cmd.train_cmd`, which is unit-tested, so
+:func:`atr_serving.training.trocr_cmd.train_cmd`, which is unit-tested, so
 this module is the only place that needs torch and never has to guess at defaults.
 
-    python -m trocr_train_svc.train_trocraft --base-model … --train-manifest … --output-dir …
+    python -m trocr_train_svc.train_trocr --base-model … --train-manifest … --output-dir …
 
 Why a subprocess and not an import: a CUDA OOM here takes the process down, and
 the runner that has to write *why* onto the job record must survive it.
 
 The recipe uses ``transformers.Seq2seqTrainer`` with TrOCR's built-in processor
-(microsoft/trocraft-*) or a compatible variant. The JSONL manifest lists
+(microsoft/trocr-*) or a compatible variant. The JSONL manifest lists
 ``{image, text}`` pairs resolved relative to the manifest's parent directory.
 """
 
