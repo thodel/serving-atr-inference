@@ -17,13 +17,13 @@ def dataset() -> DatasetSpec:
 
 
 def test_minimal_request_gets_the_agreed_defaults():
-    req = TrainRequest(model_id="kraken-thun-missiven-v1", dataset=dataset())
+    req = TrainRequest(model_id="kraken-thun-missiven-v1", datasets=[dataset()])
     assert req.engine == "kraken"
     assert req.base_model is None
     assert req.params.spec == KRAKEN_PLUS_SPEC
     assert (req.params.batch_size, req.params.schedule, req.params.lrate) == (256, "1cycle", 1e-4)
     assert req.params.weights_format == "coreml"  # until #36 lands
-    assert req.dataset.partition == 0.9 and req.dataset.seed == 42
+    assert req.datasets[0].partition == 0.9 and req.datasets[0].seed == 42
 
 
 @pytest.mark.parametrize("bad", ["Kraken-Thun", "thun model", "", "-leading", "a/b"])

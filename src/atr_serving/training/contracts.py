@@ -87,6 +87,21 @@ def utcnow() -> datetime:
 
 
 # ── request ─────────────────────────────────────────────────────────────────
+
+# ── exceptions ──────────────────────────────────────────────────────────────
+
+class DatasetNotOnHub(LookupError):
+    """The repo (or the pinned revision) is not there."""
+
+
+class DatasetSelectionError(ValueError):
+    """Raised when a DatasetSpec selects nothing, or something unsafe."""
+
+
+class ProjectListingError(RuntimeError):
+    """Raised when the hub cannot be reached to enumerate projects."""
+
+
 class DatasetSpec(BaseModel):
     """Which slice of a HuggingFace dataset to train on.
 
@@ -97,9 +112,12 @@ class DatasetSpec(BaseModel):
     what keeps a job from pulling the whole repo onto a box with ~356 GB free.
     """
 
+    model_config = ConfigDict(validator=False)
+
     hf_repo: str
     split: str = "train"
     #: Project directories under ``data/<split>/`` used for training.
+    #: Optional — a dataset with no project directories is selected whole.
     train_projects: list[str] = Field(default_factory=list)
     #: Project directories used for evaluation. Empty → split ``train_projects``
     #: by ``partition`` instead.
@@ -120,6 +138,48 @@ class DatasetSpec(BaseModel):
     #: not a silent failure that surfaces 47 rows in, as the original lassberg
     #: config did.
     granularity: Literal["page", "line"] = "page"
+    #: Select all project directories under ``data/<split>/`` on the hub.
+    #: Requires ``max_pages`` to be set (a bounded selection is always deliberate;
+    #: an unbounded one defeats the purpose of the guard). Mutually exclusive with
+    #: ``train_projects``.
+    all_projects: bool = False
+    #: When set, pages are materialized in chunks of this many pages each:
+    #: materialize → compile → discard → next chunk. Keeps peak disk bounded.
+    #: Must be ≥ 1. None (default) disables chunking.
+    chunk_size: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _check_all_projects_guard(self):
+        if not self.all_projects:
+            return self
+        if self.max_pages is None:
+            raise ValueError(
+                "all_projects=True requires max_pages to be set. "
+                "Pass max_pages to bound the selection; without it, all_projects "
+                "would select all 694 projects (~6.6 TB), which is larger than the disk."
+            )
+        if self.train_projects:
+            raise ValueError(
+                "all_projects=True and train_projects cannot both be set. "
+                "Use one or the other, not both."
+            )
+        return self
+
+
+#: Alias so that callers can refer to the schema by name rather than as
+#: ``DatasetSpec`` everywhere.
+DatasetSelection = DatasetSpec
+
+
+class DatasetCounts(BaseModel):
+    """Per-dataset materialisation counts written to the job record."""
+
+    hf_repo: str
+    pages_written: int = 0
+    pages_skipped: int = 0
+    lines: int = 0
+    chars: int = 0
+    samples_written: int = 0
 
 
 class KrakenTrainParams(BaseModel):
@@ -314,7 +374,11 @@ class TrainRequest(BaseModel):
 
     engine: TrainEngine = "kraken"
     model_id: str
-    dataset: DatasetSpec
+    #: The datasets to train on. At least one; each entry selects a HuggingFace
+    #: repo and a list of projects (or ``all_projects``).
+    #: For backwards compatibility a single ``dataset`` field is also accepted
+    #: and normalised to a one-element list.
+    datasets: list[DatasetSpec] = Field(min_length=1)
     #: kraken: registry id or raw Zenodo DOI to fine-tune from, None = from
     #: scratch. vllm: the HF base checkpoint the LoRA adapts — never None, since
     #: there is no such thing as training a VLM from scratch here; it defaults to
@@ -327,16 +391,20 @@ class TrainRequest(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _params_follow_the_engine(cls, data):
-        """Parse ``params`` as the model belonging to ``engine``.
+    def _normalise_datasets_and_params(cls, data):
+        """Accept both the old ``dataset`` field and the new ``datasets`` list.
 
-        Without this, pydantic's union would try each member in turn and a typo in
-        a VLM field could be silently accepted as a valid (all-default) kraken
-        params block — a job that runs the wrong trainer with none of the
-        hyperparameters the caller asked for.
+        ``dataset`` (singular) is normalised to a one-element ``datasets`` list so
+        that every code path downstream only has to handle ``datasets``.
         """
         if not isinstance(data, dict):
             return data
+
+        # Normalise singular ``dataset`` → ``datasets`` for backwards compat.
+        if "datasets" not in data and "dataset" in data:
+            data = {**data, "datasets": [data["dataset"]]}
+
+        # Parse ``params`` as the model belonging to ``engine``.
         engine = data.get("engine", "kraken")
         model = PARAMS_BY_ENGINE.get(engine)
         if model is None:
@@ -410,6 +478,9 @@ class Progress(BaseModel):
     #: which counts transcribed lines found while materializing — the two differ
     #: whenever a line is dropped for being unusable as a crop.
     samples_written: int | None = None
+    #: Per-dataset materialisation counts (pages, skipped, lines, chars).
+    #: Supersedes the flat counters above when multiple datasets are used.
+    dataset_counts: list[DatasetCounts] = Field(default_factory=list)
 
 
 class StageRecord(BaseModel):
