@@ -84,3 +84,30 @@ def test_evaluate_argv_points_at_a_checkpoint_and_a_report(params, tmp_path):
                         report=tmp_path / "eval.json")
     assert argv[:3] == ["/venv/bin/python", "-m", EVAL_MODULE]
     assert str(tmp_path / "eval.json") in argv
+
+
+# ── the base model is one field, not two ────────────────────────────────────
+def test_a_trocr_job_gets_its_base_model_without_being_told():
+    """It sat on the params model while the runner and the step-count guard both
+    read `request.base_model`. Unfilled, the job passed `--base-model None` to the
+    training script and #72 judged it "from scratch" — the 2,000-step floor
+    instead of the 500 a fine-tune needs."""
+    from atr_serving.training.contracts import TROCR_BASE_MODEL, DatasetSpec, TrainRequest
+
+    request = TrainRequest(engine="trocr", model_id="t",
+                           dataset=DatasetSpec(hf_repo="dh-unibe/x", train_projects=["p"]))
+    assert request.base_model == TROCR_BASE_MODEL
+
+
+def test_an_explicit_base_model_still_wins():
+    from atr_serving.training.contracts import DatasetSpec, TrainRequest
+
+    request = TrainRequest(engine="trocr", model_id="t", base_model="dh-unibe/trocr-kurrent",
+                           dataset=DatasetSpec(hf_repo="dh-unibe/x", train_projects=["p"]))
+    assert request.base_model == "dh-unibe/trocr-kurrent"
+
+
+def test_the_guard_treats_a_trocr_job_as_the_fine_tune_it_is():
+    from atr_serving.training.convergence import floor_for
+
+    assert floor_for("trocr", from_scratch=False) == 500

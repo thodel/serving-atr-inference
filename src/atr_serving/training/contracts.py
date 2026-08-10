@@ -39,6 +39,10 @@ KRAKEN_PLUS_SPEC = (
 # to run here — vLLM 0.11 would need the whole card.
 VLM_BASE_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 
+#: TrOCR fine-tunes always start from a pretrained encoder-decoder; there is no
+#: from-scratch case. Mirrors VLM_BASE_MODEL so the two backends read alike.
+TROCR_BASE_MODEL = "microsoft/trocr-base-handwritten"
+
 #: Instruction given to the VLM for every training and evaluation example. It is
 #: stored on the trained ModelSpec (``prompt``) so serving replays exactly the
 #: wording the model was tuned on — a different prompt at inference is a silent
@@ -325,8 +329,10 @@ class TrOCRTrainParams(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     # ── model ────────────────────────────────────────────────────────────────
-    #: TrOCR is a fine-tune only — a base model is always required.
-    base_model: str = "microsoft/trocr-base-handwritten"
+    #: TrOCR is a fine-tune only — a base model is always required. Copied up to
+    #: ``TrainRequest.base_model`` at validation, which is what the runner and the
+    #: step-count guard read.
+    base_model: str = TROCR_BASE_MODEL
 
     # ── seq2seq optimisation ─────────────────────────────────────────────────
     epochs: int = Field(default=3, ge=1)
@@ -462,6 +468,16 @@ class TrainRequest(BaseModel):
             )
         if self.engine == "vllm" and not self.base_model:
             object.__setattr__(self, "base_model", VLM_BASE_MODEL)
+        if self.engine == "trocr" and not self.base_model:
+            # TrOCR is a fine-tune only, and its base sat on the *params* model
+            # while the runner and the convergence guard both read
+            # ``request.base_model``. Left unfilled, a submitted job passed
+            # ``--base-model None`` to the training script, and #72 judged it
+            # "from scratch" — the 2,000-step floor rather than the 500 a
+            # fine-tune needs. One field is the source of truth; params supplies
+            # the default.
+            object.__setattr__(self, "base_model",
+                               getattr(self.params, "base_model", TROCR_BASE_MODEL))
         return self
 
 
