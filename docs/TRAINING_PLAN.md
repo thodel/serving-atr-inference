@@ -188,6 +188,23 @@ parsable metric is `failed`, not `completed`.
 
 ### 3a. Training recipe — `kraken+`
 
+> **These defaults assume a corpus of millions of lines.** They are the from-scratch
+> recipe for the full `medieval-scripts` selection (~18 M lines), and applying them to
+> a small corpus does not merely train a worse model — it trains no model at all.
+>
+> `batch_size: 256` over 1,878 training lines is **7 steps per epoch**; at the default
+> 50 epochs that is **367 optimizer steps** for a 15.2 M-parameter network from random
+> weights, with `1cycle` ramping and annealing the learning rate across all of them.
+> That is what produced `kraken-thun-missiven-v1` at CER 0.98 with 11,191 insertions
+> and 2 deletions (§9): an unconverged CTC network has not learned blank-dominance and
+> emits a character at nearly every timestep.
+>
+> **Below ~100 K lines, fine-tune instead.** Set `base_model` to a registry id or a
+> Zenodo DOI and `resize: "union"`; `train_cmd` then emits `--load … --resize union`
+> and omits `--spec`, which kraken ignores when loading anyway. Scale `batch_size` to
+> the corpus as well — a useful floor is a few hundred optimizer steps *per epoch*,
+> not per run.
+
 The architecture and hyperparameters to use, as specified:
 
 ```
@@ -428,9 +445,9 @@ things about it are worth knowing here, because they changed shared code:
 
 Two kraken runs and one VLM run have completed end to end on asterAIx. The pipeline
 works — jobs queue, train, score and register unattended, and a failure lands on the
-record with its reason. **The models it produced are not usable, and the reason is not
-yet established.** This section states what was measured rather than what was hoped,
-because the numbers below are the evidence three open issues rest on.
+record with its reason. **The models it produced are not usable**; §9a establishes why.
+This section states what was measured rather than what was hoped, because the numbers
+below are the evidence several open issues rest on.
 
 | run | job | CER | insertions | deletions | substitutions |
 |---|---|---|---|---|---|
@@ -448,16 +465,66 @@ thing and the score is not a test-time artefact.
 **Every model tried, CTC and autoregressive alike, emits more characters than the
 reference contains.** Deletions are 2 and 48; insertions are 11,191 and 5,381; the
 un-adapted VLM base scores a CER above 1, which is only reachable by over-emitting.
-That is one signature across two architectures on one eval set, and it admits two
+That is one signature across two architectures on one eval set, and it admitted two
 readings with opposite fixes — a training-design problem (mixed corpora, alien eval
 set) or an eval-material problem (line crops paired with short or offset references).
-Validation cannot separate them, since both stages read the same data.
+Validation could not separate them, since both stages read the same data. §9a does.
 
-**#52 settles it** by scoring a published Zenodo model — one that has never seen this
-corpus, and therefore does not depend on our pipeline being right — on the same
-material. Until it does, no CER in this repo should be quoted, compared across runs, or
-published: `scripts/publish_to_hub.py` is deliberately a manual step for this reason,
-and nothing has been pushed to the hub.
+### 9a. Resolved (2026-08-08): the runs were under-configured
+
+Both readings were tested, the cheap one first.
+
+**The eval material is sound.** `scripts/audit_eval_material.py` measures line width per
+reference character straight from the PageXML prepare already wrote — no GPU, no model,
+no download. On the Thun eval split:
+
+```
+pages 12   lines 189   characters 11,502
+chars/line   mean 60.9   p50 66
+px per char  mean 13.5   p50 12.15   p95 17.65    (plausible 6–60)
+implausible  3 lines (1.6%)
+```
+
+Handwriting at these scan resolutions runs 10–40 px per character, and this material
+sits squarely inside that. Two of the three outliers turned out to be **vertical** lines
+(64×310 px, 51×399 px — marginalia or rotated regions) that the first version of the
+heuristic measured *across* rather than *along*; it now uses the longer side. So the
+references are the right length for their crops, and no reading that blames the ground
+truth survives.
+
+**The training configuration is the cause.** `kraken-thun-missiven-v1`:
+
+| | |
+|---|---|
+| `base_model` | `null` — **from scratch** |
+| lines | 2,087 → ~1,878 training after `partition: 0.9` |
+| `batch_size` | 256 → **7 steps per epoch** |
+| `epochs` | 50 → **~367 optimizer steps total** |
+| network | 15.2 M parameters, random initialisation |
+| schedule | `1cycle`, ramping and annealing across those 367 steps |
+
+An unconverged CTC network has not yet learned blank-dominance: its per-timestep
+distribution is near-uniform, so greedy decoding emits a character at almost every
+timestep. The kraken+ spec downsamples width by 8, so the median 806 px line yields
+roughly 100 timesteps against a 66-character reference — a hypothesis about twice the
+reference length, which is exactly the 11,191-insertions/2-deletions signature. A
+*converged* CTC model cannot over-generate this way; a *collapsed* one emits blanks and
+scores deletions. Only the middle state does this.
+
+`kraken-medieval-scripts-v1` sits on the same curve from the other side: more data, CER
+0.707 rather than 0.984, insertions still dominant. The VLM run is a different mechanism
+with the same surface symptom — an instruct model that does not stop at the line
+(`docs/VLM_TRAINING.md`).
+
+**What to do differently** is in §3a: fine-tune from a base below ~100 K lines, and
+scale `batch_size` to the corpus. **What to build** is a guard: `lines / batch_size ×
+epochs` is computable the moment prepare reports a line count, and refusing — or at
+least warning — at "this configuration will take 367 optimizer steps" would have saved
+two runs and two days. That is the remaining scope of #52.
+
+Until a run is configured to converge, no CER in this repo should be quoted, compared
+across runs, or published: `scripts/publish_to_hub.py` is deliberately a manual step for
+this reason, and nothing has been pushed to the hub.
 
 Two further findings came out of the same runs:
 

@@ -38,11 +38,10 @@ base. Most of that gap is the model learning to stop at the line rather than lea
 read — see [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md), which states the caveat
 alongside the number.
 
-### The pipeline runs; its numbers are not yet trustworthy
+### The pipeline runs; the first three runs were under-configured
 
-Three runs have completed end to end. None produced a usable model, and **why** is an
-open question rather than a known answer — [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) §9
-records the measurements in full:
+Three runs completed end to end and none produced a usable model.
+[`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) §9 records the measurements:
 
 | run | CER | insertions | deletions |
 |---|---|---|---|
@@ -50,24 +49,43 @@ records the measurements in full:
 | `kraken-medieval-scripts-v1` | 0.7074 | 5,381 | 48 |
 | `qwen3vl-thun-smoke` | 0.466 (base 1.837) | — | — |
 
-Every model tried, CTC and autoregressive alike, **emits more characters than the
-reference contains** — one signature across two architectures on one eval set. That is
-either a training-design problem (mixed corpora scored on an alien eval set) or an
-eval-material problem (crops paired with short or offset references), and validation
-cannot tell them apart because both stages read the same data. **#52** settles it by
-scoring a published Zenodo model — one that never saw this corpus — on the same
-material. Until it does, no CER here should be quoted, compared across runs, or
-published, and nothing has been pushed to the hub.
+Every model, CTC and autoregressive alike, **emitted more characters than the reference
+contains**. Two candidate explanations were on the table (#52): eval material paired
+with short or offset references, or a training-design problem. It is the second, and
+the arithmetic is unambiguous:
+
+> `kraken-thun-missiven-v1` trained **from scratch** on 2,087 lines. With
+> `partition: 0.9` that is ~1,878 training lines; at `batch_size: 256` it is **7 steps
+> per epoch**, and over 50 epochs **~367 optimizer steps** for a 15.2 M-parameter
+> network starting from random weights. `--schedule 1cycle` then ramps and anneals the
+> learning rate across those 367 steps, so it never reaches a productive rate.
+
+An unconverged CTC network has not yet learned blank-dominance and emits a character at
+nearly every timestep — which *is* an insertion-dominated CER. The defaults are correct
+for the ~18 M-line corpus they were written against and wrong by three orders of
+magnitude for 1,878 lines.
+
+**The eval material was audited and is sound**: `scripts/audit_eval_material.py` on the
+Thun split reports a median of 12.15 px of line per reference character over 189 lines,
+98.4 % within the plausible band. It needs no GPU and runs against the PageXML the
+prepare stage already wrote — run it on any job before believing its CER.
+
+What follows for anyone submitting a job: **on a small corpus, fine-tune rather than
+train from scratch** (`base_model` accepts a registry id or a Zenodo DOI and produces
+`ketos train --load … --resize union`), **and scale `batch_size` to the corpus**. None
+of these three CERs should be quoted; nothing has been pushed to the hub.
 
 Open work is grouped into three epics:
 
-- **#49** — the training subsystem from "it runs" to "it is trustworthy": eval
-  validation #52 (**blocks the interpretation of every CER above**), metric
-  decomposition #55, 1..n datasets #40, chunked prepare #39, line-level sources
-  #45, runbook + eval #37.
+- **#49** — the training subsystem from "it runs" to "it is trustworthy": #52 is
+  diagnosed and what remains of it is a **step-count guard at submit** (`lines /
+  batch_size × epochs` is computable the moment prepare reports a line count, and
+  "this configuration will take 367 optimizer steps" would have saved two runs);
+  then metric decomposition #55, 1..n datasets #40, chunked prepare #39, line-level
+  sources #45, runbook + eval #37.
 - **#41** — TrOCR fine-tuning as the third backend: #42 (shared cropping) → #43
-  (contracts + argv) → #44 (the engine). In practice #52 should land first, or a
-  third backend risks reproducing the same unexplained result a third time.
+  (contracts + argv) → #44 (the engine). No longer blocked — the three bad CERs are
+  explained, so a third backend will not inherit an unexplained result.
 - **#48** — deployment robustness. Its two concrete children landed (#53 version
   assertions in the venv smoke test, #54 an environment check); the epic stays open
   because the pattern behind them — five failure modes in two days, every one the
@@ -81,9 +99,11 @@ the strength of it.
 Every surprise so far has had one shape: **something assumed, nothing checked, the
 failure surfacing far from its cause.** The rule this subsystem already enforces — *no
 silent success; a job with no readable CER is failed, not completed* — is that instinct
-applied to results, and it held: all three runs completed honestly. #52 is the same
-instinct applied to inputs, because an honest number is not automatically a meaningful
-one.
+applied to results, and it held: all three runs completed honestly and reported real
+numbers. What #52 showed is that **an honest number is not automatically a meaningful
+one**: nothing between "submit" and "completed" asked whether the configuration could
+possibly learn anything. The guards that exist protect the disk, the GPU, the
+filesystem and the reporting; the next ones have to protect the *experiment*.
 
 ## Quickstart (dev)
 
