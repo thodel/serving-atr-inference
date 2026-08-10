@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
 
@@ -96,14 +98,35 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
 async def health(request: Request) -> HealthResponse:
     registry = _registry(request)
     settings = _settings(request)
-    # service_urls() = recognition engines + the trainer (:8204, #35)
-    engines = [EngineStatus(name=n, url=u) for n, u in settings.service_urls().items()]
+    # Probe each engine's /health in parallel; mark unreachable engines so
+    # downstream consumers can plan around them instead of burning round-trips
+    # on engines that are down (#30). vLLM instances are transient (one per
+    # resident model) and are not probed here — they are tracked via
+    # ``resident_model_ids()`` instead.
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        async def _probe(name: str, url: str) -> EngineStatus:
+            try:
+                r = await client.get(f"{url}/health")
+                return EngineStatus(name=name, url=url, reachable=r.status_code < 500)
+            except Exception:
+                return EngineStatus(name=name, url=url, reachable=False)
+
+        # service_urls(), not engine_urls(): the trainer (:8204) is a service the
+        # gateway fronts and #35 put it in /health on purpose. Training is
+        # fire-and-forget, so "is atr-train up" is exactly the question /health
+        # should answer — and it has a /health of its own to answer it. vLLM
+        # instances are transient (one per resident model) and are tracked
+        # through resident_model_ids() rather than probed.
+        engine_urls = settings.service_urls()
+        probe_tasks = [_probe(n, u) for n, u in engine_urls.items()]
+        results = await asyncio.gather(*probe_tasks)
+
     return HealthResponse(
         status="ok",
         version=__version__,
         model_count=len(registry),
         resident_models=_manager(request).resident_model_ids(),
-        engines=engines,
+        engines=list(results),
     )
 
 
