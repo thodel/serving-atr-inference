@@ -189,7 +189,7 @@ runs the job on GPU 1, and registers the result in the gitignored overlay regist
 
 | `engine` | what it trains | venv | docs |
 |---|---|---|---|
-| `kraken` | recognition models via `ketos`, from scratch or fine-tuned from Zenodo | `.venvs/kraken-train` | [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) |
+| `kraken` | recognition models via `ketos`, from scratch or fine-tuned from Zenodo | `.venvs/kraken-train` | [`docs/TRAINING.md`](docs/TRAINING.md) (runbook) · [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) (plan) |
 | `vllm` | QLoRA fine-tunes of a Qwen3-VL base | `.venvs/vlm-train` | [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md) |
 | `trocr` | *planned* — epic **#41** | | |
 
