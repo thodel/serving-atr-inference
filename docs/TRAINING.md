@@ -161,6 +161,20 @@ The response is `202` with the job id:
 > reference character, 98.4 % in band). See README §"the first three runs were
 > under-configured" and `docs/TRAINING_PLAN.md` §9a.
 
+### 3a-bis. TrOCR (`"engine": "trocr"`)
+
+A third backend, added in #44. It fine-tunes a TrOCR base on line crops — the
+same `prepare` stage, the same job envelope, its own venv (`.venvs/trocr-train`)
+because the serving TrOCR engine and this one pin `transformers` differently.
+
+```bash
+bash scripts/make_venvs.sh trocr-train
+```
+
+The package is `trocr_train_svc`, not `trocraft_train_svc`: the naming is
+recorded in that package's docstring, and the argv builders that spawn it live
+in `src/atr_serving/training/trocr_cmd.py` (#43).
+
 ### 3b. Fine-tuning from a Zenodo base model
 
 ```json
