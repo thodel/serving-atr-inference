@@ -582,3 +582,23 @@ def test_the_curve_is_served_once_written(client):
     assert body["best"] == {"epoch": 50, "val_metric": 0.92}
     assert body["still_improving"] is True
     assert body["complete"] is False        # top-10 only; never claims otherwise
+
+
+def test_every_dataset_is_verified_not_only_the_first(client, app):
+    """Checking one of three and answering "valid" is the same class of mistake
+    the guard exists to prevent."""
+    seen = []
+
+    def check(spec, settings):
+        seen.append(spec.hf_repo)
+        return ["project 'typo' not found"] if spec.hf_repo.endswith("second") else []
+
+    app.state.verify_spec = check
+    body = {**BODY, "datasets": [{"hf_repo": "dh-unibe/first", "train_projects": ["a"]},
+                                 {"hf_repo": "dh-unibe/second", "train_projects": ["b"]}]}
+    body.pop("dataset", None)
+    resp = client.post("/jobs/verify", json=body)
+
+    assert seen == ["dh-unibe/first", "dh-unibe/second"]
+    assert resp.json()["valid"] is False
+    assert "dh-unibe/second" in resp.json()["errors"][0]   # which one, not just what

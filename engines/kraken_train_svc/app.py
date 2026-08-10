@@ -355,13 +355,22 @@ def _verify(request: TrainRequest) -> dict:
     ``{valid: true,  checked: false}``  the hub could not be reached; unknown
     """
     check = getattr(app.state, "verify_spec", None) or verify_dataset_spec
-    try:
-        errors = check(request.dataset, _settings())
-    except DatasetSelectionError as exc:
-        return {"valid": False, "checked": True, "errors": [str(exc)]}
-    except VerificationUnavailable as exc:
-        return {"valid": True, "checked": False, "errors": [],
-                "unverified_reason": f"the hub could not be reached: {exc}"}
+    errors: list[str] = []
+    # Every dataset, not just the first (#40). Checking one of three and reporting
+    # "valid" would be the same class of mistake the guard exists to prevent — and
+    # each error is prefixed, because "project 'x' not found" is not actionable
+    # when the job named three repos.
+    for spec in request.datasets:
+        try:
+            found = check(spec, _settings())
+        except DatasetSelectionError as exc:
+            return {"valid": False, "checked": True,
+                    "errors": [f"{spec.hf_repo}: {exc}"]}
+        except VerificationUnavailable as exc:
+            return {"valid": True, "checked": False, "errors": [],
+                    "unverified_reason": f"the hub could not be reached: {exc}"}
+        errors += ([f"{spec.hf_repo}: {e}" for e in found]
+                   if len(request.datasets) > 1 else found)
     return {"valid": not errors, "checked": True, "errors": errors}
 
 

@@ -22,7 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from atr_serving.training.contracts import DatasetSpec
+from atr_serving.training.contracts import (
+    DatasetNotOnHub,
+    DatasetSelectionError,
+    DatasetSpec,
+    ProjectListingError,
+)
 
 if TYPE_CHECKING:
     from atr_serving.training.settings import TrainerSettings
@@ -37,11 +42,13 @@ __all__ = [
     "PROJECT_COLUMNS",
     "TEXT_COLUMNS",
     "data_files_for",
+    "expand_all_projects",
     "granularity_files",
     "hub_cache_dir",
-    "project_glob",
+    "list_projects",
     "page_stem",
     "pick_column",
+    "project_glob",
     "row_to_page",
     "row_to_line",
     "verify_dataset_spec",
@@ -63,12 +70,12 @@ IMAGE_COLUMNS = ("image",)
 TEXT_COLUMNS = ("text", "transcription", "content")
 
 
-class DatasetSelectionError(ValueError):
-    """Raised when a DatasetSpec selects nothing, or something unsafe."""
-
-
-class DatasetNotOnHub(LookupError):
-    """The repo (or the pinned revision) is not there. A fact about the spec."""
+# DatasetSelectionError and DatasetNotOnHub live in contracts (#40 moved them
+# there so DatasetSpec's own validators can raise them) and are imported above.
+# They were *also* still defined here, which meant two distinct classes sharing a
+# name: `except DatasetSelectionError` in one module would not catch the other's,
+# and which one you got depended on where you imported from. Re-exported through
+# __all__ so `from ...hf_source import DatasetSelectionError` keeps working.
 
 
 class VerificationUnavailable(RuntimeError):
@@ -102,28 +109,101 @@ def project_glob(split: str, project: str) -> str:
     return f"data/{split}/{project}/*.parquet"
 
 
+def list_projects(hf_repo: str, split: str, revision: str | None = None) -> list[str]:
+    """Enumerate project directories under ``data/<split>/`` on the hub.
+
+    One HTTP call via the hub's ``list_repo_files`` API — no data downloaded.
+    Returns bare directory names (no ``data/<split>/`` prefix). Raises
+    :class:`ProjectListingError` on network failure. An empty list is returned
+    as-is (caller decides whether that is an error).
+    """
+    from huggingface_hub import HfApi
+
+    try:
+        prefix = f"data/{split}/"
+        files = HfApi().list_repo_files(
+            hf_repo, revision=revision, repo_type="dataset"
+        )
+        dirs = sorted(
+            {
+                f[len(prefix):].split("/")[0]
+                for f in files
+                if f.startswith(prefix) and "/" in f[len(prefix):]
+            }
+        )
+        return dirs
+    except Exception as exc:  # noqa: BLE001
+        raise ProjectListingError(
+            f"could not list projects for {hf_repo}/{split}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def expand_all_projects(spec: DatasetSpec) -> DatasetSpec:
+    """Expand ``all_projects: True`` to the enumerated project list.
+
+    One round-trip to enumerate the hub directory. Returns a *new* DatasetSpec
+    with ``all_projects`` cleared and ``train_projects`` filled in.
+    """
+    if not spec.all_projects:
+        return spec
+    projects = list_projects(spec.hf_repo, spec.split, spec.revision)
+    if not projects:
+        raise DatasetSelectionError(
+            f"all_projects=true for {spec.hf_repo}/{spec.split} returned no project "
+            "directories — is this dataset laid out as ``data/<split>/<project>/``?"
+        )
+    import copy
+
+    expanded = copy.deepcopy(spec)
+    # Clear all_projects so downstream code sees the explicit list
+    object.__setattr__(expanded, "all_projects", False)
+    expanded.train_projects = projects
+    return expanded
+
+
 def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
     """Map role → ``data_files`` globs.
 
     Returns ``{"train": [...]}`` and, when ``eval_projects`` is set, also
-    ``{"eval": [...]}``. Never returns an empty mapping: a spec that selects no
-    project raises, because the fallback would be "download the entire repo".
+    ``{"eval": [...]}``. Never returns an empty mapping for a spec with projects:
+    a spec that selects no project raises, because the fallback would be
+    "download the entire repo".
+
+    When ``spec.all_projects`` is True the spec is expanded first (one hub
+    round-trip), then resolved as normal. When neither ``train_projects`` nor
+    ``all_projects`` is set, the whole split is selected (for datasets that
+    have no project directories).
     """
-    if not spec.train_projects:
+    resolved = expand_all_projects(spec) if spec.all_projects else spec
+
+    if not resolved.train_projects:
+        # Restored guard (docs/TRAINING_PLAN.md §1): an empty selection must never
+        # silently mean "everything". #40 made this the whole split, which is
+        # inconsistent with its own `all_projects` — that path requires max_pages,
+        # so the *explicit* way to ask for everything is capped while the implicit
+        # one was not. It also fails far from its cause: on a repo laid out as
+        # data/<split>/<project>/, `data/<split>/*.parquet` matches nothing, so the
+        # job dies pages later with an empty stream instead of here with a reason.
         raise DatasetSelectionError(
-            f"DatasetSpec for {spec.hf_repo!r} selects no train_projects. Refusing to "
-            "load the whole repository — it is far larger than the disk (see "
-            "docs/TRAINING_PLAN.md §1)."
+            f"DatasetSpec for {resolved.hf_repo!r} selects no train_projects. Name "
+            "the projects, or set `all_projects: true` (which requires `max_pages`) "
+            "to train on everything deliberately. A line-level dataset has no "
+            "project directories and is selected with `granularity: \"line\"`."
         )
-    overlap = sorted(set(spec.train_projects) & set(spec.eval_projects))
-    if overlap:
-        raise DatasetSelectionError(
-            f"projects appear in both train and eval: {overlap}. That leaks evaluation "
-            "pages into training."
-        )
-    files = {"train": [project_glob(spec.split, p) for p in spec.train_projects]}
-    if spec.eval_projects:
-        files["eval"] = [project_glob(spec.split, p) for p in spec.eval_projects]
+    else:
+        overlap = sorted(set(resolved.train_projects) & set(resolved.eval_projects))
+        if overlap:
+            raise DatasetSelectionError(
+                f"projects appear in both train and eval: {overlap}. That leaks evaluation "
+                "pages into training."
+            )
+        files = {
+            "train": [project_glob(resolved.split, p) for p in resolved.train_projects]
+        }
+
+    if resolved.eval_projects:
+        files["eval"] = [project_glob(resolved.split, p) for p in resolved.eval_projects]
     return files
 
 

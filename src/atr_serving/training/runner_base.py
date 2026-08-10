@@ -31,7 +31,15 @@ from typing import Any, ClassVar, Protocol
 
 from loguru import logger
 
-from atr_serving.training.contracts import JobStage, Metrics, StageRecord, TrainJob, utcnow
+from atr_serving.training.contracts import (
+    DatasetCounts,
+    DatasetSelectionError,
+    JobStage,
+    Metrics,
+    StageRecord,
+    TrainJob,
+    utcnow,
+)
 from atr_serving.training.convergence import check_convergence
 from atr_serving.training.hf_source import data_files_for, granularity_files
 from atr_serving.training.jobstore import JobStore
@@ -158,17 +166,26 @@ class BasePipeline(ABC):
         towerbooks). No page files are written; a JSONL manifest is produced
         instead and the page-level train/val split is skipped (the lines ARE the
         samples, not an intermediate representation).
+
+        When multiple datasets are given, pages from all sources are accumulated
+        into **one** page pool with a per-dataset index offset. Page stems carry
+        that index, so uniqueness across the pool is guaranteed.
         """
         paths = self.store.paths(job.id)
-        spec = job.request.dataset
+        datasets = job.request.datasets
 
-        if spec.granularity == "line":
-            return self._prepare_lines(job, spec, paths)
-        else:
-            return self._prepare_pages(job, spec, paths)
+        if len(datasets) == 1:
+            spec = datasets[0]
+            if spec.granularity == "line":
+                return self._prepare_lines_single(job, spec, paths)
+            else:
+                return self._prepare_pages_single(job, spec, paths)
 
-    def _prepare_pages(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
-        """Page-level materialize + split (original behaviour, preserved exactly)."""
+        # Multi-dataset: page-level only for now (line-level multi-dataset is TBD).
+        return self._prepare_multi(job, datasets, paths)
+
+    def _prepare_pages_single(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
+        """Page-level materialize + split for one dataset (original behaviour)."""
         files = data_files_for(spec)
 
         train_set = materialize(
@@ -178,6 +195,15 @@ class BasePipeline(ABC):
         )
         job.progress.pages_written = train_set.pages_written
         job.progress.lines_written = train_set.lines
+        job.progress.dataset_counts = [
+            DatasetCounts(
+                hf_repo=spec.hf_repo,
+                pages_written=train_set.pages_written,
+                pages_skipped=train_set.pages_skipped,
+                lines=train_set.lines,
+                chars=train_set.chars,
+            )
+        ]
         # Held separately from lines_written, which goes on to include the eval
         # side: the step-count guard (#72) divides by the lines actually trained
         # on, and counting the held-out ones would flatter every configuration.
@@ -194,6 +220,10 @@ class BasePipeline(ABC):
             val_pages = [str(p) for p in eval_set.xml_paths]
             job.progress.pages_written += eval_set.pages_written
             job.progress.lines_written += eval_set.lines
+            job.progress.dataset_counts[0].pages_written += eval_set.pages_written
+            job.progress.dataset_counts[0].pages_skipped += eval_set.pages_skipped
+            job.progress.dataset_counts[0].lines += eval_set.lines
+            job.progress.dataset_counts[0].chars += eval_set.chars
         else:
             train_pages, val_pages = split_pages(
                 [str(p) for p in train_set.xml_paths], spec.partition, spec.seed
@@ -209,7 +239,7 @@ class BasePipeline(ABC):
         logger.info("prepared {} train / {} val pages", len(train_pages), len(val_pages))
         return train_manifest, val_manifest
 
-    def _prepare_lines(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
+    def _prepare_lines_single(self, job: TrainJob, spec, paths) -> tuple[Path, Path]:
         """Line-level source: rows are already crops, so nothing is cropped.
 
         The rows are written to one pool and then split into **disjoint** train
@@ -239,6 +269,13 @@ class BasePipeline(ABC):
         job.progress.lines_written = pool.samples_written
         job.progress.train_lines = round(pool.samples_written * spec.partition)
         job.progress.pages_written = None
+        job.progress.dataset_counts = [
+            DatasetCounts(
+                hf_repo=spec.hf_repo,
+                samples_written=pool.samples_written,
+                chars=pool.chars,
+            )
+        ]
         self.store.save(job)
 
         logger.info("prepared {} line samples → {} / {}",
@@ -286,6 +323,86 @@ class BasePipeline(ABC):
             return
 
         raise StageFailed(verdict.reason)
+    def _prepare_multi(
+        self, job: TrainJob, specs: list, paths
+    ) -> tuple[Path, Path]:
+        """Multi-dataset materialize: one pool with per-dataset index offsets.
+
+        Projects with ``eval_projects`` set contribute dedicated eval pages.
+        Projects without eval are split page-level from their train pages.
+        The seeded split uses the seed from the first dataset (conventional
+        behaviour; a multi-dataset run has one seed).
+        """
+        all_train_xml: list[str] = []
+        all_val_xml: list[str] = []
+        total_pages_written = 0
+        total_lines_written = 0
+        dataset_counts: list[DatasetCounts] = []
+
+        for spec in specs:
+            files = data_files_for(spec)
+
+            train_set = materialize(
+                self.source.stream(spec.hf_repo, files["train"], spec.revision),
+                paths.pages, role="train", max_pages=spec.max_pages,
+                start_index=total_pages_written,
+                min_free_disk_gb=self.settings.min_free_disk_gb,
+            )
+            train_page_paths = [str(p) for p in train_set.xml_paths]
+
+            dc = DatasetCounts(
+                hf_repo=spec.hf_repo,
+                pages_written=train_set.pages_written,
+                pages_skipped=train_set.pages_skipped,
+                lines=train_set.lines,
+                chars=train_set.chars,
+            )
+
+            if "eval" in files:
+                # Eval pages materialised with offset after all train pages so far.
+                eval_start = total_pages_written + train_set.pages_skipped
+                eval_set = materialize(
+                    self.source.stream(spec.hf_repo, files["eval"], spec.revision),
+                    paths.pages, role="eval", max_pages=spec.max_pages,
+                    start_index=eval_start,
+                    min_free_disk_gb=self.settings.min_free_disk_gb,
+                )
+                all_train_xml.extend(train_page_paths)
+                all_val_xml.extend(str(p) for p in eval_set.xml_paths)
+                dc.pages_written += eval_set.pages_written
+                dc.pages_skipped += eval_set.pages_skipped
+                dc.lines += eval_set.lines
+                dc.chars += eval_set.chars
+                total_pages_written += train_set.pages_written + eval_set.pages_written
+            else:
+                # No eval projects: split train pages into train/val.
+                subset_train, subset_val = split_pages(
+                    train_page_paths, spec.partition, spec.seed
+                )
+                all_train_xml.extend(subset_train)
+                all_val_xml.extend(subset_val)
+                total_pages_written += train_set.pages_written
+
+            total_lines_written += train_set.lines
+            dataset_counts.append(dc)
+
+        if not all_train_xml:
+            raise DatasetSelectionError(
+                f"multi-dataset run: no usable pages found across {len(specs)} datasets"
+            )
+
+        job.progress.pages_written = total_pages_written
+        job.progress.lines_written = total_lines_written
+        job.progress.dataset_counts = dataset_counts
+        self.store.save(job)
+
+        train_manifest = write_manifest(paths.data / "pages_train.lst", all_train_xml)
+        val_manifest = write_manifest(paths.data / "pages_val.lst", all_val_xml)
+        logger.info(
+            "prepared {} train / {} val pages across {} datasets",
+            len(all_train_xml), len(all_val_xml), len(specs)
+        )
+        return train_manifest, val_manifest
 
     # ── the stages a backend supplies ───────────────────────────────────────
     @abstractmethod
