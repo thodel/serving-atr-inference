@@ -194,4 +194,24 @@ async def ocr(
 # Startup log
 # ---------------------------------------------------------------------------
 
+# Warm-up model: load the first-listed model at startup so the first production
+# request does not pay download + load latency. Cold-starting on a first request
+# is what caused the gateway timeout for ``trocr-medieval-escriptmask`` in #30.
+# The other two models are lazy (load on first use); 1.5 GB VRAM for the warm
+# model is an acceptable fixed cost vs. a potential gateway timeout per request.
+_WARM_MODEL = TROCR_MODELS[0]
+
+
+@app.on_event("startup")
+async def _warmup():
+    global _resident_model_id, _resident_model, _processor
+    try:
+        logger.info("Warm-up: pre-loading {} ...", _WARM_MODEL)
+        _resident_model, _processor = _resolve_model(_WARM_MODEL)
+        _resident_model_id = _WARM_MODEL
+        logger.success("Warm-up done: {} resident", _WARM_MODEL)
+    except Exception as exc:  # noqa: BLE001 — keep the service up; /health reports the state
+        logger.warning("Warm-up of {} failed (models will load on first request): {}", _WARM_MODEL, exc)
+
+
 logger.info("ATR TrOCR Engine initialising — listening on 127.0.0.1:8202")
