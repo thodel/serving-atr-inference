@@ -28,7 +28,9 @@ units (`deploy/systemd/`). What is done, and what the open issues still cover:
 | kraken backend (`ketos`) | done; has produced real models |
 | VLM backend (QLoRA on Qwen3-VL) | done, and **verified on GPU end to end** (#47) — see the measured run below |
 | serving what we trained | done (#36) — `local_path` specs, the overlay merged into `/models`, and a promotion gate that advertises only what has actually transcribed a page |
+| per-epoch metrics — `GET /train/jobs/{id}/curve` | done (#38/#51) — read off checkpoint filenames, since ketos' metrics never reach the log |
 | publishing trained models to HuggingFace | done (`scripts/publish_to_hub.py`) |
+| **are any of the numbers meaningful?** | **open (#52)** — see below; this gates the interpretation of every CER here |
 
 First full VLM run (2026-08-08, Thun demo pair, `max_pages: 40`, 1 epoch): 52 pages →
 783 line crops, 38 steps in 5 min, **CER 0.466** against **1.837** for the un-adapted
@@ -61,17 +63,20 @@ Open work is grouped into three epics:
 
 - **#49** — the training subsystem from "it runs" to "it is trustworthy": eval
   validation #52 (**blocks the interpretation of every CER above**), metric
-  decomposition #55, per-epoch metrics #38 and the `rich` constraint on it #51 (both
-  landed), `trained_root` orphans #50, 1..n datasets #40, chunked
-  prepare #39, line-level sources #45, runbook + eval #37.
+  decomposition #55, 1..n datasets #40, chunked prepare #39, line-level sources
+  #45, runbook + eval #37.
 - **#41** — TrOCR fine-tuning as the third backend: #42 (shared cropping) → #43
   (contracts + argv) → #44 (the engine). In practice #52 should land first, or a
   third backend risks reproducing the same unexplained result a third time.
-- **#48** — deployment robustness: version assertions in the venv smoke test #53,
-  an environment check #54. Five failure modes in two days, all of them the shell
-  and the service having drifted apart.
+- **#48** — deployment robustness. Its two concrete children landed (#53 version
+  assertions in the venv smoke test, #54 an environment check); the epic stays open
+  because the pattern behind them — five failure modes in two days, every one the
+  shell and the service having drifted apart — is not closed by two scripts.
 
-#30 and #32 remain open from production.
+**#30** remains open from production: three of seven engines were returning 500s in
+July. #32 — the one diagnosed cause, party unable to load its safetensors — is fixed
+in code but the restart that proves it has not happened, so #30 cannot be closed on
+the strength of it.
 
 Every surprise so far has had one shape: **something assumed, nothing checked, the
 failure surfacing far from its cause.** The rule this subsystem already enforces — *no

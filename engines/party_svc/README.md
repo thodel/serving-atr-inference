@@ -13,13 +13,19 @@
 The model is downloaded on first startup if not already cached, then kept
 permanently in memory for low-latency inference.
 
+The Zenodo release ships **`model.safetensors`**, and this service used to load it
+with `kraken.lib.models.load_any`, which is CoreML-only in kraken 7.0.2 — so it
+failed at startup with `KrakenInvalidModelException` and `/health` reported
+`degraded` (**#32**, one of the three engines in **#30**). Loading now goes
+through `atr_serving.kraken_loader` → `kraken.models.load_models`, which
+dispatches on the file. Verify after a restart: `/health` must say `ok`, not
+`degraded`.
+
 ## Install
 
 ```bash
-# One-time venv creation (also handled by scripts/make_venvs.sh)
-python3.12 -m venv .venvs/party
-.venvs/party/bin/pip install --upgrade pip
-.venvs/party/bin/pip install -r engines/party_svc/requirements.txt
+cd ~/Repo/serving-atr-inference
+bash scripts/make_venvs.sh party
 ```
 
 ## Run
@@ -34,14 +40,16 @@ python3.12 -m venv .venvs/party
 
 ## Systemd (production)
 
+asterAIx has **no passwordless sudo** and the docker socket is denied, so every
+engine runs as a `systemctl --user` unit:
+
 ```bash
-cp deploy/systemd/atr-party.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now atr-party
+bash scripts/install_user_units.sh
+systemctl --user enable --now atr-party
 ```
 
-**GPU affinity:** Set `CUDA_VISIBLE_DEVICES=1` in the service environment
-(the systemd unit already does this). The service will use GPU 1 for inference.
+**GPU affinity:** the unit sets `CUDA_VISIBLE_DEVICES=1`, so the service uses
+GPU 1 — GPU 0 belongs to the box's RAG service and stays untouched.
 
 ## API
 

@@ -30,6 +30,14 @@ CUDA_VISIBLE_DEVICES=1 .venvs/vllm/bin/vllm serve <hf_repo> \
 Tunables live in `Settings` (`vllm_*`): GPU index, port base, VRAM budget,
 memory utilization, max-model-len, startup timeout.
 
+## Locally fine-tuned adapters
+The training service can QLoRA-fine-tune a Qwen3-VL base (`engine: "vllm"`), but
+vLLM 0.11 **will not serve the adapter**: it refuses a LoRA that touches the
+vision tower ("only supports adding LoRA to language model"). `scripts/merge_loras.py`
+bakes an adapter into its base, and the manager serves the merged directory if
+present. This is why a VLM training job never passes the promotion gate (#36) and
+says so on its record, rather than being advertised in `/models` unserved.
+
 ## Use
 - `POST /recognize` with a vLLM `model` id (page → one call; line → segmented).
 - `POST /v1/chat/completions` — OpenAI passthrough; the manager makes the model

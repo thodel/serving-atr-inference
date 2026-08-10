@@ -6,23 +6,37 @@ for ATR/OCR and layout analysis.
 ## What it does
 
 - **`POST /segment`** – layout analysis via kraken's `blla` segmenter. Returns line bounding boxes and baselines.
-- **`POST /recognize`** – OCR/HTR using a kraken recognition model (downloaded from Zenodo and cached locally on first use).
+- **`POST /recognize`** – OCR/HTR using a kraken recognition model. The `model`
+  form field is either a **Zenodo DOI** (downloaded and cached on first use) or a
+  **local path** — a weights file, or a directory the trainer registered under
+  `~/atr-cache/trained/<model_id>/`. Models this box trained have no DOI, and this
+  service has no registry to look one up in, so the gateway sends their
+  `local_path` (#36).
 - **`POST /ocr`** – legacy alias for `/recognize`, compatible with `agentic_historian`'s `KrakenHTTPClient`.
 
-The service is **lazy**: no model is loaded at startup. Recognition models are
-downloaded and cached in `engines/kraken_svc/models_cache/` on first request.
+The service is **lazy**: no model is loaded at startup. Downloaded models are
+cached in `engines/kraken_svc/models_cache/`; local ones are read where they are.
+
+Weights are loaded through `atr_serving.kraken_loader`, which prefers
+`kraken.models.load_models` — it dispatches on the file and therefore reads
+**safetensors as well as CoreML**. The old `kraken.lib.models.load_any` is
+CoreML-only in kraken 7.0.2 while `ketos train` writes safetensors by default,
+which is why this service could not serve the trainer's own output and why
+`atr-party` could not load its model at all (**#32**).
 
 ## Installing
 
 Use the shared `scripts/make_venvs.sh` script:
 
 ```bash
-cd /home/dh/serving-atr-inference
-./scripts/make_venvs.sh
+cd ~/Repo/serving-atr-inference
+bash scripts/make_venvs.sh kraken
 ```
 
 This creates `.venvs/kraken` with all dependencies from `requirements.txt`
-(including kraken, torch, torchvision).
+(including kraken, torch, torchvision). Pass the target explicitly: several
+requirement files are ranges, so a bare run silently upgrades a serving engine
+under a running service.
 
 ## Running
 
@@ -38,11 +52,12 @@ Or directly:
 .venvs/kraken/bin/python -m kraken_svc.app
 ```
 
-Production (systemd):
+Production (systemd) — asterAIx has **no passwordless sudo**, so these are
+`systemctl --user` units, installed by `scripts/install_user_units.sh`:
 
 ```bash
-sudo systemctl link deploy/systemd/atr-kraken.service
-sudo systemctl enable --now atr-kraken
+bash scripts/install_user_units.sh
+systemctl --user enable --now atr-kraken
 ```
 
 ## Endpoints
