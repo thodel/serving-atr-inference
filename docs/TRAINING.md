@@ -122,9 +122,10 @@ The response is `202` with the job id:
     "max_pages": 200,
     "granularity": "page"
   },
+  "base_model": "10.5281/zenodo.7051645",
   "params": {
-    "spec": "[256,64,0,1 Cr4,2,8,4,2 Cr4,2,32,1,1 Mp4,2,4,2 Cr3,3,64,1,1 Mp1,2,1,2 S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]",
-    "batch_size": 256,
+    "batch_size": 16,
+    "resize": "union",
     "schedule": "1cycle",
     "lrate": 0.0001,
     "epochs": 50,
@@ -135,6 +136,24 @@ The response is `202` with the job id:
   }
 }
 ```
+
+> **Do not copy the defaults onto a small corpus.** The `spec`/`batch_size: 256`
+> recipe in `docs/TRAINING_PLAN.md` §3a was written for the ~18 M-line corpus and is
+> wrong by three orders of magnitude for a few thousand lines. The Thun set above is
+> ~1,878 training lines: at `batch_size: 256` that is **7 optimizer steps per epoch,
+> ~367 over the whole run**, for a 15.2 M-parameter network from random weights — and
+> `1cycle` spends all 367 ramping up and annealing back down. The result was
+> `kraken-thun-missiven-v1` at **CER 0.98**, insertion-dominated, because an
+> unconverged CTC network has not learned blank-dominance and emits a character at
+> nearly every timestep.
+>
+> Two rules follow, and this example applies both: **fine-tune rather than train from
+> scratch below ~100 K lines** (`base_model` + `resize: "union"`), and **scale
+> `batch_size` to the corpus**. Before believing any CER, run
+> `scripts/audit_eval_material.py` on the job — it needs no GPU and tells you whether
+> the *material* is sound, which for the Thun split it is (median 12.15 px per
+> reference character, 98.4 % in band). See README §"the first three runs were
+> under-configured" and `docs/TRAINING_PLAN.md` §9a.
 
 ### 3b. Fine-tuning from a Zenodo base model
 
