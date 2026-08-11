@@ -5,5 +5,13 @@ loguru>=0.7
 pillow>=10.0
 # Kraken powers party HTR
 kraken>=5.0
+# NOT `party`. The PyPI package of that name is "Lightweight Python client to the
+# Artifactory API" (Ted Sheibar, 1.7.3) — checked 2026-08-11 — and installing it
+# would add an unrelated dependency while leaving #32 exactly where it is.
+#
+# What is missing is mittagessen's party, which registers the `PartyModel` class
+# kraken looks for: `load_models` parses this service's model.safetensors and then
+# reports "PartyModel is not in model registry". When it is added it should be
+# pinned to a git URL and a commit, not to a name.
 torch>=2.2.0
 torchvision>=0.17.0

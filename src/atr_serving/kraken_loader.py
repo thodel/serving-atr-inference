@@ -94,8 +94,11 @@ def load_recognition_model(path: str | Path, device: str = "cpu", load_any=None)
         raise WeightsNotFound(
             f"{path} is safetensors, which kraken 7.0.2 cannot serve: rpred needs a "
             "TorchSeqRecognizer, and only kraken.lib.models.load_any produces one — "
-            "CoreML only. Retrain with --weights-format coreml (the trainer's "
-            "default), or convert the checkpoint with `ketos convert`."
+            "CoreML only. For a model this box trained: retrain with "
+            "--weights-format coreml (the trainer's default), or convert the "
+            "checkpoint with `ketos convert`. For a third-party model (party's "
+            "Zenodo release), neither applies — its class has to be registered by "
+            "the package that defines it, which is #32."
         )
     if load_any is None:
         from kraken.lib.models import load_any  # noqa: PLC0415 — engine venvs only
