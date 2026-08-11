@@ -33,6 +33,18 @@ fail()  { echo "  ✗  $1" >&2; FAILURES=$((FAILURES + 1)); }
 warn()  { echo "  ⚠  $1"; WARNINGS=$((WARNINGS + 1)); }
 info()  { echo "      $1"; }
 
+fingerprint() {  # 8 hex chars — enough to compare two values without revealing either
+  # sha256sum is coreutils (the box); shasum is what macOS ships. An empty
+  # fingerprint would quietly defeat the point of comparing without printing.
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | cut -c1-8
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | cut -c1-8
+  else
+    echo "no-sha256"
+  fi
+}
+
 # ── 1. Variables and their backing filesystems ───────────────────────────────
 
 print_header "1 — Environment variables and backing filesystems"
@@ -42,13 +54,24 @@ fs_type() {
   stat -f -c %T "$1" 2>/dev/null || echo "unknown"
 }
 
+# The share on asterAIx reports **smb2**, not "smb", so every check that compared
+# against the literal string passed it as local — including the TMPDIR one, which
+# exists because a network TMPDIR broke compile (0ca2379). Globs, not equality,
+# and one function so a new mount type is fixed in one place.
+is_network_fs() {
+  case "$1" in
+    nfs*|cifs*|smb*|fuse.sshfs|fuseblk|9p|afs|glusterfs|ceph) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # TMPDIR
 TMPDIR_VAL="${TMPDIR:-$(mktemp -u)}"
 TMPDIR_FS=$(fs_type "$TMPDIR_VAL")
 echo "  TMPDIR      = ${TMPDIR_VAL}"
 echo "  TMPDIR fs   = ${TMPDIR_FS}"
 
-if [[ "$TMPDIR_FS" == "nfs" || "$TMPDIR_FS" == "cifs" || "$TMPDIR_FS" == "smb" ]]; then
+if is_network_fs "$TMPDIR_FS"; then
   fail "TMPDIR is on a network filesystem (${TMPDIR_FS}) — the trainer refuses this"
   info "  ketos compile dies with 'Directory not empty' on network TMPDIR, and pip"
   info "  upgrades silently fail with EPERM.  Fix:"
@@ -80,7 +103,7 @@ echo "  datasets cache = ${DS_CACHE}"
 [ "$DS_RESOLVED" != "$DS_CACHE" ] && echo "  resolves to    = ${DS_RESOLVED}"
 echo "  datasets fs    = ${DS_FS}"
 
-if [[ "$DS_FS" == "nfs" || "$DS_FS" == "cifs" || "$DS_FS" == "smb" ]]; then
+if is_network_fs "$DS_FS"; then
   fail "the datasets Arrow cache is on a network filesystem (${DS_FS})"
   info "  pyarrow cannot hold a write handle open there for a generation pass:"
   info "  'ValueError: I/O operation on closed file' after 11.5 h, zero pages."
@@ -100,7 +123,7 @@ if [ -n "$HF_HOME_VAL" ]; then
   HF_HOME_FS=$(fs_type "$HF_HOME_RESOLVED")
   echo "  HF_HOME     = ${HF_HOME_VAL}"
   echo "  HF_HOME fs  = ${HF_HOME_FS}"
-  if [[ "$HF_HOME_FS" == "nfs" || "$HF_HOME_FS" == "cifs" || "$HF_HOME_FS" == "smb" ]]; then
+  if is_network_fs "$HF_HOME_FS"; then
     warn "HF_HOME is on a network filesystem (${HF_HOME_FS}) — downloads will be slow"
   fi
 else
@@ -111,7 +134,7 @@ fi
 HF_HUB_LINK="$HOME/.cache/huggingface/hub"
 echo "  ~/.cache/huggingface/hub → $(readlink -f "$HF_HUB_LINK" 2>/dev/null || echo '(broken or missing)')"
 HF_HUB_FS=$(fs_type "$HF_HUB_LINK" 2>/dev/null)
-if [[ "$HF_HUB_FS" == "nfs" || "$HF_HUB_FS" == "cifs" || "$HF_HUB_FS" == "smb" ]]; then
+if is_network_fs "$HF_HUB_FS"; then
   warn "hub cache resolves to a network filesystem (${HF_HUB_FS}) — downloads go there"
   info "  the service deliberately avoids HF_HOME to prevent this; if you set it"
   info "  in ~/.bashrc, your interactive commands will re-download what the service"
@@ -165,13 +188,31 @@ fi
 
 print_header "3 — atr-train.service Environment vs. current shell"
 
-UNIT_VARS=$(systemctl --user show atr-train -p Environment --no-pager 2>/dev/null || echo "")
+UNIT_MAINPID=$(systemctl --user show atr-train -p MainPID --value --no-pager 2>/dev/null || echo "")
+if [ -n "$UNIT_MAINPID" ] && [ "$UNIT_MAINPID" != "0" ] && [ -r "/proc/${UNIT_MAINPID}/environ" ]; then
+  # The running process's own environment: Environment=, EnvironmentFile= and
+  # anything set-environment put there, which is the only view that matches what
+  # the service actually sees.
+  UNIT_VARS=$(tr '\0' '\n' < "/proc/${UNIT_MAINPID}/environ" | grep -E '^(TMPDIR|HF_HOME|CUDA_VISIBLE_DEVICES|PYTHONPATH|ATR_)' | tr '\n' ' ')
+else
+  UNIT_VARS=$(systemctl --user show atr-train -p Environment --no-pager 2>/dev/null || echo "")
+fi
 if [ -z "$UNIT_VARS" ]; then
   warn "cannot read atr-train.service environment (systemctl failed — probably not on asterAIx)"
   info "  run this script on the box where the service is installed"
 else
+  # Secrets are shown as a fingerprint, never a value. Reading the process
+  # environment means ATR_*_KEY is in scope here, and this script's output gets
+  # pasted into issues — the same rule as section 5.
   echo "  Unit sets:"
-  echo "$UNIT_VARS" | tr ' ' '\n' | sed 's/^/    /'
+  echo "$UNIT_VARS" | tr ' ' '\n' | while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    case "${pair%%=*}" in
+      *KEY|*TOKEN|*SECRET|*PASSWORD)
+        echo "    ${pair%%=*}=<set, fingerprint $(fingerprint "${pair#*=}")>" ;;
+      *) echo "    ${pair}" ;;
+    esac
+  done
 
   # Check TMPDIR
   UNIT_TMPDIR=$(echo "$UNIT_VARS" | tr ' ' '\n' | grep '^TMPDIR=' | cut -d= -f2-)
@@ -180,7 +221,7 @@ else
     info "  Unit TMPDIR  = ${UNIT_TMPDIR}"
     info "  Shell TMPDIR = ${TMPDIR_VAL}"
     if [ "$UNIT_TMPDIR" != "$TMPDIR_VAL" ]; then
-      if [[ "$TMPDIR_FS" == "nfs" || "$TMPDIR_FS" == "cifs" || "$TMP_FS" == "smb" ]]; then
+      if is_network_fs "$TMPDIR_FS"; then
         fail "Shell TMPDIR differs from unit AND is on a network fs — unit is right, fix your shell"
       else
         warn "Shell TMPDIR differs from unit — if you run commands by hand while"
@@ -239,18 +280,6 @@ ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.env"
 env_value() {  # $1 = variable name; empty string when absent
   [ -f "$ENV_FILE" ] || { echo ""; return; }
   grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-
-}
-
-fingerprint() {  # 8 hex chars — enough to compare two values without revealing either
-  # sha256sum is coreutils (the box); shasum is what macOS ships. An empty
-  # fingerprint would quietly defeat the point of comparing without printing.
-  if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$1" | sha256sum | cut -c1-8
-  elif command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 | cut -c1-8
-  else
-    echo "no-sha256"
-  fi
 }
 
 ENV_API_KEY=$(env_value ATR_API_KEY)
