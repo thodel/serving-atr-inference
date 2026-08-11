@@ -4,8 +4,8 @@ kraken 7.x flow (verified against the installed lib):
   - download a Zenodo model by DOI via ``htrmopo.get_model``
   - segment with ``blla.segment(im)`` (built-in default segmentation model)
   - recognise with ``rpred.rpred(net, im, segmentation)`` where the net comes
-    from ``atr_serving.kraken_loader`` (``kraken.models.load_models``, which reads
-    safetensors as well as CoreML — see #32)
+    from ``atr_serving.kraken_loader`` → ``kraken.lib.models.load_any``, which is
+    what produces the ``TorchSeqRecognizer`` rpred's signature demands
 
 Lazy-loads recognition models, keeps one resident (LRU-of-1).
 """
@@ -60,7 +60,8 @@ def _model_file(model_id: str) -> Path:
         _model_files[model_id] = local
         return local
     dest = CACHE_DIR / model_id.replace("/", "_")
-    existing = (sorted(dest.glob("*.safetensors")) + sorted(dest.glob("*.mlmodel"))
+    # CoreML first: it is the only format load_any can serve (see kraken_loader).
+    existing = (sorted(dest.glob("*.mlmodel")) + sorted(dest.glob("*.safetensors"))
                 if dest.is_dir() else [])
     if existing:
         p = existing[0]

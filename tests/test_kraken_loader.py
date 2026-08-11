@@ -43,14 +43,14 @@ def test_a_registered_model_directory_resolves_to_its_weights(tmp_path: Path):
     assert resolve_weights(directory).name == "kraken-thun-v1.mlmodel"
 
 
-def test_safetensors_is_preferred_over_coreml_in_a_directory(tmp_path: Path):
-    """ketos writes safetensors by default; the coreml file is the M2 workaround,
-    so when a directory holds both, the default output wins."""
+def test_coreml_is_preferred_over_safetensors_in_a_directory(tmp_path: Path):
+    """CoreML is the one that can actually be served: rpred needs a
+    TorchSeqRecognizer and only load_any produces one, CoreML-only in 7.0.2."""
     directory = tmp_path / "m"
     directory.mkdir()
     (directory / "m.mlmodel").write_bytes(b"W")
     (directory / "m.safetensors").write_bytes(b"W")
-    assert resolve_weights(directory).suffix == ".safetensors"
+    assert resolve_weights(directory).suffix == ".mlmodel"
 
 
 def test_a_directory_with_no_weights_is_an_error_not_a_silent_fetch(tmp_path: Path):
@@ -64,29 +64,22 @@ def test_a_directory_with_no_weights_is_an_error_not_a_silent_fetch(tmp_path: Pa
 
 
 # ── load_recognition_model ──────────────────────────────────────────────────
-def test_the_dispatching_loader_is_preferred(tmp_path: Path):
+def test_recognition_goes_through_load_any(tmp_path: Path):
+    """rpred's signature is `network: TorchSeqRecognizer`, which only load_any
+    produces. kraken.models.load_models returns list[BaseModel] — no .to, no
+    .eval, no predict — and rpred will not take one. Measured on the box."""
     calls = []
-    load_recognition_model("/w/m.safetensors", device="cuda:0",
-                           load_models=lambda p, device: calls.append(("models", p, device)),
-                           load_any=lambda p, device: calls.append(("any", p, device)))
-    assert calls == [("models", "/w/m.safetensors", "cuda:0")]
+    load_recognition_model("/w/m.mlmodel", device="cuda:0",
+                           load_any=lambda p, device: calls.append((p, device)))
+    assert calls == [("/w/m.mlmodel", "cuda:0")]
 
 
-def test_it_falls_back_to_load_any_for_coreml(tmp_path: Path):
-    """An older kraken with no kraken.models still serves the CoreML files this
-    box already has — an engine that cannot load anything is worse."""
-    calls = []
-    load_recognition_model("/w/m.mlmodel", load_models=False,
-                           load_any=lambda p, device: calls.append(("any", p, device)))
-    assert calls == [("any", "/w/m.mlmodel", "cpu")]
-
-
-def test_safetensors_through_the_coreml_only_path_says_what_is_wrong(tmp_path: Path):
-    """This is #32 exactly: load_any is CoreML-only in 7.0.2, and the bare
-    KrakenInvalidModelException named neither the format nor the fix."""
+def test_safetensors_says_what_is_wrong_and_what_to_do(tmp_path: Path):
+    """load_any is CoreML-only in 7.0.2. The bare KrakenInvalidModelException
+    named neither the format nor a way out."""
     with pytest.raises(WeightsNotFound) as exc:
-        load_recognition_model("/w/model.safetensors", load_models=False,
-                               load_any=lambda p, device: None)
-    assert "safetensors" in str(exc.value)
-    assert "#32" in str(exc.value)
-    assert "coreml" in str(exc.value)
+        load_recognition_model("/w/model.safetensors", load_any=lambda p, device: None)
+    message = str(exc.value)
+    assert "safetensors" in message
+    assert "TorchSeqRecognizer" in message      # why, not just what
+    assert "--weights-format coreml" in message  # and the way out

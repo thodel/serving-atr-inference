@@ -2,8 +2,13 @@
 
 Loads the model through the kraken pipeline (``htrmopo.get_model`` +
 ``atr_serving.kraken_loader`` + ``blla.segment`` + ``rpred.rpred``). The loader
-reads safetensors as well as CoreML, which is what #32 was: this service's own
-``model.safetensors`` could not be read by ``kraken.lib.models.load_any``. If the Zenodo model
+loads through ``kraken.lib.models.load_any``, which produces the
+``TorchSeqRecognizer`` ``rpred`` requires.
+
+#32: this service cannot load its ``model.safetensors``, and the cause is not the
+format. ``kraken.models.load_models`` parses that file and then reports
+``PartyModel is not in model registry`` — the class ships with the standalone
+``party`` package, which this venv does not install. If the Zenodo model
 is NOT a kraken-format model, startup does not crash — ``/health`` reports
 ``model_loaded: false`` with the error, signalling that the standalone ``party``
 package is needed instead (see issue #3).
@@ -44,7 +49,7 @@ _error: str | None = None
 def _model_file() -> Path:
     p = Path(htrmopo.get_model(MODEL_ID, path=str(CACHE_DIR)))
     if p.is_dir():
-        cands = (sorted(p.rglob("*.safetensors")) or sorted(p.rglob("*.mlmodel"))
+        cands = (sorted(p.rglob("*.mlmodel")) or sorted(p.rglob("*.safetensors"))
                  or [f for f in p.rglob("*") if f.is_file()])
         if not cands:
             raise RuntimeError(f"no model file found under {p}")
