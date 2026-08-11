@@ -89,7 +89,13 @@ if wanted party; then
 fi
 
 if wanted trocr; then
+  # torch from the cu128 index FIRST, like every other GPU venv here. Without it
+  # pip takes the default index, which serves a wheel built against the newest
+  # CUDA — 2.12.1+cu130 on 2026-08-10, unusable on driver 12.7, and the service
+  # silently falls back to CPU rather than failing.
   new_venv trocr
+  "${VENVS}/trocr/bin/pip" install torch==2.8.0 torchvision==0.23.0 \
+    --index-url https://download.pytorch.org/whl/cu128
   "${VENVS}/trocr/bin/pip" install -r "${ROOT}/engines/trocr_svc/requirements.txt"
 fi
 
