@@ -12,6 +12,7 @@
 #   3. free space on / and the share
 #   4. what atr-train.service actually sets, vs. what the shell carries
 #   5. ~/.bashrc TMPDIR override that would shadow the service's TMPDIR
+#   6. the API keys: present, non-empty, and the gate's matching the gateway's
 #
 # Exit 0 = clean.  Exit 1 = problem detected (explainers printed).
 # ──────────────────────────────────────────────────────────────────────────────
@@ -225,6 +226,79 @@ if [ -n "$BASHRC_HFHOME" ]; then
   info "    source ~/.bashrc"
 else
   pass "~/.bashrc does not set HF_HOME"
+fi
+
+# ── 5. API keys ──────────────────────────────────────────────────────────────
+
+print_header "5 — API keys (gateway + promotion gate)"
+
+# Values are NEVER printed. This script's output gets pasted into issues; a key
+# that leaks that way has to be rotated everywhere it is configured.
+ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.env"
+
+env_value() {  # $1 = variable name; empty string when absent
+  [ -f "$ENV_FILE" ] || { echo ""; return; }
+  grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+fingerprint() {  # 8 hex chars — enough to compare two values without revealing either
+  # sha256sum is coreutils (the box); shasum is what macOS ships. An empty
+  # fingerprint would quietly defeat the point of comparing without printing.
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | cut -c1-8
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | cut -c1-8
+  else
+    echo "no-sha256"
+  fi
+}
+
+ENV_API_KEY=$(env_value ATR_API_KEY)
+ENV_GATE_KEY=$(env_value ATR_TRAIN_GATEWAY_API_KEY)
+
+if [ ! -f "$ENV_FILE" ]; then
+  fail "no .env at ${ENV_FILE} — the units load their configuration from it"
+elif [ -z "$ENV_API_KEY" ]; then
+  fail ".env has no ATR_API_KEY — the gateway will refuse every authenticated route"
+else
+  pass ".env sets ATR_API_KEY (fingerprint $(fingerprint "$ENV_API_KEY"))"
+
+  # The promotion gate (#36) posts a held-out page to the gateway's /ocr. With no
+  # key it authenticates as nobody, every model registers disabled with that as
+  # the reason, and nothing is ever promoted into /models. Nothing fails loudly:
+  # the job completes, the record says "not promoted", and the cause is a blank
+  # variable set weeks earlier.
+  if [ -z "$ENV_GATE_KEY" ]; then
+    fail ".env has no ATR_TRAIN_GATEWAY_API_KEY — the promotion gate cannot authenticate"
+    info "  Trained models will register disabled and never be promoted, silently."
+    info "    echo \"ATR_TRAIN_GATEWAY_API_KEY=\$(grep ^ATR_API_KEY= ${ENV_FILE} | cut -d= -f2-)\" >> ${ENV_FILE}"
+    info "    systemctl --user restart atr-train"
+  elif [ "$ENV_GATE_KEY" != "$ENV_API_KEY" ]; then
+    fail "ATR_TRAIN_GATEWAY_API_KEY does not match ATR_API_KEY"
+    info "  gate    fingerprint $(fingerprint "$ENV_GATE_KEY")"
+    info "  gateway fingerprint $(fingerprint "$ENV_API_KEY")"
+    info "  The gate posts to the gateway, so it must present the gateway's key."
+  else
+    pass "ATR_TRAIN_GATEWAY_API_KEY matches ATR_API_KEY"
+  fi
+fi
+
+# The shell's copy. This is the one that bit on 2026-08-11: ATR_API_KEY was unset
+# interactively, /health still answered (it is public), /models returned
+# {"detail":"missing or invalid X-API-Key"} which jq read as null, and a gate key
+# exported from the empty variable would have been empty too.
+SHELL_API_KEY="${ATR_API_KEY:-}"
+if [ -z "$SHELL_API_KEY" ]; then
+  warn "ATR_API_KEY is not set in this shell — authenticated curl calls will 401"
+  info "  /health is public and answers anyway, so the shell looks fine until"
+  info "  /models returns null. Load it from .env before running anything by hand:"
+  info "    export ATR_API_KEY=\$(grep ^ATR_API_KEY= ${ENV_FILE} | cut -d= -f2-)"
+elif [ -n "$ENV_API_KEY" ] && [ "$SHELL_API_KEY" != "$ENV_API_KEY" ]; then
+  warn "shell ATR_API_KEY differs from .env ($(fingerprint "$SHELL_API_KEY") vs $(fingerprint "$ENV_API_KEY"))"
+  info "  Commands you run by hand are talking to the gateway as someone else"
+  info "  than the services are."
+else
+  pass "shell ATR_API_KEY matches .env"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
