@@ -4,9 +4,11 @@
 completion, and reported **CER 0.9838** — honestly. The arithmetic that explains
 it was available the moment ``prepare`` finished:
 
-    1,878 training lines ÷ batch 256 = 7 steps/epoch × 50 epochs = ~367 steps
+    2,087 transcribed lines, 189 of them the held-out eval projects → **1,898
+    training lines**. At batch 256 that is 8 batches per epoch (7 full + 1
+    partial), so **400 optimizer steps** over 50 epochs.
 
-367 optimizer steps for a 15.2 M-parameter network starting from random weights,
+400 optimizer steps for a 15.2 M-parameter network starting from random weights,
 with ``1cycle`` ramping and annealing the learning rate across all of them. An
 unconverged CTC network has not learned blank-dominance and emits a character at
 nearly every timestep — which *is* an insertion-dominated CER, and which then
@@ -46,8 +48,8 @@ __all__ = [
 ]
 
 #: A network starting from random weights has to learn the alphabet, the blank
-#: symbol and the script. 367 steps produced CER 0.98; a Thun fine-tune at batch
-#: 16 would be ~5,900. This sits well below anything reasonable and well above the
+#: symbol and the script. 400 steps produced CER 0.98; a Thun fine-tune at batch
+#: 16 would be ~3,600. This sits well below anything reasonable and well above the
 #: run that failed.
 FLOOR_FROM_SCRATCH = 2_000
 #: Starting from trained weights, far fewer steps are needed — the model already
@@ -139,7 +141,7 @@ def check_convergence(
             f"{budget.effective_batch} is {budget.steps_per_epoch} step(s) per epoch; "
             f"over {budget.epochs} epochs that is {budget.total_steps:,} optimizer "
             f"steps, {start}, against a floor of {floor:,}. A run this short does not "
-            f"converge — it was 367 steps that produced CER 0.98 on the Thun set "
+            f"converge — it was 400 steps that produced CER 0.98 on the Thun set "
             f"(see docs/TRAINING_PLAN.md §9a). Either {remedy}, lower batch_size to "
             f"~{suggested_batch} (≈{plan_steps(budget.train_lines, suggested_batch, budget.epochs).total_steps:,} "
             f"steps), or raise epochs to ~{needed_epochs}. Submit with "

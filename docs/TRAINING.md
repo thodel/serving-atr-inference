@@ -140,9 +140,10 @@ The response is `202` with the job id:
 > **Do not copy the defaults onto a small corpus.** The `spec`/`batch_size: 256`
 > recipe in `docs/TRAINING_PLAN.md` §3a was written for the ~18 M-line corpus and is
 > wrong by three orders of magnitude for a few thousand lines. The Thun set above is
-> ~1,878 training lines: at `batch_size: 256` that is **7 optimizer steps per epoch,
-> ~367 over the whole run**, for a 15.2 M-parameter network from random weights — and
-> `1cycle` spends all 367 ramping up and annealing back down. The result was
+> **1,898 training lines** (2,087 transcribed, 189 held out for eval): at
+> `batch_size: 256` that is **8 batches per epoch, 400 optimizer steps over the whole
+> run**, for a 15.2 M-parameter network from random weights — and `1cycle` spends all
+> 400 ramping up and annealing back down. The result was
 > `kraken-thun-missiven-v1` at **CER 0.98**, insertion-dominated, because an
 > unconverged CTC network has not learned blank-dominance and emits a character at
 > nearly every timestep.

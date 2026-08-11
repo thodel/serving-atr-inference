@@ -18,17 +18,17 @@ from atr_serving.training.convergence import (
 
 # ── the arithmetic ──────────────────────────────────────────────────────────
 def test_the_thun_run_that_failed():
-    """2,087 lines, partition 0.9 → ~1,878 training lines at batch 256."""
-    budget = plan_steps(1878, 256, 50)
-    assert budget.steps_per_epoch == 8      # ceil(1878/256) = 8
-    assert budget.total_steps == 400        # the run's own figure was ~367
+    """2,087 transcribed lines, 189 held out for eval → 1,898 training, batch 256."""
+    budget = plan_steps(1898, 256, 50)
+    assert budget.steps_per_epoch == 8      # ceil(1898/256) = 8
+    assert budget.total_steps == 400        # 8 batches/epoch x 50
 
 
 def test_gradient_accumulation_counts_as_one_step():
     """The runbook's own OOM remedy is batch 64 x accumulate 4. That is the same
     effective batch as 256 and must be judged identically — otherwise the
     documented workaround walks straight past the guard."""
-    assert plan_steps(1878, 64 * 4, 50).total_steps == plan_steps(1878, 256, 50).total_steps
+    assert plan_steps(1898, 64 * 4, 50).total_steps == plan_steps(1898, 256, 50).total_steps
 
 
 def test_a_partial_batch_still_costs_a_step():
@@ -48,16 +48,16 @@ def test_a_qlora_adapter_is_judged_on_its_own_scale():
 
 # ── the verdicts, against the recorded runs ─────────────────────────────────
 def test_the_run_that_produced_cer_098_is_refused():
-    verdict = check_convergence("kraken", from_scratch=True, train_lines=1878,
+    verdict = check_convergence("kraken", from_scratch=True, train_lines=1898,
                                 effective_batch=256, epochs=50)
     assert verdict.ok is False
-    assert "1,878 training lines" in verdict.reason
+    assert "1,898 training lines" in verdict.reason
     assert "8 step(s) per epoch" in verdict.reason
     assert str(FLOOR_FROM_SCRATCH) in verdict.reason.replace(",", "")
 
 
 def test_the_refusal_names_all_three_ways_out():
-    verdict = check_convergence("kraken", from_scratch=True, train_lines=1878,
+    verdict = check_convergence("kraken", from_scratch=True, train_lines=1898,
                                 effective_batch=256, epochs=50)
     assert "base_model" in verdict.reason          # fine-tune instead
     assert "lower batch_size to ~" in verdict.reason
@@ -67,10 +67,10 @@ def test_the_refusal_names_all_three_ways_out():
 
 def test_the_suggested_batch_actually_clears_the_floor():
     """An actionable remedy has to be one that works, not merely a smaller number."""
-    verdict = check_convergence("kraken", from_scratch=True, train_lines=1878,
+    verdict = check_convergence("kraken", from_scratch=True, train_lines=1898,
                                 effective_batch=256, epochs=50)
     suggested = int(verdict.reason.split("lower batch_size to ~")[1].split(" ")[0])
-    assert plan_steps(1878, suggested, 50).total_steps >= verdict.floor
+    assert plan_steps(1898, suggested, 50).total_steps >= verdict.floor
 
 
 def test_the_vlm_smoke_run_is_allowed():
@@ -83,14 +83,14 @@ def test_the_vlm_smoke_run_is_allowed():
 
 def test_a_well_configured_finetune_passes():
     """The runbook's corrected example: Thun at batch 16, fine-tuned."""
-    verdict = check_convergence("kraken", from_scratch=False, train_lines=1878,
+    verdict = check_convergence("kraken", from_scratch=False, train_lines=1898,
                                 effective_batch=16, epochs=50)
     assert verdict.ok is True
     assert verdict.budget.total_steps > 5000
 
 
 def test_the_same_config_from_scratch_is_still_refused_at_a_bigger_batch():
-    verdict = check_convergence("kraken", from_scratch=True, train_lines=1878,
+    verdict = check_convergence("kraken", from_scratch=True, train_lines=1898,
                                 effective_batch=64, epochs=50)
     assert verdict.ok is False          # 1,500 steps, still under the 2,000 floor
 

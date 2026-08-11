@@ -192,8 +192,8 @@ parsable metric is `failed`, not `completed`.
 > recipe for the full `medieval-scripts` selection (~18 M lines), and applying them to
 > a small corpus does not merely train a worse model — it trains no model at all.
 >
-> `batch_size: 256` over 1,878 training lines is **7 steps per epoch**; at the default
-> 50 epochs that is **367 optimizer steps** for a 15.2 M-parameter network from random
+> `batch_size: 256` over 1,898 training lines is **8 batches per epoch**; at the default
+> 50 epochs that is **400 optimizer steps** for a 15.2 M-parameter network from random
 > weights, with `1cycle` ramping and annealing the learning rate across all of them.
 > That is what produced `kraken-thun-missiven-v1` at CER 0.98 with 11,191 insertions
 > and 2 deletions (§9): an unconverged CTC network has not learned blank-dominance and
@@ -497,11 +497,11 @@ truth survives.
 | | |
 |---|---|
 | `base_model` | `null` — **from scratch** |
-| lines | 2,087 → ~1,878 training after `partition: 0.9` |
-| `batch_size` | 256 → **7 steps per epoch** |
-| `epochs` | 50 → **~367 optimizer steps total** |
+| lines | 2,087 transcribed; 189 in the eval projects → **1,898 training** |
+| `batch_size` | 256 → **8 batches per epoch** (7 full + 1 partial) |
+| `epochs` | 50 → **400 optimizer steps total** |
 | network | 15.2 M parameters, random initialisation |
-| schedule | `1cycle`, ramping and annealing across those 367 steps |
+| schedule | `1cycle`, ramping and annealing across those 400 steps |
 
 An unconverged CTC network has not yet learned blank-dominance: its per-timestep
 distribution is near-uniform, so greedy decoding emits a character at almost every
@@ -519,7 +519,7 @@ with the same surface symptom — an instruct model that does not stop at the li
 **What to do differently** is in §3a: fine-tune from a base below ~100 K lines, and
 scale `batch_size` to the corpus. **What to build** is a guard: `lines / batch_size ×
 epochs` is computable the moment prepare reports a line count, and refusing — or at
-least warning — at "this configuration will take 367 optimizer steps" would have saved
+least warning — at "this configuration will take 400 optimizer steps" would have saved
 two runs and two days. That is the remaining scope of #52.
 
 Until a run is configured to converge, no CER in this repo should be quoted, compared

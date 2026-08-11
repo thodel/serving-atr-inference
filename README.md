@@ -54,16 +54,17 @@ contains**. Two candidate explanations were on the table (#52): eval material pa
 with short or offset references, or a training-design problem. It is the second, and
 the arithmetic is unambiguous:
 
-> `kraken-thun-missiven-v1` trained **from scratch** on 2,087 lines. With
-> `partition: 0.9` that is ~1,878 training lines; at `batch_size: 256` it is **7 steps
-> per epoch**, and over 50 epochs **~367 optimizer steps** for a 15.2 M-parameter
-> network starting from random weights. `--schedule 1cycle` then ramps and anneals the
-> learning rate across those 367 steps, so it never reaches a productive rate.
+> `kraken-thun-missiven-v1` trained **from scratch** on 2,087 transcribed lines, 189 of
+> them the held-out eval projects → **1,898 training lines**. At `batch_size: 256` that
+> is 8 batches per epoch, so **400 optimizer steps** over 50 epochs, for a
+> 15.2 M-parameter network starting from random weights. `--schedule 1cycle` then ramps
+> and anneals the learning rate across those 400 steps, so it never reaches a
+> productive rate.
 
 An unconverged CTC network has not yet learned blank-dominance and emits a character at
 nearly every timestep — which *is* an insertion-dominated CER. The defaults are correct
 for the ~18 M-line corpus they were written against and wrong by three orders of
-magnitude for 1,878 lines.
+magnitude for 1,898 lines.
 
 **The eval material was audited and is sound**: `scripts/audit_eval_material.py` on the
 Thun split reports a median of 12.15 px of line per reference character over 189 lines,
