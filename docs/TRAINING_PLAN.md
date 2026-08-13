@@ -550,11 +550,35 @@ that the configuration was the problem, not which half of it. Isolating them wou
 one more run — batch 16 *from scratch*, same ~3,570 steps — and is worth doing before
 any of this is written up as a recipe.
 
-**0.392 is a real model, not a good one.** Usable HTR is 0.05–0.10, and the word
-accuracy here is 9 % (WER 0.909), meaning almost every word carries an error. Some of
-the gap is a script-class mismatch: `late_medieval_german` is **Textura**, a formal book
-hand, while the Thuner Missiven are chancery cursive. Right language, right century,
-wrong hand — and `resize: union` extends the codec, not the model's idea of letterforms.
+### 9c. The base matters more than the century (2026-08-13)
+
+A single-variable comparison: same 1,898 training lines, same eval projects, same
+`batch_size: 16`, `epochs: 30`, `resize: union`. Only `base_model` changed.
+
+| base | script class | century | CER | ins | del | sub |
+|---|---|---|---:|---:|---:|---:|
+| — (from scratch) | — | — | 0.9838 | 11,191 | 2 | 186 |
+| `kraken-late_medieval_german` | Textura (formal book hand) | 14–16 | 0.3921 | 1,437 | 546 | 2,552 |
+| **`kraken-early_modern_german`** | **Kurrent (chancery cursive)** | 16–17 | **0.2350** | 470 | 796 | 1,452 |
+
+**Script class beats period.** The Kurrent base is a century *later* than the Thuner
+Missiven and still cuts CER by 40 % relative against a Textura base of the right
+century. Substitutions falling 2,552 → 1,452 is the model reading better, not merely
+aligning better — a CTC network transfers letterform recognition, and Textura and
+cursive do not share letterforms however close the dates are.
+
+**The error profile flipped.** Deletions (796) now exceed insertions (470): the model
+has gone from over-generating, through balanced, to mildly conservative — dropping
+characters rather than inventing them. That is an under-trained but well-calibrated
+model, which argues for more training or more data rather than for yet another base.
+
+Practical rule for picking a base: **match the hand first, the century second.** The
+registry records `scripts` and `centuries` per entry; sorting candidates by script
+family would make this choice less of a guess than it currently is.
+
+**0.235 is a real model, not a good one.** Usable HTR is 0.05–0.10. The script-class
+gap that §9c closed was worth 0.157 CER; what remains is most likely the 1,898 lines
+and the 30 epochs, not the starting point.
 
 **What to do differently** is in §3a: fine-tune from a base below ~100 K lines, and
 scale `batch_size` to the corpus. **What to build** is a guard: `lines / batch_size ×

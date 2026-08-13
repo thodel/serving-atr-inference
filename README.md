@@ -75,10 +75,15 @@ prepare stage already wrote — run it on any job before believing its CER.
 pipeline, but starting from `kraken-late_medieval_german` at `batch_size: 16` for 30
 epochs — 3,570 steps instead of 400.
 
-| | from scratch | fine-tune |
-|---|---:|---:|
-| CER | 0.9838 | **0.3921** |
-| insertions : deletions | 5,596 : 1 | **2.6 : 1** |
+| base | script | CER | ins : del |
+|---|---|---:|---:|
+| from scratch | — | 0.9838 | 5,596 : 1 |
+| `late_medieval_german` | Textura | 0.3921 | 2.6 : 1 |
+| **`early_modern_german`** | **Kurrent** | **0.2350** | 0.6 : 1 |
+
+Changing only the base (§9c) took CER from 0.392 to 0.235: **script class beats
+century** — Kurrent is a century later than the Missiven and still beats a Textura
+base of the right period, because a CTC network transfers letterforms.
 
 The error *shape* is the confirmation. Insertions collapsing from 11,191 to 1,437 while
 substitutions rise from 186 to 2,552 is a model that went from emitting characters
