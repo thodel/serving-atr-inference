@@ -37,6 +37,9 @@ class TrainerSettings(BaseSettings):
     trained_root: Path = Path.home() / "atr-cache" / "trained"
     #: The gitignored registry overlay trained models are registered in.
     overlay_path: Path = REPO_ROOT / "config" / "models.local.yaml"
+    #: The tracked registry, read only to resolve a ``base_model`` given as a
+    #: registry id rather than a Zenodo DOI (#76). Never written to.
+    models_config: Path = REPO_ROOT / "config" / "models.yaml"
     #: Checkpoints go to LOCAL disk, not the job directory on the share. Lightning
     #: saves them via a temp file + rename; with the target on CIFS and the temp
     #: local that rename is cross-device, and the fsspec version datasets<4 pins

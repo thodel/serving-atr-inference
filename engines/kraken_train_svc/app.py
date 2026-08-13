@@ -37,6 +37,8 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from atr_serving.registry import load_registry
+from atr_serving.training.base_models import BaseModelError, resolve_base_model
 from atr_serving.training.backends import BACKENDS, UnknownBackend, backend_for
 from atr_serving.training.contracts import TrainJob, TrainRequest
 from atr_serving.training.curves import CURVE_FILENAME
@@ -72,6 +74,22 @@ def _store() -> JobStore:
         store = JobStore(_settings().jobs_root)
         app.state.store = store
     return store
+
+
+def _registry():
+    """The tracked registry for base_model lookups, or None if unreadable.
+
+    Overridable on ``app.state`` so tests need no models.yaml on disk. None means
+    "accept DOIs, cannot resolve ids" rather than a failure — a job naming a DOI
+    should not be refused because the registry file is missing.
+    """
+    if (override := getattr(app.state, "registry", None)) is not None:
+        return override
+    try:
+        return load_registry(_settings().models_config)
+    except (OSError, ValueError) as exc:
+        logger.warning("registry unavailable for base_model lookup: {}", exc)
+        return None
 
 
 def _spawn(settings: TrainerSettings, job: TrainJob) -> int:
@@ -286,6 +304,15 @@ async def submit(request: TrainRequest, response: Response,
         check_disk(settings.jobs_root, settings.min_free_disk_gb)
     except PreflightError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
+    # A base_model that names nothing loadable is knowable now. It used to fail in
+    # the TRAIN stage - after prepare and compile - which on a large selection is
+    # ten hours to learn that a registry id was spelled as a DOI (#76).
+    if request.base_model:
+        try:
+            resolve_base_model(request.base_model, engine=request.engine,
+                               registry=_registry())
+        except BaseModelError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     # A network TMPDIR breaks temp-dir cleanup mid-compile; catch it at submit.
     try:
         check_tmpdir(os.environ.get("TMPDIR", "/tmp"))

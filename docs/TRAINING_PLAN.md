@@ -334,8 +334,14 @@ Request for the first test case:
 The `kraken+` spec and `1cycle`/1e-4 above are the **defaults** the trainer fills in when
 `params` omits them, so a minimal job body is just `model_id` + `dataset`.
 
-`base_model` accepts a registry id or a Zenodo DOI (resolved through `htrmopo`, the same
-path `kraken_svc` already uses) → `ketos train -i … --resize union`.
+`base_model` accepts a **local path**, a **registry id** from `config/models.yaml`, or a
+**Zenodo DOI** (bare record ids too), resolved by
+`atr_serving.training.base_models.resolve_base_model` → `ketos train -i … --resize union`.
+The reference is validated **at submit** (#76): it used to be handed straight to
+`htrmopo` in the train stage, so `kraken-medieval_generic_b` — a real registry id — cost
+a run before failing with "is not a valid DOI". `vllm` and `trocr` bases are HuggingFace
+repo ids instead, and the two namespaces are checked separately: a DOI happens to match
+`owner/name`, so pattern-matching alone would accept a kraken base for a VLM run.
 
 The **engine-agnostic envelope** (`engine` + `dataset` + `params`) is the extension
 point: a `trocr` or `vllm-lora` job reuses the store, the API, the prepare stage and the

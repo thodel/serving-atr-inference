@@ -21,7 +21,8 @@ from pathlib import Path
 
 from loguru import logger
 
-from atr_serving.registry import ModelSpec
+from atr_serving.registry import ModelSpec, load_registry
+from atr_serving.training.base_models import BaseModelError, resolve_base_model
 from atr_serving.training.contracts import Metrics, StageRecord, TrainJob, utcnow
 from atr_serving.training.ketos_cmd import (
     compile_cmd,
@@ -164,23 +165,50 @@ class Pipeline(BasePipeline):
                 binary_manifest(paths.data / "val_bin.lst", val_arrow))
 
     def _resolve_base_model(self, base_model: str) -> Path:
-        """A local weights file, or a Zenodo DOI fetched through htrmopo (the same
-        path ``kraken_svc`` uses to resolve served models)."""
-        candidate = Path(base_model).expanduser()
-        if candidate.exists():
-            return candidate
+        """A local weights file, a registry id, or a Zenodo DOI.
+
+        Registry ids resolve through :func:`resolve_base_model` to the entry's
+        ``zenodo_id`` — which is what docs/TRAINING_PLAN.md §4 always described,
+        and what a run lost an hour to when it did not (#76). The reference is
+        already validated at submit, so reaching here with a bad one means the
+        registry changed under a queued job; it still fails with the same message
+        rather than htrmopo's.
+        """
+        try:
+            resolved = resolve_base_model(
+                base_model, engine="kraken", registry=self._registry())
+        except BaseModelError as exc:
+            raise StageFailed(str(exc)) from exc
+
+        if resolved.kind == "path":
+            return Path(resolved.ref)
+
         import htrmopo  # heavy; trainer venv only
 
-        dest = self.settings.trained_root.parent / "bases" / base_model.replace("/", "_")
+        dest = self.settings.trained_root.parent / "bases" / resolved.ref.replace("/", "_")
         dest.mkdir(parents=True, exist_ok=True)
         existing = sorted(dest.glob("*.mlmodel")) + sorted(dest.glob("*.safetensors"))
         if existing:
             return existing[0]
-        got = Path(htrmopo.get_model(base_model, path=str(dest)))
+        logger.info("fetching base model {} ({})", resolved, resolved.kind)
+        got = Path(htrmopo.get_model(resolved.ref, path=str(dest)))
         candidates = sorted(got.rglob("*.mlmodel")) if got.is_dir() else [got]
         if not candidates:
-            raise StageFailed(f"base model {base_model} resolved to {got} with no weights file")
+            raise StageFailed(
+                f"base model {resolved} resolved to {got} with no weights file")
         return candidates[0]
+
+    def _registry(self):
+        """The tracked registry, or None when it cannot be read.
+
+        None means "resolve DOIs only" rather than a failure: a job that names a
+        DOI has no business failing because config/models.yaml is missing.
+        """
+        try:
+            return load_registry(self.settings.models_config)
+        except (OSError, ValueError) as exc:
+            logger.warning("registry unavailable for base_model lookup: {}", exc)
+            return None
 
     def _train(self, job: TrainJob, train_bin: Path, val_bin: Path,
                record: StageRecord) -> Path:

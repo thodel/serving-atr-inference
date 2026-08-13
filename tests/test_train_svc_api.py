@@ -602,3 +602,44 @@ def test_every_dataset_is_verified_not_only_the_first(client, app):
     assert seen == ["dh-unibe/first", "dh-unibe/second"]
     assert resp.json()["valid"] is False
     assert "dh-unibe/second" in resp.json()["errors"][0]   # which one, not just what
+
+
+# ── base_model is checked at submit, not in the train stage (#76) ───────────
+class TestBaseModelAtSubmit:
+    """A run was lost to `kraken-medieval_generic_b is not a valid DOI` raised in
+    the TRAIN stage — after prepare and compile. Everything needed to refuse it
+    was in the request."""
+
+    @pytest.fixture(autouse=True)
+    def registry(self, app):
+        from atr_serving.registry import ModelSpec, Registry
+
+        app.state.registry = Registry([
+            ModelSpec(id="kraken-late_medieval_german", engine="kraken",
+                      zenodo_id="10.5281/zenodo.15366732", task="htr"),
+        ])
+        yield
+        if hasattr(app.state, "registry"):
+            delattr(app.state, "registry")
+
+    def test_an_unknown_base_model_is_refused_before_a_job_exists(self, client):
+        resp = client.post("/jobs", json={**BODY, "base_model": "kraken-nope"})
+        assert resp.status_code == 400
+        assert "kraken-late_medieval_german" in resp.json()["detail"]
+        assert client.get("/jobs").json()["jobs"] == []   # nothing was queued
+
+    def test_a_registry_id_is_accepted(self, client):
+        resp = client.post("/jobs", json={
+            **BODY, "base_model": "kraken-late_medieval_german",
+            "params": {"batch_size": 16, "epochs": 30, "resize": "union"}})
+        assert resp.status_code == 202
+
+    def test_a_zenodo_doi_is_still_accepted(self, client):
+        resp = client.post("/jobs", json={
+            **BODY, "base_model": "10.5281/zenodo.15366732",
+            "params": {"batch_size": 16, "epochs": 30}})
+        assert resp.status_code == 202
+
+    def test_from_scratch_is_unaffected(self, client):
+        """base_model is optional for kraken; absent means from scratch."""
+        assert client.post("/jobs", json=BODY).status_code == 202

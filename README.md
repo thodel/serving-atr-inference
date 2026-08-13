@@ -86,8 +86,8 @@ without aligning to the text, to reading it and getting characters wrong. Only t
 second is a converged model.
 
 What follows for anyone submitting a job: **on a small corpus, fine-tune rather than
-train from scratch** (`base_model` takes a Zenodo DOI — a registry id is documented but
-not implemented, **#76**), **and scale `batch_size` to the corpus** — the step-count
+train from scratch** (`base_model` takes a registry id, a Zenodo DOI or a local path, checked at
+submit — **#76**), **and scale `batch_size` to the corpus** — the step-count
 guard (#72) now refuses configurations that cannot converge. 0.392 is a real model but
 not a usable one (usable HTR is 0.05–0.10), so no CER here should be quoted yet, and
 nothing has been pushed to the hub.
