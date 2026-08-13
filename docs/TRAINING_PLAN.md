@@ -576,9 +576,49 @@ Practical rule for picking a base: **match the hand first, the century second.**
 registry records `scripts` and `centuries` per entry; sorting candidates by script
 family would make this choice less of a guess than it currently is.
 
-**0.235 is a real model, not a good one.** Usable HTR is 0.05–0.10. The script-class
-gap that §9c closed was worth 0.157 CER; what remains is most likely the 1,898 lines
-and the 30 epochs, not the starting point.
+### 9d. Epochs are spent; the lever is the data (2026-08-13)
+
+Third single-variable step: 30 → 90 epochs, 3,570 → 10,710 optimizer steps, everything
+else identical.
+
+| model | change | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|
+| `thun-missiven-v1` | from scratch, batch 256, 50 ep | 0.9838 | 11,191 | 2 | 186 |
+| `thun-finetune-v1` | + Textura base, batch 16, 30 ep | 0.3921 | 1,437 | 546 | 2,552 |
+| `thun-kurrent-v1` | Textura → Kurrent base | 0.2350 | 470 | 796 | 1,452 |
+| `thun-kurrent-v2` | 30 → 90 epochs | **0.2180** | 395 | 814 | 1,312 |
+
+The curve still reports `still_improving: true` at epoch 89 — the surviving top-ten
+checkpoints are 79–89 — and that flag is now misleading on its own. The **rate** is the
+number that matters:
+
+| stretch | epochs | val_metric gain | per epoch |
+|---|---|---:|---:|
+| v1, 20 → 29 | 9 | +0.0118 | 0.00131 |
+| v2, 30 → 89 | 60 | +0.0166 | **0.00028** |
+
+Tripling the compute bought **7 % relative**, at a per-epoch rate 4.7× lower than the
+stretch before it. Another 90 epochs projects to roughly +0.009 val_metric — about an
+hour of GPU per 0.003 CER. Technically still improving; practically finished.
+
+**Each lever bought less than the one before**: 0.59 CER from the configuration, 0.16
+from the base, 0.017 from the epochs. The distance still to cover — 0.218 down to a
+usable 0.05–0.10 — is larger than all three gains combined, and there is no fourth knob
+of that size. **1,898 lines from 139 pages is the ceiling.**
+
+*A calibration note, since it will happen again.* Before this run the projection here was
+CER 0.17–0.20, allowing explicitly for deceleration. The result was 0.218, outside that
+range. Extrapolating a learning curve by eye flatters it even when you think you have
+discounted for the flattening; the honest read is that only the measured per-epoch rate
+is worth quoting.
+
+**Next**: more Bernese material, fine-tuned from `kraken-early_modern_german` at these
+settings. When sizing a selection, remember that the Thun training project skipped
+**111 of 250 pages** as untranscribed — page counts overstate usable lines by roughly
+two.
+
+**0.218 is a real model, not a good one.** Usable HTR is 0.05–0.10, and §9d shows the
+remaining distance is a data question, not a tuning one.
 
 **What to do differently** is in §3a: fine-tune from a base below ~100 K lines, and
 scale `batch_size` to the corpus. **What to build** is a guard: `lines / batch_size ×

@@ -50,7 +50,7 @@ deltas mean something. Full measurements in
 | `thun-missiven-v1` | from scratch, `batch_size: 256`, 50 ep | 0.9838 | 11,191 | 2 | 186 |
 | `thun-finetune-v1` | + Textura base, `batch_size: 16`, 30 ep | 0.3921 | 1,437 | 546 | 2,552 |
 | `thun-kurrent-v1` | Textura → **Kurrent** base | **0.2350** | 470 | 796 | 1,452 |
-| `thun-kurrent-v2` | 30 → 90 epochs (10,710 steps) | *running* | | | |
+| `thun-kurrent-v2` | 30 → 90 epochs (10,710 steps) | **0.2180** | 395 | 814 | 1,312 |
 
 Two other runs sit outside the chain: `kraken-medieval-scripts-v1` (CER 0.7074, mixed
 Leuven corpora scored on Bernese material) and `qwen3vl-thun-smoke` (the VLM backend's
@@ -89,7 +89,13 @@ Missiven and still beat a Textura base of the right period by 40 % relative. A C
 network transfers letterforms, and a formal book hand shares few with chancery cursive
 however close the dates.
 
-**Still true:** 0.235 is a real model, not a usable one (production HTR is 0.05–0.10).
+**Epochs are spent** (§9d): tripling them bought 7 % relative, at a per-epoch rate 4.7×
+lower than the stretch before. Each lever bought less than the one before — 0.59 CER from
+the configuration, 0.16 from the base, 0.017 from the epochs — and the distance still to
+cover is larger than all three combined. **1,898 lines from 139 pages is the ceiling**;
+the next step is more Bernese material, not more tuning.
+
+**Still true:** 0.218 is a real model, not a usable one (production HTR is 0.05–0.10).
 No CER here should be quoted or compared outside this table, and nothing has been pushed
 to the hub. `base_model` takes a registry id, a Zenodo DOI or a local path, validated at
 submit (#76).
