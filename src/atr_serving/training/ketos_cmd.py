@@ -256,4 +256,23 @@ def parse_test_report(text: str) -> Metrics:
         metrics.cer = 1.0 - metrics.char_accuracy / 100.0
     if metrics.word_accuracy is not None:
         metrics.wer = 1.0 - metrics.word_accuracy / 100.0
+
+    # length_ratio for the CTC path (#55). kraken reports no hypothesis length, but
+    # it is recoverable from the edit counts, because kraken and textmetrics use the
+    # SAME convention — verified in kraken/ketos/recognition.py, which aligns
+    # global_align(gt, pred) and then counts a gap in the GT side as a *deletion*
+    # and a gap in the prediction as an *insertion*:
+    #
+    #     insertions → characters MISSING from the hypothesis
+    #     deletions  → characters the hypothesis added
+    #
+    # so  hypothesis_chars = chars - insertions + deletions.
+    #
+    # This is inverted from the usual ASR convention, where an insertion is an extra
+    # emitted character. It is kept because both sides of this codebase already agree
+    # on it and a silent re-definition would corrupt every stored Metrics record.
+    if (metrics.chars and metrics.insertions is not None
+            and metrics.deletions is not None):
+        hyp_chars = metrics.chars - metrics.insertions + metrics.deletions
+        metrics.length_ratio = max(0.0, hyp_chars) / metrics.chars
     return metrics
