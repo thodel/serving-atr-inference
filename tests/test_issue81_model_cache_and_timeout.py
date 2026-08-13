@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from collections import OrderedDict
 from pathlib import Path
 
 import httpx
