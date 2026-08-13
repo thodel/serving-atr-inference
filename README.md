@@ -38,64 +38,61 @@ base. Most of that gap is the model learning to stop at the line rather than lea
 read — see [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md), which states the caveat
 alongside the number.
 
-### The pipeline runs; the first three runs were under-configured
+### Training results — one variable at a time
 
-Three runs completed end to end and none produced a usable model.
-[`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) §9 records the measurements:
+Every kraken run below uses the **same** 1,898 training lines and the **same** held-out
+Thun eval projects. Each row changes exactly one thing from the row above, so the
+deltas mean something. Full measurements in
+[`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) §9–9c.
 
-| run | CER | insertions | deletions |
-|---|---|---|---|
-| `kraken-thun-missiven-v1` | 0.9838 | 11,191 | 2 |
-| `kraken-medieval-scripts-v1` | 0.7074 | 5,381 | 48 |
-| `qwen3vl-thun-smoke` | 0.466 (base 1.837) | — | — |
+| model | what changed | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|
+| `thun-missiven-v1` | from scratch, `batch_size: 256`, 50 ep | 0.9838 | 11,191 | 2 | 186 |
+| `thun-finetune-v1` | + Textura base, `batch_size: 16`, 30 ep | 0.3921 | 1,437 | 546 | 2,552 |
+| `thun-kurrent-v1` | Textura → **Kurrent** base | **0.2350** | 470 | 796 | 1,452 |
+| `thun-kurrent-v2` | 30 → 90 epochs (10,710 steps) | *running* | | | |
 
-Every model, CTC and autoregressive alike, **emitted more characters than the reference
-contains**. Two candidate explanations were on the table (#52): eval material paired
-with short or offset references, or a training-design problem. It is the second, and
-the arithmetic is unambiguous:
+Two other runs sit outside the chain: `kraken-medieval-scripts-v1` (CER 0.7074, mixed
+Leuven corpora scored on Bernese material) and `qwen3vl-thun-smoke` (the VLM backend's
+first real run, CER 0.466 against 1.837 for the un-adapted base — see
+[`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md)).
 
-> `kraken-thun-missiven-v1` trained **from scratch** on 2,087 transcribed lines, 189 of
-> them the held-out eval projects → **1,898 training lines**. At `batch_size: 256` that
-> is 8 batches per epoch, so **400 optimizer steps** over 50 epochs, for a
-> 15.2 M-parameter network starting from random weights. `--schedule 1cycle` then ramps
-> and anneals the learning rate across those 400 steps, so it never reaches a
-> productive rate.
+**What the first row was.** Every early model, CTC and autoregressive alike, emitted
+*more* characters than the reference contains. Two explanations were possible (#52):
+bad eval material, or a training-design problem. It was the second:
 
-An unconverged CTC network has not yet learned blank-dominance and emits a character at
-nearly every timestep — which *is* an insertion-dominated CER. The defaults are correct
-for the ~18 M-line corpus they were written against and wrong by three orders of
-magnitude for 1,898 lines.
+> from scratch on 1,898 lines at `batch_size: 256` is 8 batches per epoch, so **400
+> optimizer steps** over 50 epochs for a 15.2 M-parameter network from random weights —
+> with `1cycle` ramping and annealing the learning rate across all 400.
 
-**The eval material was audited and is sound**: `scripts/audit_eval_material.py` on the
-Thun split reports a median of 12.15 px of line per reference character over 189 lines,
-98.4 % within the plausible band. It needs no GPU and runs against the PageXML the
-prepare stage already wrote — run it on any job before believing its CER.
+An unconverged CTC network has not learned blank-dominance and emits a character at
+nearly every timestep, which *is* an insertion-dominated CER. The defaults are right for
+the ~18 M-line corpus they were written against and wrong by three orders of magnitude
+here. **The step-count guard (#72) now refuses such a configuration** between prepare
+and compile, before any GPU time, with the arithmetic in the error.
 
-**Confirmed by a controlled re-run** (2026-08-13, §9b): same data, same eval set, same
-pipeline, but starting from `kraken-late_medieval_german` at `batch_size: 16` for 30
-epochs — 3,570 steps instead of 400.
+**The eval material was audited and is sound** — `scripts/audit_eval_material.py`
+reports a median 12.15 px of line per reference character over 189 lines, 98.4 % inside
+the plausible band. No GPU, no model: it reads the PageXML prepare already wrote. Run it
+on any job before believing its CER.
 
-| base | script | CER | ins : del |
-|---|---|---:|---:|
-| from scratch | — | 0.9838 | 5,596 : 1 |
-| `late_medieval_german` | Textura | 0.3921 | 2.6 : 1 |
-| **`early_modern_german`** | **Kurrent** | **0.2350** | 0.6 : 1 |
+**Two findings worth carrying to the next corpus.**
 
-Changing only the base (§9c) took CER from 0.392 to 0.235: **script class beats
-century** — Kurrent is a century later than the Missiven and still beats a Textura
-base of the right period, because a CTC network transfers letterforms.
+*The error shape says more than the CER.* Insertions collapsing 11,191 → 470 while
+substitutions fall 2,552 → 1,452 is a model that went from emitting characters without
+aligning to the text, to reading it and getting characters wrong. By the third run
+deletions exceed insertions — under-trained but calibrated, which is what argues for
+more epochs rather than another base.
 
-The error *shape* is the confirmation. Insertions collapsing from 11,191 to 1,437 while
-substitutions rise from 186 to 2,552 is a model that went from emitting characters
-without aligning to the text, to reading it and getting characters wrong. Only the
-second is a converged model.
+*Match the hand before the century.* Kurrent is a century **later** than the Thuner
+Missiven and still beat a Textura base of the right period by 40 % relative. A CTC
+network transfers letterforms, and a formal book hand shares few with chancery cursive
+however close the dates.
 
-What follows for anyone submitting a job: **on a small corpus, fine-tune rather than
-train from scratch** (`base_model` takes a registry id, a Zenodo DOI or a local path, checked at
-submit — **#76**), **and scale `batch_size` to the corpus** — the step-count
-guard (#72) now refuses configurations that cannot converge. 0.392 is a real model but
-not a usable one (usable HTR is 0.05–0.10), so no CER here should be quoted yet, and
-nothing has been pushed to the hub.
+**Still true:** 0.235 is a real model, not a usable one (production HTR is 0.05–0.10).
+No CER here should be quoted or compared outside this table, and nothing has been pushed
+to the hub. `base_model` takes a registry id, a Zenodo DOI or a local path, validated at
+submit (#76).
 
 Open work is grouped into three epics:
 
