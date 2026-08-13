@@ -7,12 +7,16 @@ kraken 7.x flow (verified against the installed lib):
     from ``atr_serving.kraken_loader`` → ``kraken.lib.models.load_any``, which is
     what produces the ``TorchSeqRecognizer`` rpred's signature demands
 
-Lazy-loads recognition models, keeps one resident (LRU-of-1).
+Lazy-loads recognition models and keeps the most recent
+KRAKEN_MODEL_CACHE_SIZE resident (default 3) — a cold load is 90-130 s
+and the ensemble asks for several models per page (#81).
 """
 
 from __future__ import annotations
 
+import os
 import time
+from collections import OrderedDict
 from importlib.metadata import version as _pkg_version
 from io import BytesIO
 from pathlib import Path
@@ -36,8 +40,16 @@ CACHE_DIR.mkdir(exist_ok=True)
 app = FastAPI(title="ATR Kraken Engine", version="0.1.0")
 
 _model_files: dict[str, Path] = {}     # model_id -> resolved .mlmodel path
-_resident_id: str | None = None
-_resident_net = None
+
+# How many recognition models stay resident. One meant every switch paid a full
+# load — measured at 91-130 s — and the ensemble asks for several models per page,
+# so a single page loaded, evicted and reloaded the same model minutes apart (#81).
+# The ensemble plans up to ENSEMBLE_PER_ENGINE (3) kraken models per page, so 3
+# holds a whole page's set. Lower it if VRAM is tight; 1 restores the old behaviour.
+MODEL_CACHE_SIZE = max(1, int(os.getenv("KRAKEN_MODEL_CACHE_SIZE", "3")))
+
+#: model_id -> loaded net, most-recently-used last.
+_resident: "OrderedDict[str, object]" = OrderedDict()
 
 
 def _model_file(model_id: str) -> Path:
@@ -81,14 +93,34 @@ def _model_file(model_id: str) -> Path:
 
 
 def _load(model_id: str):
-    global _resident_id, _resident_net
-    if _resident_id == model_id and _resident_net is not None:
-        return _resident_net
+    """The loaded net for *model_id*, from the LRU when possible.
+
+    A hit is what makes a multi-model page viable: the load itself is 90-130 s and
+    the ensemble asks for several models per page, so with one slot the same model
+    was loaded, evicted and loaded again within minutes.
+    """
+    net = _resident.get(model_id)
+    if net is not None:
+        _resident.move_to_end(model_id)                    # mark most-recently used
+        return net
     path = _model_file(model_id)
-    logger.info("Loading recognition model {} from {} on {}", model_id, path, DEVICE)
-    _resident_net = load_recognition_model(path, device=DEVICE)
-    _resident_id = model_id
-    return _resident_net
+    logger.info("Loading recognition model {} from {} on {} (cache {}/{})",
+                model_id, path, DEVICE, len(_resident) + 1, MODEL_CACHE_SIZE)
+    net = load_recognition_model(path, device=DEVICE)
+    _resident[model_id] = net
+    while len(_resident) > MODEL_CACHE_SIZE:
+        evicted_id, evicted = _resident.popitem(last=False)   # least-recently used
+        logger.info("Evicting recognition model {} (cache full at {})",
+                    evicted_id, MODEL_CACHE_SIZE)
+        del evicted
+        # The eviction is pointless if the VRAM is not actually returned, and a
+        # slow OOM is worse than the reload this cache exists to avoid.
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:                           # pragma: no cover
+            logger.warning("could not release CUDA cache after eviction: {}", exc)
+    return net
 
 
 def _read_image(data: bytes) -> Image.Image:
@@ -123,7 +155,8 @@ def _record_conf(rec) -> float | None:
 async def health():
     return JSONResponse({
         "status": "ok", "device": DEVICE, "kraken": KRAKEN_VERSION,
-        "resident_model": _resident_id,
+        "resident_models": list(_resident),
+        "model_cache_size": MODEL_CACHE_SIZE,
     })
 
 
