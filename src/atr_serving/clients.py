@@ -28,7 +28,10 @@ class EngineError(Exception):
 class KrakenEngineClient:
     """Thin async httpx wrapper around the kraken engine service."""
 
-    def __init__(self, base_url: str, timeout: float = 120.0) -> None:
+    #: Every other engine client here uses 300 s. 120 s was below a cold kraken
+    #: model load, measured at 91 s and 128 s on srv (#81), so any request that
+    #: triggered a model swap was a coin flip — and it surfaced as "unreachable".
+    def __init__(self, base_url: str, timeout: float = 300.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
@@ -39,6 +42,17 @@ class KrakenEngineClient:
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.post(url, files=files, data=data)
+        except httpx.TimeoutException as exc:
+            # Distinct from a connection failure on purpose. Reporting a busy
+            # engine as "unreachable" sent two diagnoses at the wrong host (#81):
+            # the service was up and answering 200s throughout, loading a model.
+            # httpx timeouts also carry an empty str(), so the old message ended
+            # in a bare colon with nothing after it.
+            logger.error("kraken engine timed out after {}s at {}", self.timeout, url)
+            raise EngineError(
+                f"kraken engine did not answer within {self.timeout:.0f}s at {url} "
+                f"— it is running but busy (a cold model load takes ~90-130s)"
+            ) from exc
         except httpx.RequestError as exc:
             logger.error("kraken engine unreachable at {}: {}", url, exc)
             raise EngineError(f"kraken engine unreachable at {url}: {exc}") from exc
