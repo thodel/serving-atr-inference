@@ -77,6 +77,10 @@ def settings(tmp_path: Path, venvs: Path) -> TrainerSettings:
         trained_root=tmp_path / "trained",
         overlay_path=tmp_path / "models.local.yaml",
         venvs_root=venvs,
+        # Isolated deliberately: the default is ~/atr-cache/checkpoints, so a test
+        # that writes checkpoints would land in the developer's home directory and
+        # collide with any other test whose job id shares its second.
+        checkpoint_root=tmp_path / "checkpoints",
         min_free_disk_gb=0.0,
     )
 
@@ -560,11 +564,13 @@ def test_a_streaming_run_does_not_care_where_the_cache_lives(client, settings, m
 
 
 # ── the per-epoch record (#38) ──────────────────────────────────────────────
-def test_the_curve_is_404_until_the_train_stage_writes_it(client):
+def test_the_curve_answers_before_the_train_stage_writes_it(client):
+    """Was a 404 until #77. A caller polling a running job should not have to
+    handle one body for "not yet" and another for "here you go"."""
     job_id = client.post("/jobs", json=BODY).json()["job_id"]
     resp = client.get(f"/jobs/{job_id}/curve")
-    assert resp.status_code == 404
-    assert "train stage" in resp.json()["detail"]
+    assert resp.status_code == 200
+    assert resp.json()["points"] == []
 
 
 def test_the_curve_is_served_once_written(client):
@@ -643,3 +649,73 @@ class TestBaseModelAtSubmit:
     def test_from_scratch_is_unaffected(self, client):
         """base_model is optional for kraken; absent means from scratch."""
         assert client.post("/jobs", json=BODY).status_code == 202
+
+
+# ── the curve is for watching a RUNNING job (#77) ───────────────────────────
+class TestCurveWhileRunning:
+    """`training.json` is written when the train stage ends, so the endpoint had
+    nothing to say while a job was training — which is when it is most wanted.
+    Lightning writes each epoch's metric into the checkpoint filename as it goes,
+    so the data was on disk the whole time."""
+
+    def _training_job(self, client, settings, checkpoints: dict[int, float]):
+        job_id = client.post("/jobs", json=BODY).json()["job_id"]
+        store = store_of(client)
+        store.advance(store.load(job_id), "preparing")
+        store.advance(store.load(job_id), "compiling")
+        job = store.advance(store.load(job_id), "training")
+        ckpt = settings.checkpoint_root / job_id
+        ckpt.mkdir(parents=True, exist_ok=True)
+        for epoch, metric in checkpoints.items():
+            (ckpt / f"checkpoint_{epoch:02d}-{metric:.4f}.ckpt").touch()
+        job.checkpoint_dir = str(ckpt)
+        store.save(job)
+        return job_id
+
+    def test_a_running_job_reports_the_epochs_written_so_far(self, client, settings):
+        job_id = self._training_job(client, settings, {5: 0.71, 6: 0.73, 7: 0.75})
+        body = client.get(f"/jobs/{job_id}/curve").json()
+
+        assert body["live"] is True
+        assert [p["epoch"] for p in body["points"]] == [5, 6, 7]
+        assert body["best"]["epoch"] == 7
+        assert body["still_improving"] is True
+        assert "while the job is training" in body["note"]
+
+    def test_val_error_is_given_alongside_the_accuracy(self, client, settings):
+        job_id = self._training_job(client, settings, {5: 0.75})
+        point = client.get(f"/jobs/{job_id}/curve").json()["points"][0]
+        assert point["val_metric"] == 0.75
+        assert point["val_error"] == pytest.approx(0.25)
+
+    def test_a_job_that_has_not_trained_answers_in_the_same_shape(self, client):
+        """Not a 404: callers poll this, and an answer that changes shape between
+        'not yet' and 'here you go' makes every caller handle two bodies."""
+        job_id = client.post("/jobs", json=BODY).json()["job_id"]
+        resp = client.get(f"/jobs/{job_id}/curve")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["points"] == []          # iterable, not null — the #77 complaint
+        assert body["best"] is None
+        assert "no checkpoints yet" in body["note"]
+        assert body["job_id"] == job_id
+
+    def test_the_written_record_wins_once_the_stage_has_finished(self, client, settings):
+        """A finished stage's training.json is the authority; the checkpoint dir
+        gets pruned and would give a poorer answer."""
+        import json as _json
+
+        job_id = self._training_job(client, settings, {5: 0.71})
+        (store_of(client).paths(job_id).root / "training.json").write_text(
+            _json.dumps({"job_id": job_id, "points": [{"epoch": 42, "val_metric": 0.9}],
+                         "best": {"epoch": 42, "val_metric": 0.9}, "complete": False,
+                         "source": "file", "note": "final", "last_epoch": 42,
+                         "still_improving": True}),
+            encoding="utf-8")
+        body = client.get(f"/jobs/{job_id}/curve").json()
+        assert [p["epoch"] for p in body["points"]] == [42]
+        assert "live" not in body
+
+    def test_an_unknown_job_is_still_a_404(self, client):
+        assert client.get("/jobs/20260101T000000Z-nope/curve").status_code == 404
