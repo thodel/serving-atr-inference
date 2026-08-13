@@ -516,6 +516,40 @@ scores deletions. Only the middle state does this.
 with the same surface symptom — an instruct model that does not stop at the line
 (`docs/VLM_TRAINING.md`).
 
+### 9b. Confirmed by a controlled re-run (2026-08-13)
+
+Same data, same eval projects, same pipeline. Two things changed: it started from
+trained weights (`kraken-late_medieval_german`, `10.5281/zenodo.15366732`) and it got
+~9× the optimizer steps (`batch_size: 16`, `epochs: 30` → 3,570).
+
+| | from scratch, 400 steps | fine-tune, 3,570 steps |
+|---|---:|---:|
+| CER | 0.9838 | **0.3921** |
+| insertions | 11,191 | 1,437 |
+| deletions | 2 | 546 |
+| substitutions | 186 | 2,552 |
+| insertions : deletions | **5,596 : 1** | **2.6 : 1** |
+
+**The error *shape* is the confirmation, not the CER.** A better score could have come
+from anywhere. What could not is the collapse of the insertion asymmetry: before,
+insertions dominated absolutely and substitutions were negligible — a model emitting a
+character at nearly every timestep without aligning to the text at all. After,
+insertions and deletions sit in the same order of magnitude and **substitutions are the
+largest category**, which is what a model that reads the line and gets characters wrong
+looks like. Those are different failures, and only the second belongs to a model that
+has converged.
+
+**What this does and does not establish.** Two variables moved together, so it confirms
+that the configuration was the problem, not which half of it. Isolating them would take
+one more run — batch 16 *from scratch*, same ~3,570 steps — and is worth doing before
+any of this is written up as a recipe.
+
+**0.392 is a real model, not a good one.** Usable HTR is 0.05–0.10, and the word
+accuracy here is 9 % (WER 0.909), meaning almost every word carries an error. Some of
+the gap is a script-class mismatch: `late_medieval_german` is **Textura**, a formal book
+hand, while the Thuner Missiven are chancery cursive. Right language, right century,
+wrong hand — and `resize: union` extends the codec, not the model's idea of letterforms.
+
 **What to do differently** is in §3a: fine-tune from a base below ~100 K lines, and
 scale `batch_size` to the corpus. **What to build** is a guard: `lines / batch_size ×
 epochs` is computable the moment prepare reports a line count, and refusing — or at

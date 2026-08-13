@@ -71,10 +71,26 @@ Thun split reports a median of 12.15 px of line per reference character over 189
 98.4 % within the plausible band. It needs no GPU and runs against the PageXML the
 prepare stage already wrote — run it on any job before believing its CER.
 
+**Confirmed by a controlled re-run** (2026-08-13, §9b): same data, same eval set, same
+pipeline, but starting from `kraken-late_medieval_german` at `batch_size: 16` for 30
+epochs — 3,570 steps instead of 400.
+
+| | from scratch | fine-tune |
+|---|---:|---:|
+| CER | 0.9838 | **0.3921** |
+| insertions : deletions | 5,596 : 1 | **2.6 : 1** |
+
+The error *shape* is the confirmation. Insertions collapsing from 11,191 to 1,437 while
+substitutions rise from 186 to 2,552 is a model that went from emitting characters
+without aligning to the text, to reading it and getting characters wrong. Only the
+second is a converged model.
+
 What follows for anyone submitting a job: **on a small corpus, fine-tune rather than
-train from scratch** (`base_model` accepts a registry id or a Zenodo DOI and produces
-`ketos train --load … --resize union`), **and scale `batch_size` to the corpus**. None
-of these three CERs should be quoted; nothing has been pushed to the hub.
+train from scratch** (`base_model` takes a Zenodo DOI — a registry id is documented but
+not implemented, **#76**), **and scale `batch_size` to the corpus** — the step-count
+guard (#72) now refuses configurations that cannot converge. 0.392 is a real model but
+not a usable one (usable HTR is 0.05–0.10), so no CER here should be quoted yet, and
+nothing has been pushed to the hub.
 
 Open work is grouped into three epics:
 
