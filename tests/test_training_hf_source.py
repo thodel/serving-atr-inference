@@ -192,8 +192,11 @@ def test_a_decoded_image_cell_is_refused_with_the_reason():
 
 # ── verify_dataset_spec ─────────────────────────────────────────────────────
 class FakeSettings:
-    def __init__(self, min_free_disk_gb=50.0):
+    #: Defaults mirror TrainerSettings: streaming on, chunking off (#85).
+    def __init__(self, min_free_disk_gb=50.0, cache_datasets=False, chunk_pages=0):
         self.min_free_disk_gb = min_free_disk_gb
+        self.cache_datasets = cache_datasets
+        self.chunk_pages = chunk_pages
 
 
 class TestVerifyDatasetSpec:
@@ -285,6 +288,60 @@ class TestVerifyDatasetSpec:
                                      list_repo_files_fn=fake_list_ok,
                                      paths_size_fn=fake_size)
         assert any("GB" in e and "50" in e for e in errors)
+
+    # ── how the oversize refusal depends on the configuration (#85) ─────────
+    #
+    # The run behind these: a 461 K-page selection was refused at ~1023 GB while
+    # ATR_TRAIN_CACHE_DATASETS was false, i.e. for a download that would never
+    # happen — and the message named the two remedies that do not help.
+
+    @staticmethod
+    def _oversized(settings, **spec_kwargs):
+        """A five-shard, 100 GB selection against whatever settings say."""
+        def fake_list(repo, **kwargs):
+            return [f"data/train/{THUN_TRAIN}/s{i}.parquet" for i in range(5)] + \
+                   [f"data/train/{THUN_TEST}/s.parquet"]
+
+        def fake_size(repo, paths, revision=None, repo_type="dataset"):
+            return 20 * 1024**3 * len(paths)
+
+        spec = DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN], **spec_kwargs)
+        return verify_dataset_spec(spec, settings,
+                                   list_repo_files_fn=fake_list,
+                                   paths_size_fn=fake_size)
+
+    def test_streaming_and_chunked_is_allowed_however_large(self):
+        """Peak page-disk is one chunk, so the selection's weight is irrelevant.
+
+        This is the case the old guard made unreachable: #39 built chunked
+        materialize -> compile -> discard precisely so a corpus-scale selection
+        could run, and the guard refused it anyway.
+        """
+        errors = self._oversized(
+            FakeSettings(chunk_pages=5000), eval_projects=[THUN_TEST])
+        assert errors == []
+
+    def test_streaming_unchunked_is_refused_and_names_chunking(self):
+        """The shards stay off disk; the pages they materialize do not."""
+        errors = self._oversized(FakeSettings(), eval_projects=[THUN_TEST])
+        assert len(errors) == 1
+        assert "ATR_TRAIN_CHUNK_PAGES" in errors[0]
+
+    def test_caching_is_refused_and_names_streaming(self):
+        errors = self._oversized(
+            FakeSettings(cache_datasets=True), eval_projects=[THUN_TEST])
+        assert len(errors) == 1
+        assert "ATR_TRAIN_CACHE_DATASETS=false" in errors[0]
+
+    def test_chunking_without_eval_projects_says_why_it_cannot_apply(self):
+        """_should_chunk needs eval_projects; without them the setting is inert.
+
+        Refusing with the real reason beats accepting and silently materializing
+        everything, which is what the runner would fall back to.
+        """
+        errors = self._oversized(FakeSettings(chunk_pages=5000))
+        assert len(errors) == 1
+        assert "eval_projects" in errors[0]
 
     def test_aggregates_all_four_kinds_of_problems(self):
         """Errors from every check stage are collected, not short-circuited."""

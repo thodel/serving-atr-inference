@@ -436,6 +436,52 @@ def _default_paths_size(hf_repo: str, paths: list[str], revision: str | None,
     return sum(getattr(i, "size", 0) or 0 for i in infos)
 
 
+def _oversize_error(needed_gb: float, shard_count: int, settings,
+                    *, has_eval_projects: bool) -> str | None:
+    """Refuse an oversized selection — or allow it, when the pipeline streams it (#85).
+
+    This guard used to size the parquet selection and refuse on it unconditionally.
+    With ``cache_datasets=False`` — the default — those shards are never all
+    resident, so it measured a quantity the configured pipeline does not
+    materialize and rejected corpus-scale runs for a download that would not
+    happen. The remedy it named ("lower max_pages or free space") was the one pair
+    that does not address it; the two settings that do went unmentioned. The
+    selection that motivated this was refused at ~1023 GB while streaming.
+
+    What actually bounds disk depends on how the trainer is configured:
+
+    * **caching** — the shards do land, so the selection has to fit.
+    * **streaming, unchunked** — the shards do not land, but the pages they
+      materialize do, and nothing bounds them: 461 K pages accumulated ~526 GB over
+      23 h before that run died in ``compile``.
+    * **streaming, chunked** — peak page-disk is one chunk, whatever the selection
+      weighs. This is the path #39 built, and the one this guard made unreachable.
+    """
+    head = (f"the selection is ~{needed_gb:.1f} GB across {shard_count} parquet "
+            f"shards, over the {settings.min_free_disk_gb} GB the trainer keeps free")
+
+    if getattr(settings, "cache_datasets", False):
+        return (f"{head}, and ATR_TRAIN_CACHE_DATASETS is on, so all of it would be "
+                "downloaded. Stream it instead (ATR_TRAIN_CACHE_DATASETS=false), "
+                "lower max_pages, or free space.")
+
+    # Streaming from here down. Chunking is what bounds the materialized pages, and
+    # it requires explicit eval_projects: the validation set cannot come from
+    # splitting a stream that is discarded as it is read (runner_base._should_chunk).
+    if getattr(settings, "chunk_pages", 0) > 0:
+        if has_eval_projects:
+            return None
+        return (f"{head}. ATR_TRAIN_CHUNK_PAGES is set, but chunking needs explicit "
+                "eval_projects — the validation set cannot come from splitting a "
+                "stream that is discarded as it is read. Add eval_projects, or "
+                "lower max_pages.")
+
+    return (f"{head}. Streaming keeps the shards off disk, but the pages they "
+            "materialize are unbounded while ATR_TRAIN_CHUNK_PAGES=0. Set it "
+            "(e.g. 5000) so each chunk is compiled and discarded as it goes, or "
+            "lower max_pages.")
+
+
 def verify_dataset_spec(
     spec: DatasetSpec,
     settings: TrainerSettings,
@@ -545,10 +591,11 @@ def verify_dataset_spec(
             except VerificationUnavailable:
                 needed_gb = 0.0
             if needed_gb > settings.min_free_disk_gb:
-                errors.append(
-                    f"the selection is ~{needed_gb:.1f} GB across {len(selected)} "
-                    f"parquet shards, over the {settings.min_free_disk_gb} GB the "
-                    "trainer keeps free. Lower max_pages or free space."
+                oversize = _oversize_error(
+                    needed_gb, len(selected), settings,
+                    has_eval_projects=bool(spec.eval_projects),
                 )
+                if oversize:
+                    errors.append(oversize)
 
     return errors

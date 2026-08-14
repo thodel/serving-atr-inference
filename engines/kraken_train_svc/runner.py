@@ -26,6 +26,7 @@ from atr_serving.training.base_models import BaseModelError, resolve_base_model
 from atr_serving.training.contracts import Metrics, StageRecord, TrainJob, utcnow
 from atr_serving.training.ketos_cmd import (
     compile_cmd,
+    compile_workers,
     evaluate_cmd,
     find_best_weights,
     parse_test_report,
@@ -63,6 +64,25 @@ class Pipeline(BasePipeline):
     #: and the pages behind them can be deleted as we go (#39).
     supports_chunked_prepare = True
 
+    def _workers_for(self, job: TrainJob, manifest: Path) -> int:
+        """``--workers`` for this manifest, tapered by how many pages it holds (#85).
+
+        A fixed 8 was fine for the 238-page test case and is how a 461 K-page
+        manifest got itself SIGKILLed. Counting lines is a cheap read of a file we
+        just wrote.
+        """
+        requested = job.request.params.workers
+        try:
+            with manifest.open("r", encoding="utf-8") as fh:
+                pages = sum(1 for line in fh if line.strip())
+        except OSError:
+            return requested          # let ketos report the unreadable manifest
+        allowed = compile_workers(requested, pages)
+        if allowed < requested:
+            logger.info("compile: {} pages in {} — {} workers instead of {}",
+                        pages, manifest.name, allowed, requested)
+        return allowed
+
     def _compile(self, job: TrainJob, pages_train: Path, pages_val: Path,
                  record: StageRecord) -> tuple[Path, Path]:
         if is_plan(pages_train):
@@ -74,7 +94,7 @@ class Pipeline(BasePipeline):
             self._run(job, "compile",
                       compile_cmd(self.settings.ketos, manifest=manifest, output=arrow,
                                   device=job.request.params.device,
-                                  workers=job.request.params.workers),
+                                  workers=self._workers_for(job, manifest)),
                       record)
             if not arrow.exists() or arrow.stat().st_size == 0:
                 raise StageFailed(
@@ -91,7 +111,7 @@ class Pipeline(BasePipeline):
         self._run(job, "compile",
                   compile_cmd(self.settings.ketos, manifest=manifest, output=arrow,
                               device=job.request.params.device,
-                              workers=job.request.params.workers),
+                              workers=self._workers_for(job, manifest)),
                   record)
         if not arrow.exists() or arrow.stat().st_size == 0:
             raise StageFailed(

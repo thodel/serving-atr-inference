@@ -10,8 +10,10 @@ import pytest
 
 from atr_serving.training.contracts import KRAKEN_PLUS_SPEC, KrakenTrainParams
 from atr_serving.training.ketos_cmd import (
+    COMPILE_WORKER_TAPER_PAGES,
     KetosCommandError,
     compile_cmd,
+    compile_workers,
     find_best_weights,
     latest_checkpoint,
     parse_test_report,
@@ -219,3 +221,37 @@ def test_parse_empty_report_yields_no_metrics():
     reporting a perfect score."""
     m = parse_test_report("Traceback (most recent call last):\n  RuntimeError: CUDA OOM\n")
     assert m.cer is None and m.wer is None and m.chars is None
+
+
+# ── compile_workers (#85) ───────────────────────────────────────────────────
+class TestCompileWorkers:
+    """Peak RSS scales with workers x page size, and --workers was a fixed 8.
+
+    Job 20260808T183111Z-kraken-medieval-full-v1 compiled one 461,586-page
+    manifest with 8 workers and was SIGKILLed after 1 h 51 m.
+    """
+
+    def test_a_small_manifest_keeps_every_worker(self):
+        """The 238-page test case must not get slower for a corpus-scale problem."""
+        assert compile_workers(8, 238) == 8
+
+    def test_the_threshold_itself_is_not_tapered(self):
+        assert compile_workers(8, COMPILE_WORKER_TAPER_PAGES) == 8
+
+    def test_doubling_the_pages_past_the_threshold_halves_the_workers(self):
+        assert compile_workers(8, 2 * COMPILE_WORKER_TAPER_PAGES) == 4
+
+    def test_the_manifest_that_died_gets_one_worker(self):
+        assert compile_workers(8, 461_586) == 1
+
+    def test_it_never_returns_zero(self):
+        """Inverse-linear scaling reaches 0 by integer division long before this."""
+        assert compile_workers(8, 100_000_000) == 1
+
+    def test_it_never_raises_the_requested_count(self):
+        """A caller asking for 2 on a small manifest gets 2, not the taper's ceiling."""
+        assert compile_workers(2, 100) == 2
+        assert compile_workers(2, 10 * COMPILE_WORKER_TAPER_PAGES) == 1
+
+    def test_a_nonsensical_request_is_floored_at_one(self):
+        assert compile_workers(0, 500) == 1

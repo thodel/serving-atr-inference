@@ -19,7 +19,9 @@ from atr_serving.training.contracts import KrakenTrainParams, Metrics
 
 __all__ = [
     "KetosCommandError",
+    "COMPILE_WORKER_TAPER_PAGES",
     "compile_cmd",
+    "compile_workers",
     "train_cmd",
     "evaluate_cmd",
     "find_best_weights",
@@ -40,6 +42,33 @@ def _global_opts(device: str, workers: int | None = None, seed: int | None = Non
     if seed is not None:
         opts += ["--seed", str(seed)]
     return opts
+
+
+#: Above this many pages in one manifest, ``compile_workers`` starts reducing
+#: ``--workers``. Below it, the requested count is used unchanged.
+COMPILE_WORKER_TAPER_PAGES = 20_000
+
+
+def compile_workers(requested: int, pages: int) -> int:
+    """How many ``ketos compile`` workers a manifest of this size can afford (#85).
+
+    Each worker decodes pages independently, so peak RSS scales with
+    ``workers x page size`` while ``--workers`` stayed a fixed 8 no matter how
+    large the manifest was. Job ``20260808T183111Z-kraken-medieval-full-v1``
+    compiled a single 461,586-page manifest with 8 workers and was SIGKILLed after
+    1 h 51 m; the OOM killer is the leading explanation, unconfirmed only because
+    the kernel journal for that day could not be read.
+
+    Chunking (#39) is the real fix — it bounds a manifest to ``chunk_pages`` — but
+    it is off by default and does not apply to the val side, so this is the floor
+    under it rather than a substitute for it. The taper is inverse-linear: the
+    requested count up to the threshold, then scaled down so that
+    ``workers x pages`` stays roughly constant, never below 1.
+    """
+    requested = max(1, requested)
+    if pages <= COMPILE_WORKER_TAPER_PAGES:
+        return requested
+    return max(1, min(requested, requested * COMPILE_WORKER_TAPER_PAGES // pages))
 
 
 def compile_cmd(
