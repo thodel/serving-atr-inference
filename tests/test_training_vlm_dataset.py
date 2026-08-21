@@ -204,3 +204,112 @@ def test_score_with_no_characters_reports_no_rate():
     score = score_pairs([("", "")])
     assert score.cer is None and score.wer is None
     assert score.as_report()["cer"] is None
+
+
+# ── apply_visual_budget (#86) ───────────────────────────────────────────────
+from atr_serving.training.vlm_dataset import (  # noqa: E402
+    AppliedBudget,
+    VisualBudgetError,
+    apply_visual_budget,
+)
+
+
+class FakeImageProcessor:
+    """A Qwen3-VL image processor: `size` in pixel *areas*, patch 16 x merge 2."""
+
+    def __init__(self, size=None, max_pixels=None, patch_size=16, merge_size=2):
+        if size is not None:
+            self.size = size
+        if max_pixels is not None:
+            self.max_pixels = max_pixels
+        if patch_size is not None:
+            self.patch_size = patch_size
+        if merge_size is not None:
+            self.merge_size = merge_size
+
+
+class FakeProcessor:
+    def __init__(self, image_processor):
+        if image_processor is not None:
+            self.image_processor = image_processor
+
+
+def qwen3() -> FakeProcessor:
+    """What Qwen/Qwen3-VL-8B-Instruct's preprocessor_config.json actually declares."""
+    return FakeProcessor(FakeImageProcessor(
+        size={"longest_edge": 16777216, "shortest_edge": 65536}))
+
+
+class TestApplyVisualBudget:
+    """The budget was passed as `max_pixels=` and silently dropped.
+
+    Job 20260814T192904Z-qwen3vl-german-medieval-v1 trained at the model default
+    of 16384 visual tokens instead of 256, and died at step 2 of 774 when
+    truncation cut a 600-token image out of a 512-token sequence.
+    """
+
+    def test_qwen3_is_bounded_through_size_not_max_pixels(self):
+        processor = qwen3()
+        applied = apply_visual_budget(processor, 256 * 32 * 32)
+        assert applied.knob == "size.longest_edge"
+        assert processor.image_processor.size["longest_edge"] == 256 * 32 * 32
+
+    def test_the_default_line_budget_really_is_256_tokens_on_qwen3(self):
+        """The old constant used 28² — Qwen2-VL's grid — and bought 196, not 256."""
+        from atr_serving.training.contracts import VLM_PIXEL_BUDGET
+
+        applied = apply_visual_budget(qwen3(), VLM_PIXEL_BUDGET["line"])
+        assert applied.cell_px == 32 and applied.grid_known
+        assert applied.visual_tokens == 256
+
+    def test_the_untouched_default_would_have_been_16384_tokens(self):
+        """Why this matters: what the run was actually training at."""
+        default = qwen3().image_processor.size["longest_edge"]
+        assert default // (32 * 32) == 16384
+
+    def test_shortest_edge_is_left_alone(self):
+        processor = qwen3()
+        apply_visual_budget(processor, 256 * 32 * 32)
+        assert processor.image_processor.size["shortest_edge"] == 65536
+
+    def test_a_qwen2_style_processor_still_works(self):
+        """max_pixels is not wrong, just not Qwen3-VL's. Both are supported."""
+        processor = FakeProcessor(FakeImageProcessor(
+            max_pixels=1280 * 28 * 28, patch_size=14, merge_size=2))
+        applied = apply_visual_budget(processor, 256 * 28 * 28)
+        assert applied.knob == "max_pixels"
+        assert applied.cell_px == 28 and applied.visual_tokens == 256
+
+    def test_a_processor_with_no_knob_is_refused(self):
+        processor = FakeProcessor(FakeImageProcessor(patch_size=16, merge_size=2))
+        with pytest.raises(VisualBudgetError, match="neither"):
+            apply_visual_budget(processor, 4096)
+
+    def test_a_processor_with_no_image_processor_is_refused(self):
+        with pytest.raises(VisualBudgetError, match="no image_processor"):
+            apply_visual_budget(FakeProcessor(None), 4096)
+
+    def test_a_budget_that_does_not_stick_is_refused(self):
+        """The failure mode this whole helper exists for: it looked set, it wasn't."""
+        class Stubborn(FakeImageProcessor):
+            @property
+            def size(self):
+                return {"longest_edge": 16777216, "shortest_edge": 65536}
+
+            @size.setter
+            def size(self, value):
+                pass                      # accepts, discards — as the kwarg did
+
+        with pytest.raises(VisualBudgetError, match="did not take"):
+            apply_visual_budget(FakeProcessor(Stubborn()), 4096)
+
+    def test_an_unknown_grid_falls_back_and_says_so(self):
+        processor = FakeProcessor(FakeImageProcessor(
+            size={"longest_edge": 1}, patch_size=None, merge_size=None))
+        applied = apply_visual_budget(processor, 256 * 32 * 32)
+        assert applied.grid_known is False
+        assert "ASSUMED" in str(applied)
+
+    def test_str_is_readable_because_it_is_printed_into_the_job_log(self):
+        assert str(apply_visual_budget(qwen3(), 256 * 32 * 32)) == (
+            "size.longest_edge=262144 -> ~256 visual tokens (32px cell)")

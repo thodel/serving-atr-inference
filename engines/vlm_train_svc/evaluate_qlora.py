@@ -22,7 +22,11 @@ import json
 from pathlib import Path
 
 from atr_serving.training.textmetrics import score_pairs
-from atr_serving.training.vlm_dataset import chat_example, read_jsonl
+from atr_serving.training.vlm_dataset import (
+    apply_visual_budget,
+    chat_example,
+    read_jsonl,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -77,9 +81,10 @@ def load_model(args):
     processor_src = args.base_model
     if args.adapter and (Path(args.adapter) / "preprocessor_config.json").is_file():
         processor_src = args.adapter
-    processor = AutoProcessor.from_pretrained(
-        processor_src, trust_remote_code=True, max_pixels=args.max_pixels,
-    )
+    # Same budget, applied the same way as in training — a CER measured at a
+    # different visual budget than the model was trained at is not comparable (#86).
+    processor = AutoProcessor.from_pretrained(processor_src, trust_remote_code=True)
+    print(f"visual budget: {apply_visual_budget(processor, args.max_pixels)}", flush=True)
     if processor.tokenizer.pad_token_id is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 

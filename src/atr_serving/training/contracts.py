@@ -49,11 +49,16 @@ TROCR_BASE_MODEL = "microsoft/trocr-base-handwritten"
 #: distribution shift.
 VLM_PROMPT = "Transcribe the handwritten text in this image exactly as written."
 
-#: Visual-token budget per sample kind, in pixels (the processor divides by 28²
-#: to get visual tokens). Same figures as lassberg/vlm_training's collator: a
-#: line crop needs a few hundred tokens, a full page needs thousands, and feeding
-#: both through one budget either starves the page or wastes the line.
-VLM_PIXEL_BUDGET: dict[str, int] = {"line": 256 * 28 * 28, "page": 2048 * 28 * 28}
+#: Visual-token budget per sample kind, in pixels. A processor divides by the area
+#: of one merged patch to get visual tokens, and **that area is model-specific**:
+#: 28² is Qwen2-VL (patch 14 x merge 2), while Qwen3-VL is patch 16 x merge 2 = 32².
+#: These figures carry the intended *token* counts — 256 for a line, 2048 for a page,
+#: as in lassberg/vlm_training's collator — against Qwen3-VL's grid, because that is
+#: what ``VlmTrainParams.base_model`` points at. The runtime does not trust this: it
+#: re-derives the cap from the processor's own patch_size/merge_size and reports it
+#: (``vlm_dataset.apply_visual_budget``), so a base with a different grid cannot
+#: quietly train at another budget than the one written here (#86).
+VLM_PIXEL_BUDGET: dict[str, int] = {"line": 256 * 32 * 32, "page": 2048 * 32 * 32}
 #: Token budget per sample kind (prompt + image + transcription).
 VLM_MAX_SEQ_LEN: dict[str, int] = {"line": 512, "page": 4096}
 
@@ -293,7 +298,7 @@ class VlmTrainParams(BaseModel):
 
     # ── budgets ──────────────────────────────────────────────────────────────
     #: None = the granularity's entry in VLM_PIXEL_BUDGET / VLM_MAX_SEQ_LEN.
-    max_pixels: int | None = Field(default=None, ge=28 * 28)
+    max_pixels: int | None = Field(default=None, ge=32 * 32)
     max_seq_len: int | None = Field(default=None, ge=32)
 
     # ── evaluation ───────────────────────────────────────────────────────────

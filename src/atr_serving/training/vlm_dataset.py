@@ -33,6 +33,10 @@ from atr_serving.training.pagexml import line_boxes, line_texts
 
 __all__ = [
     "VlmDatasetError",
+    "VisualBudgetError",
+    "AppliedBudget",
+    "FALLBACK_CELL_PX",
+    "apply_visual_budget",
     "Sample",
     "DEFAULT_LINE_PAD",
     "MIN_CROP_PX",
@@ -249,3 +253,88 @@ def chat_example(prompt: str, text: str | None = None) -> list[dict]:
     if text is not None:
         messages.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
     return messages
+
+
+# ── the visual-token budget (#86) ───────────────────────────────────────────
+#: Area of one merged patch when a processor will not say: Qwen3-VL's 16 x 2.
+FALLBACK_CELL_PX = 32
+
+
+class VisualBudgetError(VlmDatasetError):
+    """The visual-token budget could not be applied to this processor."""
+
+
+@dataclass(frozen=True)
+class AppliedBudget:
+    """What ``apply_visual_budget`` actually set, so a caller can print it."""
+
+    knob: str
+    max_pixels: int
+    cell_px: int
+    visual_tokens: int
+    #: True when the grid was read off the processor rather than assumed.
+    grid_known: bool
+
+    def __str__(self) -> str:
+        grid = f"{self.cell_px}px cell" + ("" if self.grid_known else ", ASSUMED")
+        return (f"{self.knob}={self.max_pixels} -> ~{self.visual_tokens} visual "
+                f"tokens ({grid})")
+
+
+def apply_visual_budget(processor, max_pixels: int) -> AppliedBudget:
+    """Bound visual tokens per image, whatever this processor calls the knob.
+
+    Passing ``max_pixels=`` to ``AutoProcessor.from_pretrained`` is a **Qwen2-VL**
+    idiom. Qwen3-VL's image processor is a ``Qwen2VLImageProcessorFast`` configured
+    through ``size={"longest_edge", "shortest_edge"}`` — areas in pixels — and it
+    accepts the kwarg without applying it. So the budget looked set and was not:
+    against an intended ~256 tokens a line crop produced 600, the sequence budget
+    truncated it, and truncation severed the image tokens from the placeholders that
+    index them. The job died at step 2 of 774 (#86).
+
+    The knob is therefore written **directly onto the image processor** and read
+    back. The read-back proves the attribute exists and now holds this value; it
+    cannot prove the processor honours it, which would need a real image. That is
+    still the difference between a budget that is wrong and one that is absent, and
+    absent was the bug.
+
+    The returned token figure is derived from the processor's own
+    ``patch_size``/``merge_size`` rather than a constant, because that grid is what
+    made :data:`~atr_serving.training.contracts.VLM_PIXEL_BUDGET` wrong for this
+    model in the first place.
+    """
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None:
+        raise VisualBudgetError(
+            "processor exposes no image_processor, so visual tokens cannot be "
+            "bounded — refusing to train at the model's default, which for "
+            "Qwen3-VL is 16384 tokens per image"
+        )
+
+    size = getattr(image_processor, "size", None)
+    if isinstance(size, dict) and "longest_edge" in size:
+        size["longest_edge"] = max_pixels
+        image_processor.size = size
+        knob, read_back = "size.longest_edge", image_processor.size.get("longest_edge")
+    elif getattr(image_processor, "max_pixels", None) is not None:
+        image_processor.max_pixels = max_pixels
+        knob, read_back = "max_pixels", image_processor.max_pixels
+    else:
+        raise VisualBudgetError(
+            f"{type(image_processor).__name__} has neither size['longest_edge'] nor "
+            "max_pixels; there is no knob here to bound visual tokens with"
+        )
+
+    if read_back != max_pixels:
+        raise VisualBudgetError(
+            f"set {knob}={max_pixels} but it reads back as {read_back!r} — the budget "
+            "did not take, and training would run at the model's default"
+        )
+
+    patch = getattr(image_processor, "patch_size", None)
+    merge = getattr(image_processor, "merge_size", None)
+    grid_known = bool(patch) and bool(merge)
+    cell = int(patch) * int(merge) if grid_known else FALLBACK_CELL_PX
+    return AppliedBudget(knob=knob, max_pixels=max_pixels, cell_px=cell,
+                         visual_tokens=max_pixels // (cell * cell),
+                         grid_known=grid_known)

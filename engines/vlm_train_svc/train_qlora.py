@@ -20,7 +20,11 @@ import argparse
 import json
 from pathlib import Path
 
-from atr_serving.training.vlm_dataset import chat_example, read_jsonl
+from atr_serving.training.vlm_dataset import (
+    apply_visual_budget,
+    chat_example,
+    read_jsonl,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -100,6 +104,8 @@ class HTRCollator:
         self.prompt = prompt
         self.max_seq_len = max_seq_len
         self.ignore_index = -100
+        #: Samples that tokenized past ``max_seq_len``. Counted, never truncated.
+        self.over_budget = 0
         # The visual-token budget is set once on the processor, not per sample:
         # a job has a single granularity, so every sample in it is the same kind.
         # (Samples still carry ``source_type``, which is what a mixed set would
@@ -140,12 +146,26 @@ class HTRCollator:
                 add_generation_prompt=False,
             ))
 
+        # No ``truncation``/``max_length``. On a text-only sequence truncation
+        # loses the tail; here it severs image tokens from the placeholders that
+        # index them, and the result is not a shorter sample but an invalid one —
+        # which is what killed 20260814T192904Z at step 2 of 774 (#86). With the
+        # visual budget actually applied these fit; when one does not, say so and
+        # let the processor see the whole thing.
         inputs = self.processor(
             text=texts, images=images, return_tensors="pt", padding=True,
-            truncation=True, max_length=self.max_seq_len,
         )
         for image in images:
             image.close()
+
+        length = int(inputs["input_ids"].shape[1])
+        if length > self.max_seq_len:
+            self.over_budget += 1
+            if self.over_budget <= 3 or self.over_budget % 100 == 0:
+                print(f"warning: a sample tokenized to {length} tokens, over "
+                      f"max_seq_len={self.max_seq_len} ({self.over_budget} so far). "
+                      "Not truncated — truncating a multimodal sequence produces an "
+                      "invalid sample rather than a shorter one.", flush=True)
 
         labels = inputs["input_ids"].clone()
         labels[labels == self.processor.tokenizer.pad_token_id] = self.ignore_index
@@ -220,16 +240,16 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    processor = AutoProcessor.from_pretrained(
-        args.base_model, trust_remote_code=True, max_pixels=args.max_pixels,
-    )
+    # NOT ``max_pixels=`` here: Qwen3-VL accepts the kwarg and ignores it (#86).
+    processor = AutoProcessor.from_pretrained(args.base_model, trust_remote_code=True)
+    budget = apply_visual_budget(processor, args.max_pixels)
     if processor.tokenizer.pad_token_id is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
     train_ds = JsonlSamples(args.train_jsonl, args.data_root)
     val_ds = JsonlSamples(args.val_jsonl, args.data_root)
     print(f"train={len(train_ds)} val={len(val_ds)} "
-          f"granularity={args.granularity} max_pixels={args.max_pixels}", flush=True)
+          f"granularity={args.granularity} budget: {budget}", flush=True)
 
     model = build_model(args, processor)
     collator = HTRCollator(processor, args.prompt, args.max_seq_len)
