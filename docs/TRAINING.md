@@ -578,6 +578,40 @@ but a different yardstick.
 nothing. Chunking is driven solely by `ATR_TRAIN_CHUNK_PAGES` (§8b). Setting it in
 a request does nothing and says nothing.
 
+## 8c-bis. VLM: training as long as it improves (#88)
+
+kraken has had `--quit early --min-epochs --lag` all along, and it matters:
+`kraken-medieval-shard00-std` ran to **epoch 66** under a `--epochs 30` schedule
+and peaked at 21. The VLM backend used to take a fixed `epochs` count, so a run
+either stopped mid-improvement or burned hours after the plateau.
+
+```json
+"params": {
+  "epochs": 1,          // floor: never stop before this
+  "max_epochs": 8,      // ceiling: never run past it
+  "patience": 2,        // evaluations without improvement before stopping
+  "min_delta": 0.0001   // how much better counts as better
+}
+```
+
+`max_epochs` absent (the default) means the old behaviour: train exactly `epochs`
+and stop. `min_delta` defaults to `1e-4` rather than `0` on purpose — a loss that
+improves in the fifth decimal would otherwise read as improvement and the run
+would never stop on its own.
+
+Each epoch prints its verdict:
+
+```
+continuation @ epoch 4: continue: still improving (best epoch 4 at 0.51203, 0 since)
+continuation @ epoch 7: stop: no improvement over 0.0001 in 2 evaluation(s), patience=2 (best epoch 5 at 0.50811, 2 since)
+```
+
+**The decision uses validation loss, not CER.** Loss is already computed each
+epoch; a CER evaluation generates a transcription per sample at roughly a second
+each. The two can diverge — a model can keep reducing loss while its CER
+plateaus — so read the final CER from the `test` stage as always, and treat the
+continuation curve as a stopping heuristic rather than a quality measurement.
+
 ## 8d. Publishing a trained model to the Hub
 
 The `register` stage leaves one directory per model under
@@ -604,6 +638,37 @@ Three rules the script will not let you past:
 
 `huggingface_hub` is deliberately absent from the gateway venv, so this must run
 from a trainer venv. Triggering it from Discord is the subject of epic #84.
+
+### Automatic publishing above a score (#88)
+
+```bash
+systemctl --user set-environment ATR_TRAIN_AUTO_PUBLISH_MIN_ACCURACY=80
+systemctl --user set-environment ATR_TRAIN_AUTO_PUBLISH_ORG=dh-unibe
+systemctl --user restart atr-train
+```
+
+**0 is the default and means off.** Above the threshold, a finished model is
+pushed after `register`, to a **private** repo — automation never passes
+`--public` and never invents a licence, because the hub keeps history and an
+unpublish is a deletion that does not undo the copy someone already pulled.
+
+It runs beside the promotion gate, outside the stage, and cannot fail the job: a
+model that was trained and scored is not a failed run because an upload did not
+happen. What it did lands on the job record as a sentence, including when it did
+nothing:
+
+```bash
+curl -s localhost:8204/jobs/<id> | python3 -c 'import json,sys; print(json.load(sys.stdin)["published"])'
+# skip: char_accuracy 76.76% is below the 80.00% threshold
+# skip: ... reaches the threshold, but no token is set (HF_TOKEN or HUGGINGFACE_HUB_TOKEN)
+# published: https://huggingface.co/dh-unibe/kraken-medieval-german-v1
+```
+
+The token is **not** read from `.env` by the trainer — set `HF_TOKEN` in the unit
+environment the same way, or authenticate once with
+`.venvs/kraken-train/bin/hf auth login`, whose credentials `huggingface_hub`
+picks up. A missing token is reported before the upload rather than discovered
+inside it.
 
 ## 9. Troubleshooting
 

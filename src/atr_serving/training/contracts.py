@@ -284,7 +284,19 @@ class VlmTrainParams(BaseModel):
     modules_to_save: list[str] = Field(default_factory=list)
 
     # ── optimisation ─────────────────────────────────────────────────────────
+    #: Minimum epochs. With ``max_epochs`` set this is a floor, not a count.
     epochs: int = Field(default=3, ge=1)
+    #: Ceiling for the continuation policy (#88). None = train exactly ``epochs``
+    #: and stop, the old behaviour. Set it and the run keeps going while the
+    #: validation loss still improves, the way kraken's ``--quit early`` does —
+    #: ``kraken-medieval-shard00-std`` ran to epoch 66 under a 30-epoch schedule
+    #: and peaked at 21, which a fixed count would have missed by 45 epochs.
+    max_epochs: int | None = Field(default=None, ge=1)
+    #: Evaluations without a real improvement before stopping.
+    patience: int = Field(default=2, ge=1)
+    #: How much better counts as better. Without it a loss that improves in the
+    #: fifth decimal reads as improvement and the run never stops on its own.
+    min_delta: float = Field(default=1e-4, ge=0.0)
     #: Page samples can exceed 4 k tokens, so >1 risks OOM; scale with grad accum.
     batch_size: int = Field(default=1, ge=1)
     accumulate_grad_batches: int = Field(default=16, ge=1)
@@ -316,6 +328,28 @@ class VlmTrainParams(BaseModel):
     device: str = "cuda:0"
     #: Weights & Biases run name; None = reporting off (the box has no wandb key).
     wandb_run: str | None = None
+
+    @model_validator(mode="after")
+    def _check_epoch_bounds(self):
+        if self.max_epochs is not None and self.max_epochs < self.epochs:
+            raise ValueError(
+                f"max_epochs={self.max_epochs} is below epochs={self.epochs}. "
+                "`epochs` is the floor and `max_epochs` the ceiling (#88)."
+            )
+        return self
+
+    @property
+    def continuation(self):
+        """The policy this run trains under, or None for a fixed epoch count."""
+        from atr_serving.training.continuation import ContinuationPolicy
+
+        if self.max_epochs is None:
+            return None
+        return ContinuationPolicy(
+            min_epochs=self.epochs, max_epochs=self.max_epochs,
+            patience=self.patience, min_delta=self.min_delta,
+            greater_is_better=False,          # the metric is eval_loss
+        )
 
     @property
     def effective_batch_size(self) -> int:
@@ -585,6 +619,9 @@ class TrainJob(BaseModel):
     #: the gateway for this model. False with a reason is a normal outcome, not a
     #: failure — the model is trained and registered, it is simply not advertised.
     promoted: bool | None = None
+    #: What auto-publish did, in words — including why it did nothing (#88). The
+    #: job record is where anyone looks for why a model is or is not on the hub.
+    published: str | None = None
     promotion_reason: str | None = None
     #: Set when the step-count guard refused the configuration and ``force`` ran it
     #: anyway (#72) — so a CER from a run that was known not to converge is never

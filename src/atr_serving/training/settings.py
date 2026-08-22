@@ -108,6 +108,15 @@ class TrainerSettings(BaseSettings):
     #: peak page-disk is one chunk instead of the whole selection.
     chunk_pages: int = 0
 
+    #: Publish a finished model to the Hub when its character accuracy reaches
+    #: this, in percent. **0 disables it**, and that is the default: uploading is
+    #: outward-facing and the hub keeps history, so it is opted into deliberately.
+    #: Repos are created **private** — `publish.py` takes no `--public` from
+    #: automation, and no licence is ever invented (#88).
+    auto_publish_min_accuracy: float = 0.0
+    #: Where auto-published models go. Ignored when the threshold is 0.
+    auto_publish_org: str = "dh-unibe"
+
     #: Training and inference do not share the card politely; one job at a time.
     max_concurrent: int = 1
     #: How often the scheduler reconciles jobs and starts a queued one.

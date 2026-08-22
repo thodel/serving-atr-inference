@@ -497,6 +497,40 @@ class BasePipeline(ABC):
         """Copy the model out of the job's scratch and add it to the overlay,
         ``enabled: false`` until something has actually served it."""
 
+    def _maybe_publish(self, job: TrainJob, model_path: Path) -> str:
+        """Publish to the Hub when the score clears the threshold (#88).
+
+        The decision is in ``training.autopublish``; this only carries it out.
+        Returns what happened, in words, because the job record is where anyone
+        will look for why a model is or is not on the hub.
+
+        Private, always. ``publish.py`` refuses a model without ``metadata.json``
+        and invents no licence, and automation gets less latitude than the human
+        running ``scripts/publish_to_hub.py``, not more.
+        """
+        from atr_serving.training.autopublish import decide
+
+        accuracy = job.metrics.char_accuracy if job.metrics else None
+        verdict = decide(accuracy, self.settings.auto_publish_min_accuracy,
+                         self.settings.auto_publish_org)
+        logger.info("auto-publish: {}", verdict)
+        if not verdict.publish:
+            return str(verdict)
+
+        from atr_serving.training.publish import (
+            HubUploader, plan, publish_one, scan_trained,
+        )
+
+        scan = scan_trained(Path(self.settings.trained_root))
+        wanted = [m for m in scan.models if m.model_id == job.request.model_id]
+        if not wanted:
+            return (f"not published: {job.request.model_id} is not in "
+                    f"{self.settings.trained_root} after register")
+        publications = plan(wanted, org=verdict.org, private=verdict.private)
+        result = publish_one(publications[0], HubUploader())
+        logger.info("auto-publish: {} -> {}", result.status, result.url or result.detail)
+        return f"{result.status}: {result.url or result.detail}"
+
     def _promote(self, job: TrainJob, model_artifact: Path) -> PromotionResult:
         """The promotion gate (#36): prove the box can serve this, then advertise it.
 
@@ -552,6 +586,15 @@ class BasePipeline(ABC):
             job.promotion_reason = verdict.reason
             logger.info("promotion gate: {} — {}",
                         "PASSED" if verdict.promoted else "not promoted", verdict.reason)
+
+            # Same rule as the gate above, for the same reason: a model that was
+            # trained and scored is not a failed run because an upload did not
+            # happen. Never inside the stage, never raising (#88).
+            try:
+                job.published = self._maybe_publish(job, model_path)
+            except BaseException as exc:  # noqa: BLE001
+                job.published = f"not published: {type(exc).__name__}: {exc}"
+                logger.warning("auto-publish failed: {}", exc)
             self.store.save(job)
 
             return self.store.advance(job, "completed")

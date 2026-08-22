@@ -82,6 +82,11 @@ def train_cmd(
            "--output-dir", str(output_dir),
            *_common(params, base_model, data_root),
            "--epochs", str(params.epochs),
+        # Training only: `_common` also feeds evaluate_qlora, whose parser has no
+        # epoch knobs and exits 2 on an unknown flag (caught by the argv roundtrip).
+        "--max-epochs", str(params.max_epochs or params.epochs),
+        "--patience", str(params.patience),
+        "--min-delta", str(params.min_delta),
            "--batch-size", str(params.batch_size),
            "--accumulate-grad-batches", str(params.accumulate_grad_batches),
            "--lrate", str(params.lrate),

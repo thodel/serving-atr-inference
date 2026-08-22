@@ -20,6 +20,7 @@ import argparse
 import json
 from pathlib import Path
 
+from atr_serving.training.continuation import ContinuationPolicy, should_stop
 from atr_serving.training.vlm_dataset import (
     apply_visual_budget,
     chat_example,
@@ -42,7 +43,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda:0")
 
-    p.add_argument("--epochs", type=int, default=3)
+    p.add_argument("--epochs", type=int, default=3,
+                   help="minimum epochs; a floor when --max-epochs exceeds it")
+    p.add_argument("--max-epochs", type=int, default=None,
+                   help="ceiling; keep training while validation loss improves")
+    p.add_argument("--patience", type=int, default=2)
+    p.add_argument("--min-delta", type=float, default=1e-4)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--accumulate-grad-batches", type=int, default=16)
     p.add_argument("--lrate", type=float, default=2e-4)
@@ -187,6 +193,35 @@ class HTRCollator:
         return inputs
 
 
+def make_continuation_callback(policy: ContinuationPolicy):
+    """Stop when ``should_stop`` says so — the arithmetic lives in `continuation`.
+
+    ``transformers`` ships ``EarlyStoppingCallback``, which has patience but no
+    floor: it will stop during the first epochs of a QLoRA run, where the loss is
+    still noisy enough to look like a plateau. kraken has had ``--min-epochs``
+    since the beginning and this keeps the two backends' idiom the same (#88).
+    """
+    from transformers import TrainerCallback
+
+    class ContinueWhileImproving(TrainerCallback):
+        def __init__(self):
+            self.history: list[float] = []
+
+        def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+            value = (metrics or {}).get("eval_loss")
+            if value is None:
+                print("continuation: no eval_loss in metrics, not deciding", flush=True)
+                return control
+            self.history.append(float(value))
+            verdict = should_stop(self.history, policy)
+            print(f"continuation @ epoch {len(self.history)}: {verdict}", flush=True)
+            if verdict.stop:
+                control.should_training_stop = True
+            return control
+
+    return ContinueWhileImproving()
+
+
 def build_model(args, processor):
     import torch
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -258,7 +293,9 @@ def main(argv: list[str] | None = None) -> int:
         model=model,
         args=TrainingArguments(
             output_dir=str(out_dir),
-            num_train_epochs=args.epochs,
+            # The ceiling. The callback decides when to stop below it; without a
+            # ceiling this is just `epochs` and the callback never fires.
+            num_train_epochs=max(args.epochs, args.max_epochs or args.epochs),
             per_device_train_batch_size=args.batch_size,
             per_device_eval_batch_size=args.batch_size,
             gradient_accumulation_steps=args.accumulate_grad_batches,
@@ -288,6 +325,19 @@ def main(argv: list[str] | None = None) -> int:
         eval_dataset=val_ds,
         data_collator=collator,
     )
+
+    ceiling = max(args.epochs, args.max_epochs or args.epochs)
+    if ceiling > args.epochs:
+        policy = ContinuationPolicy(
+            min_epochs=args.epochs, max_epochs=ceiling,
+            patience=args.patience, min_delta=args.min_delta,
+            greater_is_better=False,
+        )
+        trainer.add_callback(make_continuation_callback(policy))
+        print(f"continuation: {args.epochs}-{ceiling} epochs, patience "
+              f"{args.patience}, min_delta {args.min_delta}", flush=True)
+    else:
+        print(f"continuation: off, training exactly {args.epochs} epoch(s)", flush=True)
     trainer.train()
 
     # Save the adapter at the top of output_dir: find_adapter() looks there first,
