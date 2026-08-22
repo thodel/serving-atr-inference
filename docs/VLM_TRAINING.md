@@ -225,3 +225,57 @@ engines/vlm_train_svc/           the only place torch is imported
   train_qlora.py    the training subprocess
   evaluate_qlora.py the evaluation subprocess
 ```
+
+---
+
+## The visual-token budget, and why it is verified (#86)
+
+`VlmTrainParams.max_pixels` bounds how many visual tokens one image becomes. It
+is the single most consequential number in a VLM run — and for the first weeks of
+this backend **it did nothing at all**.
+
+`AutoProcessor.from_pretrained(base, max_pixels=…)` is a **Qwen2-VL** idiom.
+Qwen3-VL's image processor is a `Qwen2VLImageProcessorFast` configured through
+`size={"longest_edge", "shortest_edge"}` — areas in pixels — and it accepts the
+kwarg without applying it. `Qwen/Qwen3-VL-8B-Instruct/preprocessor_config.json`:
+
+```json
+{"size": {"longest_edge": 16777216, "shortest_edge": 65536},
+ "patch_size": 16, "merge_size": 2}
+```
+
+`16777216 / 32²` is **16,384 visual tokens**, which is what runs were actually
+training at against an intended 256. It surfaced only when the sequence budget
+truncated a 600-token line crop and the processor refused the result:
+
+```
+ValueError: Mismatch in `image` token count between text and `input_ids`.
+Got ids=[84, 72, 87, 508] and text=[84, 72, 87, 600].
+```
+
+Three fixes, and the third is a design rule rather than a bug:
+
+- **`apply_visual_budget()` writes the knob onto the image processor and reads it
+  back**, handling both conventions. It refuses rather than proceeding when the
+  value does not stick. The read-back proves the attribute exists and holds the
+  value — *not* that the processor honours it, which would need a real image. That
+  distinction matters, and the difference that bit here was a budget that was
+  **absent**, not one that was wrong.
+- **The token cap is derived from the processor's own `patch_size`/`merge_size`**,
+  not a constant. `VLM_PIXEL_BUDGET` had been multiplying by 28² — patch 14 ×
+  merge 2, Qwen2-VL's grid — which buys 196 tokens where the name says 256. The
+  figure is printed at startup so a future base's grid cannot differ in silence:
+
+  ```
+  size.longest_edge=262144 -> ~256 visual tokens (32px cell)
+  ```
+
+- **Never truncate a multimodal sequence.** On text, truncation loses the tail. On
+  a sequence containing image placeholders it severs the image tokens from the
+  placeholders that index them, and the result is not a shorter sample but an
+  invalid one. Samples over `max_seq_len` are now counted and reported; nothing is
+  cut. Truncation had been masking the budget bug, because with a real budget they
+  fit.
+
+The startup line is written *before* training, so a tail-limited log query on a
+long run will not show it — ask for enough lines to reach the beginning.

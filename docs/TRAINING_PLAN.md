@@ -644,6 +644,48 @@ Two further findings came out of the same runs:
   metric embedded in `checkpoint_<NN>-<val_metric>.ckpt`), not the log.
 
 
+### 9e. The VLM path completes, and does not win (2026-08-21)
+
+`20260821T163926Z-qwen3vl-german-medieval-v1` is the first VLM run to pass all
+five stages. It trained a Qwen3-VL-8B QLoRA on **4,124 lines** of mixed German
+(Königsfelden charters, Basel HGB, Thun, `u-17_*`) and was scored on the same
+held-out `GT_Thun-Test` as the kraken chain — 189 samples for both, so the numbers
+are comparable. (Reference-character totals differ slightly: 11,502 measured for
+the VLM run, ~11,565 implied by `thun-kurrent-v2`'s error counts. Under 0.6 %, and
+it does not move the ranking, but they are not the identical denominator.)
+
+| model | engine | train lines | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|---:|
+| `thun-kurrent-v2` | kraken | 1,898 | **0.2180** | 395 | 814 | 1,312 |
+| `qwen3vl-german-medieval-v1` | vllm | 4,124 | **0.2324** | 232 | 866 | 1,575 |
+
+**More than twice the data, and still 6 % behind.** The error profile is the
+interesting part, not the total. The VLM makes **41 % fewer insertions** and its
+`length_ratio` is 1.055 — it produces well-calibrated transcription lengths, far
+from the runaway insertion behaviour of §9a. But it makes **20 % more
+substitutions**: it reads the wrong character more often. That is the signature of
+a language model producing plausible German where a CTC network maps visual
+evidence, and it is what a fine-tune on four thousand lines buys — enough to fix
+length calibration, not enough to teach the hands.
+
+Two cautions on reading this as a verdict on the approach:
+
+- **4,124 lines is very little for an 8B adapter.** The comparison says the VLM
+  does not beat kraken *at this corpus size*, not that it will not.
+- **The selection was mixed and the eval was not.** Training spanned four
+  provenances; evaluation was Bernese Thun alone. Capacity spent on Königsfelden
+  and Basel hands cannot show up in this metric.
+
+Alongside it, a hand-run kraken job on one shard of the medieval corpus
+(`kraken-medieval-shard00-std`, outside the job API) reached **CER 0.177** on its
+own validation split after 66 epochs at ~77 min each. Different eval material, so
+not a row in the table above — but it is the best number the project has produced,
+and it came from more data rather than from a better configuration.
+
+**Which settles the direction.** §9d showed the epoch lever spent; §9c showed the
+base lever spent; this shows the engine lever is not where the gain is either. The
+remaining lever is the corpus, and §11 is about pulling it.
+
 ## 10. The full-dataset run (2026-08-08)
 
 The first attempt at all 690 projects, and what it cost to learn that the default
@@ -684,3 +726,93 @@ keeps each chunk's directory bounded) is the fix rather than a restart.
 **What changed as a result:** streaming is now the default (`911dc1e`). Caching stays
 available because it is right at project scale — re-fetching a 116 MB dataset every run
 is the waste that made it the old default — and inverts at terabyte scale.
+
+---
+
+## 11. Choosing a corpus (2026-08-22, #87)
+
+Every lever in §9 is spent except the data, and the data question turned out to be
+a *selection* question rather than a volume question.
+
+### What was actually available
+
+dh-unibe publishes **32 datasets**. The runs in §9 all drew on one of them,
+`image-text_medieval-scripts_xiv-xv-xvi`, whose card reads:
+
+> Geographical scope: Belgium · Period: 1350–1550 · Languages: **Flemish** ·
+> Provenance: State Archives in Leuven
+
+Its 548,322 pages are Leuven aldermen's registers. The German inside it — Thun,
+Königsfelden `u-17_*`, Basel `HGB_FT_M4_*`, `charters` — came to **291 usable
+pages**. Meanwhile, unqueried:
+
+| dataset | pages | period | languages |
+|---|---:|---|---|
+| `rats-und-richtebuecher_xv-xvi` | 9,885 | 1400–1550 | Middle High / Early Modern German |
+| `bullinger-autoren` | 8,022 | 1530–1600 | Latin, Early Modern German |
+| `koenigsfelden-charters-post-1500` | 3,222 | 1291–1550 | Middle High German, Latin |
+| `aaeb-xiv-xvii` | 2,566 | 1400–1500 | Early Modern German |
+
+### Two traps that make hand-picking unsafe
+
+**Datasets republish each other's projects.** `koenigsfelden-charters-post-1500`
+and `koenigsfelden-adhr-colmar` publish the same `FRAD068_03G_SAINT_PIERRE_…`
+directories. `hgb-kf_mixture` republishes exactly the `u-17_*` and `HGB_FT_M4_*`
+that `medieval-scripts` carries — the ones §9e trained on. `aaeb-xiv-xvii-part-2`
+overlaps its parent in 5 of 8 projects. A naive union trains twice on the same
+pages and reports a corpus larger than it is.
+
+**One archive can dominate silently.** A corpus that is 70 % one hand is a model
+of that hand, and nothing in a page count says so.
+
+### The heuristic
+
+`atr_serving.training.corpus_plan` scores each dataset on **period overlap**,
+**language match** and **script class** (document type as proxy), then
+deduplicates, caps and emits a job request. Two decisions, both arrived at by
+running it and watching it fail:
+
+**A weighted geometric mean, not a sum.** With a sum the Flemish corpus scored
+0.69 — period 1.00, script 1.00, language **0.00** — and claimed 40 % of the
+planned corpus; a 19th-century land register scored 0.54 on a period of 0.00 and
+took another 31 %. A dimension that disqualifies must veto, not vote. Unknown
+values are 0.5, so a card that does not say is penalised, not excluded.
+
+**Near-ties fall through to size.** `koenigsfelden-adhr-colmar` (223 pages) scores
+1.000 against `koenigsfelden-charters-post-1500`'s 0.989 — a rounding difference
+in period overlap — and would claim the projects they share, handing the corpus
+its own much smaller per-project page estimate for the same material.
+
+Script class is weighted above period **because §9c measured that**: a Kurrent
+base a century too late beat a right-period Textura base by 40 % relative. So
+`parzival-part-1` — 1200–1500, Middle High German, and a book hand — is rejected
+at 0.56 for a documentary corpus.
+
+### What it plans
+
+| dataset | pages | share |
+|---|---:|---:|
+| `rats-und-richtebuecher_xv-xvi` | 9,351 | 40 % |
+| `bullinger-autoren` | 8,022 | 34 % |
+| `koenigsfelden-charters-post-1500` | 3,222 | 14 % |
+| `aaeb-xiv-xvii` | 2,566 | 11 % |
+| three small Königsfelden/AAEB remainders | 267 | 1 % |
+| **total** | **23,428** | |
+
+**~222,000 estimated lines against the 4,124 of §9e — 54×.** The estimate uses
+14.8 lines per usable page and a 64 % usable rate, both measured on that one run;
+treat it as an order of magnitude. Only `prepare` knows the real figure, and the
+plan says so in its own output.
+
+### The cost of this, stated plainly
+
+Scoring is per **dataset**, so a heterogeneous one is judged by its majority.
+`medieval-scripts` is rejected as Flemish, which means **`GT_Thun-Test` is no
+longer reachable as an evaluation set** and the chain in §9–9e loses its common
+yardstick. Evaluation moves to held-out volumes of the planned corpus — in-domain
+and defensible, but a different measurement. Any CER from a planned corpus must
+not be put in the same table as §9e without saying so.
+
+Running it needs `ATR_TRAIN_CHUNK_PAGES` set: 23,428 pages is ~294 GB of parquet,
+far past the disk guard, and §8b of `TRAINING.md` explains why streaming alone is
+not enough.

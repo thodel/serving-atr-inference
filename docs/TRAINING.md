@@ -460,6 +460,32 @@ Each chunk becomes its own `train_<k>.arrow`, and `train_bin.lst` lists them all
 chunks never have to be merged. A chunk's pages are deleted only *after* its
 arrow exists and is non-empty, so a failure leaves the pages that caused it.
 
+**The disk guard used to make this unreachable (#85).** `verify_dataset_spec`
+sized the whole parquet selection and refused anything over `min_free_disk_gb`
+*regardless of how the trainer was configured* — but `ATR_TRAIN_CACHE_DATASETS`
+defaults to `false`, so those shards are never all resident. It measured a
+download that does not happen, and named the two remedies that do not help
+("lower max_pages or free space"). The refusal now depends on what actually
+bounds disk:
+
+| configuration | what lands on disk | verdict |
+|---|---|---|
+| caching (`ATR_TRAIN_CACHE_DATASETS=true`) | the shards | must fit |
+| streaming, **unchunked** | the materialized pages, unbounded | refused — 461 K pages reached ~526 GB over 23 h |
+| streaming, **chunked** | one chunk | allowed at any selection size |
+
+So a corpus-scale run needs *both* streaming (the default) and
+`ATR_TRAIN_CHUNK_PAGES` set. Without the second, the guard refuses and tells you
+which variable to set.
+
+**`--workers` scales with the manifest (#85).** Each `ketos compile` worker
+decodes pages independently, so peak RSS grows with `workers × page size`. It was
+a fixed 8, and `20260808T183111Z` compiled a single 461,586-page manifest with 8
+of them before being SIGKILLed after 1 h 51 m. Above 20 K pages the count now
+tapers inverse-linearly, floor 1, unchanged below — `compile_workers(8, 461_586)`
+is 1. The OOM killer is the leading explanation for that kill but was never
+confirmed: `journalctl -k` implies `-b`, and the system journal needs privileges.
+
 Two limits worth knowing before you rely on it:
 
 - **It needs explicit `eval_projects`.** The validation pages cannot come from
@@ -473,6 +499,88 @@ Also relevant at this scale: ~548 K pages is ~8 M lines, and at the throughput
 measured on the box one epoch is roughly **15 hours**. A full-corpus run is a
 multi-day job, and the step-count guard (#72) will hold you to a configuration
 that can actually converge at that size.
+
+## 8c. Choosing what to train on: `scripts/plan_corpus.py` (#87)
+
+dh-unibe publishes **32 datasets**. Picking among them by eye made two mistakes
+that only surface after a run has spent its time, and both are recorded here
+because they are easy to repeat.
+
+**The German material was in the wrong repo.** The hand-picked selection behind
+`20260814T192904Z` took 21 project directories out of
+`image-text_medieval-scripts_xiv-xv-xvi` and got **291 pages / 4,124 lines**. That
+dataset's card says: *"Geographical scope: Belgium, Languages: Flemish,
+Provenance: State Archives in Leuven."* Its German content is a rounding error.
+`image-text_rats-und-richtebuecher_xv-xvi` — 9,885 pages of Zurich council and
+court books, 1400–1550 — was never considered.
+
+**Datasets republish each other's projects.** `koenigsfelden-charters-post-1500`
+and `koenigsfelden-adhr-colmar` both publish the same `FRAD068_03G_SAINT_PIERRE_…`
+directories; `hgb-kf_mixture` republishes the `u-17_*` and `HGB_FT_M4_*` projects
+that `medieval-scripts` already carries; `aaeb-xiv-xvii-part-2` overlaps
+`aaeb-xiv-xvii` in 5 of its 8. Combined naively, a corpus trains twice on the same
+pages and reports itself larger than it is.
+
+```bash
+# Needs huggingface_hub and a login — the datasets are gated.
+.venvs/kraken-train/bin/python scripts/plan_corpus.py \
+    --org dh-unibe --period 1300 1600 --max-share 0.45 \
+    --cache /tmp/catalogue.json \
+    --eval-repo dh-unibe/image-text_rats-und-richtebuecher_xv-xvi \
+    --eval-project "Rats-undRichtebücher_MF_1_3574" \
+    --exclude-project "Rats-undRichtebücher_MF_1_3574" \
+    --json /tmp/corpus.json --engine vllm --model-id qwen3vl-medieval-german-v1
+```
+
+It scores each dataset on **period**, **language** and **script class** (document
+type as the proxy), deduplicates projects, caps any dataset that would dominate,
+and writes a submittable request. The scoring is a weighted **geometric mean**, so
+a disqualifying dimension vetoes rather than being outvoted — with a sum, the
+Flemish corpus scored 0.69 on `language 0.00` and took 40 % of the planned corpus.
+Script class outweighs period, which is what §9c measured.
+
+Held-out projects must be passed to **both** `--eval-project` and
+`--exclude-project`; `job_request` refuses a plan whose evaluation projects are
+also selected for training, and refuses an eval repo outside the corpus (an
+eval-only spec has no `train_projects`, which `hf_source` rejects).
+
+**Limitation: scoring is per dataset**, so a heterogeneous one is judged by its
+majority. `medieval-scripts` is rejected as Flemish even though it holds the Thun
+and Königsfelden German projects — which means `GT_Thun-Test` is not reachable as
+an eval set from a planned corpus, and comparability with the Thun chain in §9–9d
+breaks. Evaluation comes from held-out volumes of the corpus instead: in-domain,
+but a different yardstick.
+
+**Known gap:** `DatasetSpec.chunk_size` is documented in the contract and read by
+nothing. Chunking is driven solely by `ATR_TRAIN_CHUNK_PAGES` (§8b). Setting it in
+a request does nothing and says nothing.
+
+## 8d. Publishing a trained model to the Hub
+
+The `register` stage leaves one directory per model under
+`~/atr-cache/trained/<model_id>/` — the best validation checkpoint plus a
+`metadata.json` with the job id, the request and the measured CER. That is
+everything a hub repo needs.
+
+```bash
+.venvs/kraken-train/bin/hf auth login          # or: export HF_TOKEN=...
+.venvs/kraken-train/bin/python scripts/publish_to_hub.py --list
+.venvs/kraken-train/bin/python scripts/publish_to_hub.py --dry-run
+.venvs/kraken-train/bin/python scripts/publish_to_hub.py --only kraken-thun-kurrent-v2
+```
+
+Three rules the script will not let you past:
+
+- **Repos are private unless `--public`**, and no licence is invented. Making a
+  trained model public, and under which terms, stays a human decision.
+- **A model without `metadata.json` is never published** — it is reported as
+  skipped. A card that guesses what a model was trained on is worse than no card.
+- **One upload's failure does not stop the others**, and the resulting URL is
+  written back into `metadata.json`, so a second run is a no-op rather than a
+  duplicate push.
+
+`huggingface_hub` is deliberately absent from the gateway venv, so this must run
+from a trainer venv. Triggering it from Discord is the subject of epic #84.
 
 ## 9. Troubleshooting
 
@@ -549,6 +657,46 @@ caching, set `HF_DATASETS_CACHE` to local disk, not the share.
 `TMPDIR` is on the CIFS share. SMB does not release directory entries fast enough
 for the create/delete churn of temporary compilation dirs. Move `TMPDIR` to local
 disk and re-submit.
+
+### VLM job dies at step 2 with `Mismatch in image token count` (#86)
+
+```
+ValueError: Mismatch in `image` token count between text and `input_ids`.
+Got ids=[84, 72, 87, 508] and text=[84, 72, 87, 600].
+```
+
+Fixed in `03aed5c`; if you see it, the box is behind. Three defects compounded,
+and **batch size is not one of them** — `batch_size: 1` fails on the same crop:
+
+1. `max_pixels=` passed to `AutoProcessor.from_pretrained` is a **Qwen2-VL**
+   idiom. Qwen3-VL's image processor is configured through
+   `size={"longest_edge", "shortest_edge"}` (areas in pixels) and accepts the
+   kwarg without applying it, so the run trained at the model default of **16,384
+   visual tokens per image** instead of 256.
+2. `VLM_PIXEL_BUDGET` multiplied by 28² — patch 14 × merge 2, again Qwen2-VL.
+   Qwen3-VL is patch 16 × merge 2 = **32²**.
+3. The collator truncated to `max_seq_len`. On text that loses the tail; on a
+   multimodal sequence it severs image tokens from the placeholders that index
+   them, producing an *invalid* sample rather than a shorter one.
+
+`apply_visual_budget()` now writes the knob onto the image processor and reads it
+back, derives the token cap from the processor's own `patch_size`/`merge_size`,
+and prints it at startup:
+
+```
+size.longest_edge=262144 -> ~256 visual tokens (32px cell)
+```
+
+Samples over `max_seq_len` are counted and reported, never truncated. Note the
+line is written at *start*, so `?lines=200` on the log endpoint (which returns the
+tail) will not show it on a long run.
+
+### Submit refused with "the selection is ~N GB … over the 50 GB the trainer keeps free"
+
+See §8b. If you are streaming (the default), this is asking you to set
+`ATR_TRAIN_CHUNK_PAGES`, and the message now says so. If chunking is set and it
+still refuses, the spec has no `eval_projects` — chunking cannot apply without
+them, and the guard says that rather than silently materializing everything.
 
 ### Permissions error on `pip install` during venv rebuild
 

@@ -57,6 +57,26 @@ Leuven corpora scored on Bernese material) and `qwen3vl-thun-smoke` (the VLM bac
 first real run, CER 0.466 against 1.837 for the un-adapted base — see
 [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md)).
 
+**The VLM backend, scored on the same eval set** (§9e). `qwen3vl-german-medieval-v1`
+trained a Qwen3-VL-8B QLoRA on 4,124 lines of mixed German and reached **CER 0.2324**
+— more than twice the data of `thun-kurrent-v2` and 6 % behind it. The profile differs
+more than the total: 41 % *fewer* insertions (232 vs 395, `length_ratio` 1.055) and
+20 % *more* substitutions (1,575 vs 1,312). A language model produces plausible German
+where a CTC network maps visual evidence; four thousand lines fix the length
+calibration but do not teach the hands.
+
+**Where the lever is now.** §9c spent the base, §9d spent the epochs, §9e spent the
+engine. What remains is the corpus — and that turned out to be a *selection* problem:
+the dataset every run above drew from is
+[Flemish](https://huggingface.co/datasets/dh-unibe/image-text_medieval-scripts_xiv-xv-xvi)
+(548,322 pages of Leuven registers), and its German content came to 291 usable pages,
+while 9,885 pages of Zurich council books sat in a dataset nobody had queried.
+`scripts/plan_corpus.py` (#87) scores the 32 dh-unibe datasets on period, language and
+script class, removes projects that two datasets both publish — there are several — and
+plans a **23,428-page** German corpus of the 14th–16th century. See
+[`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) §11 and
+[`docs/TRAINING.md`](docs/TRAINING.md) §8c.
+
 **What the first row was.** Every early model, CTC and autoregressive alike, emitted
 *more* characters than the reference contains. Two explanations were possible (#52):
 bad eval material, or a training-design problem. It was the second:
