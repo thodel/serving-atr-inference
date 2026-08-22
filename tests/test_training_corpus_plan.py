@@ -16,6 +16,7 @@ from atr_serving.training.corpus_plan import (
     language_score,
     parse_card,
     parse_period,
+    parse_projects,
     period_score,
     plan_corpus,
     score_candidate,
@@ -229,3 +230,110 @@ class TestJobRequest:
     def test_every_entry_declares_page_granularity(self):
         body = job_request(self.plan(), engine="vllm", model_id="m")
         assert all(d["granularity"] == "page" for d in body["datasets"])
+
+
+# ── parsing projects out of a card (#87) ────────────────────────────────────
+REAL_CARD = """---
+dataset_info:
+  config_name: default
+  features:
+    - name: image
+tags:
+- image-to-text
+- htr
+- pagexml
+license: mit
+language:
+- de
+- la
+---
+
+# Dataset Card for image-text_rats-und-richtebuecher_xv-xvi
+
+## Dataset Summary
+
+Geographical scope: Switzerland<br>Period: 1400-1550<br>Languages: Middle High German<br>Type of document: Protocols<br>Provenance: State Archive of Zurich
+
+### Projects Included
+
+- Rats-undRichtebücher_MF_1_3543
+- Rats-undRichtebücher_MF_1_3544
+- escript_test
+
+## Dataset Structure
+
+### Features
+
+- **image**: `Image(mode=None, decode=False)`
+- **xml_content**: `Value('string')`
+- **filename**: `Value('string')`
+"""
+
+
+class TestParseProjects:
+    """Taking every "- " line collected tags and feature bullets as projects.
+
+    On the real 32-dataset catalogue that produced 163 names shared between
+    datasets — `config_name: default` in all 32 — so every dataset looked like a
+    duplicate of every other and pages_per_project was divided by a count that
+    was mostly Markdown.
+    """
+
+    def test_only_the_projects_section_is_read(self):
+        assert parse_projects(REAL_CARD) == (
+            "Rats-undRichtebücher_MF_1_3543",
+            "Rats-undRichtebücher_MF_1_3544",
+            "escript_test",
+        )
+
+    @pytest.mark.parametrize("noise", [
+        "htr", "pagexml", "image-to-text", "de", "la",
+        "**image**: `Image(mode=None, decode=False)`",
+        "**filename**: `Value('string')`",
+    ])
+    def test_frontmatter_and_feature_bullets_are_not_projects(self, noise):
+        assert noise not in parse_projects(REAL_CARD)
+
+    def test_a_card_without_the_section_selects_the_dataset_whole(self):
+        """koenigsfelden-charters-part-3 has tags and prose, no project list."""
+        assert parse_projects("# Card\n\nBased on the Koenigsfelden Data Set.\n") == ()
+
+    def test_parse_card_falls_back_to_the_section_when_given_no_list(self):
+        c = parse_card("x", REAL_CARD, pages=300, gb=1.0)
+        assert len(c.projects) == 3 and c.pages_per_project == 100
+
+    def test_an_explicit_list_still_wins(self):
+        c = parse_card("x", REAL_CARD, pages=300, gb=1.0, projects=["only_this"])
+        assert c.projects == ("only_this",)
+
+
+class TestSliversAndHoldouts:
+    def test_a_held_out_project_is_not_reported_as_a_duplicate(self):
+        """rats showed "-2 dup" for the two evaluation volumes, which it is not."""
+        plan = plan_corpus([cand("a", pages=1000, projects=["p1", "p2", "held"])],
+                           MEDIEVAL_GERMAN, exclude_projects=["held"])
+        s = plan.selections[0]
+        assert s.dropped_excluded == ("held",) and s.dropped_duplicates == ()
+        assert any("held out by request" in n for n in plan.notes)
+
+    def test_a_sliver_left_over_after_dedup_is_dropped(self):
+        """Three datasets survived with 4, 14 and 33 pages — 0.4 % of the corpus
+        for three extra prepare streams."""
+        plan = plan_corpus([
+            cand("big", pages=9000, projects=[f"p{i}" for i in range(9)]),
+            cand("sliver", pages=100, projects=["p0", "p1", "own"]),
+        ], MEDIEVAL_GERMAN, max_share=1.0, min_pages=100)
+        assert [s.repo for s in plan.selections] == ["big"]
+        assert any("below min_pages" in why for _, why in plan.rejected)
+
+    def test_min_pages_zero_keeps_everything(self):
+        plan = plan_corpus([
+            cand("big", pages=9000, projects=[f"p{i}" for i in range(9)]),
+            cand("sliver", pages=100, projects=["p0", "own"]),
+        ], MEDIEVAL_GERMAN, max_share=1.0, min_pages=0)
+        assert len(plan.selections) == 2
+
+    def test_dropping_everything_is_an_error_not_an_empty_corpus(self):
+        with pytest.raises(CorpusPlanError, match="every dataset fell below"):
+            plan_corpus([cand("a", pages=10, projects=["p"])],
+                        MEDIEVAL_GERMAN, min_pages=1000)

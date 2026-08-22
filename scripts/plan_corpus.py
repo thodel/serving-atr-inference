@@ -38,6 +38,7 @@ from atr_serving.training.corpus_plan import (  # noqa: E402
     Target,
     job_request,
     parse_card,
+    parse_projects,
     plan_corpus,
     score_candidate,
 )
@@ -61,8 +62,7 @@ def fetch_catalogue(org: str) -> list[dict]:
         if isinstance(dataset_info, list):
             dataset_info = dataset_info[0] if dataset_info else {}
         splits = dataset_info.get("splits") or []
-        projects = [line[2:].strip() for line in card.splitlines()
-                    if line.startswith("- ") and len(line) > 2]
+        projects = list(parse_projects(card))
         rows.append({
             "repo": info.id,
             "card": card,
@@ -87,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--threshold", type=float, default=0.6)
     p.add_argument("--max-share", type=float, default=0.45)
     p.add_argument("--max-pages", type=int, default=None)
+    p.add_argument("--min-pages", type=int, default=100,
+                   help="drop a dataset whose unique remainder is smaller")
     p.add_argument("--exclude-project", action="append", default=[])
     p.add_argument("--cache", type=Path, default=None)
     p.add_argument("--json", type=Path, default=None, help="write a job request here")
@@ -122,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     eval_projects = list(args.eval_project)
     try:
         plan = plan_corpus(candidates, target, max_share=args.max_share,
-                           max_pages=args.max_pages,
+                           max_pages=args.max_pages, min_pages=args.min_pages,
                            exclude_projects=args.exclude_project + eval_projects)
     except CorpusPlanError as exc:
         print(f"\nno plan: {exc}", file=sys.stderr)

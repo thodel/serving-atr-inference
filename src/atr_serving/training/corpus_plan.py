@@ -48,6 +48,7 @@ __all__ = [
     "USABLE_PAGE_RATIO",
     "parse_period",
     "parse_card",
+    "parse_projects",
     "period_score",
     "language_score",
     "script_score",
@@ -142,6 +143,9 @@ class Selection:
     pages: int
     score: float
     dropped_duplicates: tuple[str, ...] = ()
+    #: Held out by the caller — excluded, not duplicated. Counted separately
+    #: because reporting an evaluation hold-out as a duplicate is misleading.
+    dropped_excluded: tuple[str, ...] = ()
     capped_from: int | None = None
 
 
@@ -178,6 +182,46 @@ def parse_period(text: str) -> tuple[int, int] | None:
     return (lo, hi) if lo <= hi else (hi, lo)
 
 
+_PROJECTS_HEADING = re.compile(r"^#+\s*Projects Included\s*$", re.MULTILINE)
+_HEADING = re.compile(r"^#+\s", re.MULTILINE)
+
+
+def parse_projects(card: str) -> tuple[str, ...]:
+    """Bullets under "Projects Included" — and nothing else.
+
+    Taking every ``- `` line in the card, as the first version did, collects the
+    YAML frontmatter (``htr``, ``pagexml``, ``image-to-text``, ``de``) and the
+    Markdown feature list (``**image**: `Image(mode=None, decode=False)```) as
+    though they were project directories. On the real catalogue that produced
+    **163 names shared between datasets**, headed by ``config_name: default`` in
+    all 32 — so every dataset appeared to duplicate every other, real projects
+    were dropped behind a tag name, and ``pages_per_project`` was divided by an
+    inflated count (#87).
+
+    A card with no such section returns empty, which means "selected whole" and
+    is correct for the ones that genuinely have no project directories.
+    """
+    match = _PROJECTS_HEADING.search(card or "")
+    if not match:
+        return ()
+    rest = card[match.end():]
+    nxt = _HEADING.search(rest)
+    section = rest[:nxt.start()] if nxt else rest
+
+    projects = []
+    for line in section.splitlines():
+        line = line.strip()
+        if not line.startswith("- "):
+            # Some cards list a single project as a bare line under the heading.
+            if line and not line.startswith(("#", "```", "|")) and not projects:
+                projects.append(line)
+            continue
+        name = line[2:].strip()
+        if name:
+            projects.append(name)
+    return tuple(projects)
+
+
 def parse_card(repo: str, card: str, pages: int, gb: float,
                projects: Sequence[str] = ()) -> Candidate:
     """Read a dh-unibe dataset card's ``Key: value<br>`` summary block."""
@@ -192,7 +236,7 @@ def parse_card(repo: str, card: str, pages: int, gb: float,
         period=parse_period(fields.get("period", "")),
         languages=languages,
         doc_type=fields.get("type of document", "").lower(),
-        projects=tuple(projects),
+        projects=tuple(projects) if projects else parse_projects(card),
     )
 
 
@@ -286,13 +330,17 @@ def score_candidate(candidate: Candidate, target: Target) -> Scored:
 # ── planning ────────────────────────────────────────────────────────────────
 def plan_corpus(candidates: Iterable[Candidate], target: Target = MEDIEVAL_GERMAN,
                 *, max_share: float = 0.45, max_pages: int | None = None,
+                min_pages: int = 0,
                 exclude_projects: Iterable[str] = ()) -> CorpusPlan:
     """Score, deduplicate and balance a set of datasets into one corpus.
 
     ``max_share`` caps any single dataset's contribution, because a corpus that is
     mostly one archive is a model of that archive's hand. ``exclude_projects``
     keeps held-out evaluation material out of training — the one error no metric
-    can detect afterwards.
+    can detect afterwards. ``min_pages`` drops a dataset whose unique remainder is
+    too small to be worth its own prepare stream: on the real catalogue three
+    datasets survived deduplication with 4, 14 and 33 pages, together 0.4 % of the
+    corpus and three extra streams.
     """
     if not 0 < max_share <= 1:
         raise CorpusPlanError(f"max_share must be in (0, 1], got {max_share}")
@@ -311,7 +359,8 @@ def plan_corpus(candidates: Iterable[Candidate], target: Target = MEDIEVAL_GERMA
         )
 
     # Dedup: the highest-scoring dataset holding a project keeps it.
-    claimed: set[str] = {p for p in exclude_projects}
+    excluded: set[str] = set(exclude_projects)
+    claimed: set[str] = set(excluded)
     selections: list[Selection] = []
     for entry in keep:
         candidate = entry.candidate
@@ -321,7 +370,9 @@ def plan_corpus(candidates: Iterable[Candidate], target: Target = MEDIEVAL_GERMA
             selections.append(Selection(candidate.repo, (), candidate.pages, entry.score))
             continue
         fresh = tuple(p for p in candidate.projects if p not in claimed)
-        dropped = tuple(p for p in candidate.projects if p in claimed)
+        held_out = tuple(p for p in candidate.projects if p in excluded)
+        dropped = tuple(p for p in candidate.projects
+                        if p in claimed and p not in excluded)
         if not fresh:
             rejected += ((candidate.repo, "every project already covered by a "
                                           "higher-scoring dataset"),)
@@ -329,7 +380,19 @@ def plan_corpus(candidates: Iterable[Candidate], target: Target = MEDIEVAL_GERMA
         claimed.update(fresh)
         pages = round(candidate.pages_per_project * len(fresh))
         selections.append(Selection(candidate.repo, fresh, pages, entry.score,
-                                    dropped_duplicates=dropped))
+                                    dropped_duplicates=dropped,
+                                    dropped_excluded=held_out))
+
+    if min_pages > 0:
+        too_small = [s for s in selections if s.pages < min_pages]
+        for s in too_small:
+            rejected += ((s.repo, f"only {s.pages} unique page(s) after dedup, "
+                                  f"below min_pages={min_pages}"),)
+        selections = [s for s in selections if s.pages >= min_pages]
+        if not selections:
+            raise CorpusPlanError(
+                f"every dataset fell below min_pages={min_pages} after deduplication"
+            )
 
     selections = _balance(selections, max_share=max_share, max_pages=max_pages)
     notes = _notes(selections, max_share)
@@ -388,6 +451,9 @@ def _notes(selections: Sequence[Selection], max_share: float) -> tuple[str, ...]
     if duplicated:
         notes.append(f"{duplicated} project(s) dropped as duplicates of a "
                      "higher-scoring dataset")
+    held_out = sum(len(s.dropped_excluded) for s in selections)
+    if held_out:
+        notes.append(f"{held_out} project(s) held out by request (not duplicates)")
     capped = [s for s in selections if s.capped_from]
     for s in capped:
         notes.append(f"{s.repo} capped {s.capped_from} -> {s.pages} pages "
