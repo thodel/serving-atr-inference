@@ -437,7 +437,8 @@ def _default_paths_size(hf_repo: str, paths: list[str], revision: str | None,
 
 
 def _oversize_error(needed_gb: float, shard_count: int, settings,
-                    *, has_eval_projects: bool) -> str | None:
+                    *, has_eval_projects: bool,
+                    chunk_capable: bool = True) -> str | None:
     """Refuse an oversized selection — or allow it, when the pipeline streams it (#85).
 
     This guard used to size the parquet selection and refuse on it unconditionally.
@@ -468,6 +469,17 @@ def _oversize_error(needed_gb: float, shard_count: int, settings,
     # Streaming from here down. Chunking is what bounds the materialized pages, and
     # it requires explicit eval_projects: the validation set cannot come from
     # splitting a stream that is discarded as it is read (runner_base._should_chunk).
+    #
+    # It also requires a backend that implements it. Only kraken sets
+    # supports_chunked_prepare; the VLM and TrOCR backends compile by cropping and
+    # ignore the setting. Judging the size by ATR_TRAIN_CHUNK_PAGES alone therefore
+    # cleared a 293 GB vllm corpus that would have materialized every page at once.
+    if getattr(settings, "chunk_pages", 0) > 0 and not chunk_capable:
+        return (f"{head}. ATR_TRAIN_CHUNK_PAGES is set, but this engine does not "
+                "chunk — only the kraken backend implements it, so every page "
+                "would be materialized before compile runs. Lower max_pages, "
+                "select fewer projects, or train this corpus with kraken.")
+
     if getattr(settings, "chunk_pages", 0) > 0:
         if has_eval_projects:
             return None
@@ -486,6 +498,7 @@ def verify_dataset_spec(
     spec: DatasetSpec,
     settings: TrainerSettings,
     *,
+    chunk_capable: bool = True,
     list_repo_files_fn=None,
     paths_size_fn=None,
 ) -> list[str]:
@@ -594,6 +607,7 @@ def verify_dataset_spec(
                 oversize = _oversize_error(
                     needed_gb, len(selected), settings,
                     has_eval_projects=bool(spec.eval_projects),
+                    chunk_capable=chunk_capable,
                 )
                 if oversize:
                     errors.append(oversize)

@@ -394,7 +394,7 @@ def _verify(request: TrainRequest) -> dict:
     # when the job named three repos.
     for spec in request.datasets:
         try:
-            found = check(spec, _settings())
+            found = check(spec, _settings(), chunk_capable=_chunk_capable(request.engine))
         except DatasetSelectionError as exc:
             return {"valid": False, "checked": True,
                     "errors": [f"{spec.hf_repo}: {exc}"]}
@@ -404,6 +404,19 @@ def _verify(request: TrainRequest) -> dict:
         errors += ([f"{spec.hf_repo}: {e}" for e in found]
                    if len(request.datasets) > 1 else found)
     return {"valid": not errors, "checked": True, "errors": errors}
+
+
+def _chunk_capable(engine: str) -> bool:
+    """Does this engine's backend actually implement chunked prepare?
+
+    Only kraken does. The size guard used to read ``ATR_TRAIN_CHUNK_PAGES`` alone
+    and cleared a 293 GB vllm corpus on the strength of a setting that backend
+    ignores (#85).
+    """
+    from atr_serving.training.backends import BACKENDS
+
+    backend = BACKENDS.get(engine)
+    return bool(backend and backend.supports_chunked_prepare)
 
 
 @app.post("/jobs/verify", status_code=200)

@@ -333,6 +333,30 @@ class TestVerifyDatasetSpec:
         assert len(errors) == 1
         assert "ATR_TRAIN_CACHE_DATASETS=false" in errors[0]
 
+    def test_a_backend_that_cannot_chunk_is_refused_however_the_setting_reads(self):
+        """ATR_TRAIN_CHUNK_PAGES is global; chunked prepare is kraken-only (#85).
+
+        Reading the setting alone cleared a 293 GB vllm corpus that would have
+        materialized all 23,161 pages before compile ran.
+        """
+        errors = self._oversized(FakeSettings(chunk_pages=5000),
+                                 eval_projects=[THUN_TEST])
+        assert errors == []                       # kraken: allowed
+
+        errors = verify_dataset_spec(
+            DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN],
+                        eval_projects=[THUN_TEST]),
+            FakeSettings(chunk_pages=5000),
+            chunk_capable=False,
+            list_repo_files_fn=lambda repo, **kw: (
+                [f"data/train/{THUN_TRAIN}/s{i}.parquet" for i in range(5)]
+                + [f"data/train/{THUN_TEST}/s.parquet"]),
+            paths_size_fn=lambda repo, paths, revision=None, repo_type="dataset":
+                20 * 1024**3 * len(paths),
+        )
+        assert len(errors) == 1
+        assert "does not chunk" in errors[0] and "kraken" in errors[0]
+
     def test_chunking_without_eval_projects_says_why_it_cannot_apply(self):
         """_should_chunk needs eval_projects; without them the setting is inert.
 

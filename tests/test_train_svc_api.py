@@ -157,7 +157,7 @@ def test_a_project_on_both_sides_of_the_split_is_refused_at_submit(client):
 
 
 def test_a_spec_the_hub_rejects_is_refused_with_every_problem_at_once(client, app):
-    app.state.verify_spec = lambda spec, settings: [
+    app.state.verify_spec = lambda spec, settings, **kw: [
         "project 'GT_Thun-Trainig' not found under data/train/",
         "no .parquet files found",
     ]
@@ -170,7 +170,7 @@ def test_an_unreachable_hub_queues_the_job_rather_than_refusing_it(client, app):
     """"Could not check" is not "your spec is wrong". The job downloads when it
     starts, possibly hours later, so a hiccup now must not cost the submission —
     but the record says it went in unverified."""
-    def unreachable(spec, settings):
+    def unreachable(spec, settings, **kw):
         raise VerificationUnavailable("ConnectionError: hub unreachable")
 
     app.state.verify_spec = unreachable
@@ -181,14 +181,14 @@ def test_an_unreachable_hub_queues_the_job_rather_than_refusing_it(client, app):
 
 
 def test_a_verified_submission_says_so(client, app):
-    app.state.verify_spec = lambda spec, settings: []
+    app.state.verify_spec = lambda spec, settings, **kw: []
     resp = client.post("/jobs", json=BODY)
     assert resp.status_code == 202
     assert resp.json()["dataset_verified"] is True
 
 
 def test_verify_answers_without_queueing_anything(client, app):
-    app.state.verify_spec = lambda spec, settings: ["project 'typo' not found"]
+    app.state.verify_spec = lambda spec, settings, **kw: ["project 'typo' not found"]
     resp = client.post("/jobs/verify", json=BODY)
     assert resp.status_code == 200          # an answered question, not a failed request
     assert resp.json()["valid"] is False
@@ -595,7 +595,7 @@ def test_every_dataset_is_verified_not_only_the_first(client, app):
     the guard exists to prevent."""
     seen = []
 
-    def check(spec, settings):
+    def check(spec, settings, **kw):
         seen.append(spec.hf_repo)
         return ["project 'typo' not found"] if spec.hf_repo.endswith("second") else []
 

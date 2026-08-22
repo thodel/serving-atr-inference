@@ -472,7 +472,8 @@ bounds disk:
 |---|---|---|
 | caching (`ATR_TRAIN_CACHE_DATASETS=true`) | the shards | must fit |
 | streaming, **unchunked** | the materialized pages, unbounded | refused — 461 K pages reached ~526 GB over 23 h |
-| streaming, **chunked** | one chunk | allowed at any selection size |
+| streaming, **chunked**, kraken | one chunk | allowed at any selection size |
+| streaming, chunked, **vllm/trocr** | every page — they do not chunk | refused |
 
 So a corpus-scale run needs *both* streaming (the default) and
 `ATR_TRAIN_CHUNK_PAGES` set. Without the second, the guard refuses and tells you
@@ -493,7 +494,12 @@ Two limits worth knowing before you rely on it:
   falls back to materializing everything and logs why.
 - **Only the kraken backend does this.** The VLM and TrOCR backends compile by
   cropping, and `supports_chunked_prepare` is False for them, so the setting is
-  ignored rather than half-applied.
+  ignored rather than half-applied. **The size guard knows this** (#85): a
+  corpus-scale `vllm` or `trocr` job is refused even with `ATR_TRAIN_CHUNK_PAGES`
+  set, because that setting buys it nothing. The capability is declared on
+  `Backend` — the supervising service cannot read the runner's ClassVar, since
+  each runner lives in its own venv — and `tests/test_training_backends.py` pins
+  the two together.
 
 Also relevant at this scale: ~548 K pages is ~8 M lines, and at the throughput
 measured on the box one epoch is roughly **15 hours**. A full-corpus run is a
