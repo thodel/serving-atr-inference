@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-__all__ = ["PublishDecision", "TOKEN_ENV", "decide"]
+__all__ = ["PublishDecision", "TOKEN_ENV", "TOKEN_PREFIX", "decide"]
 
 #: Checked in order; the first one set wins. `HF_TOKEN` is what the trainer venvs
 #: use, `HUGGINGFACE_HUB_TOKEN` is what `huggingface_hub` reads on its own.
@@ -44,8 +44,32 @@ class PublishDecision:
         return f"{'publish' if self.publish else 'skip'}: {self.reason}"
 
 
-def _has_token(environ) -> bool:
-    return any((environ.get(name) or "").strip() for name in TOKEN_ENV)
+#: HuggingFace user tokens are `hf_` followed by ~34 characters. Requiring the
+#: prefix is what distinguishes a token from a placeholder someone pasted without
+#: substituting — `HF_TOKEN=...` really was set on the box, three characters long,
+#: and "non-empty" accepted it happily (#88).
+TOKEN_PREFIX = "hf_"
+TOKEN_MIN_LEN = 12
+
+
+def _token_problem(environ) -> str | None:
+    """Why the environment has no usable token, or None when it has one.
+
+    Never returns the value or any part of it: this string is logged and lands on
+    the job record.
+    """
+    found = [(name, (environ.get(name) or "").strip()) for name in TOKEN_ENV]
+    present = [(name, value) for name, value in found if value]
+    if not present:
+        return f"no token is set ({' or '.join(TOKEN_ENV)})"
+    for name, value in present:
+        if value.startswith(TOKEN_PREFIX) and len(value) >= TOKEN_MIN_LEN:
+            return None
+    name, value = present[0]
+    return (f"{name} is set but does not look like a HuggingFace token "
+            f"(expected {TOKEN_PREFIX}… of at least {TOKEN_MIN_LEN} characters, "
+            f"got {len(value)} character(s)) — a placeholder left unsubstituted "
+            f"would otherwise fail inside the upload instead of here")
 
 
 def decide(char_accuracy: float | None, threshold: float, org: str,
@@ -64,11 +88,12 @@ def decide(char_accuracy: float | None, threshold: float, org: str,
         return PublishDecision(
             False, f"char_accuracy {char_accuracy:.2f}% is below the "
                    f"{threshold:.2f}% threshold")
-    if not _has_token(environ):
+    problem = _token_problem(environ)
+    if problem:
         return PublishDecision(
             False, f"char_accuracy {char_accuracy:.2f}% reaches the threshold, but "
-                   f"no token is set ({' or '.join(TOKEN_ENV)}) — nothing was "
-                   "uploaded. Run scripts/publish_to_hub.py by hand.")
+                   f"{problem}. Nothing was uploaded — authenticate with "
+                   "`hf auth login` or run scripts/publish_to_hub.py by hand.")
     return PublishDecision(
         True, f"char_accuracy {char_accuracy:.2f}% reaches the "
               f"{threshold:.2f}% threshold", org=org, private=True)

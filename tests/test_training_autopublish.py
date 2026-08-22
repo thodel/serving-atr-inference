@@ -10,7 +10,9 @@ import pytest
 
 from atr_serving.training.autopublish import TOKEN_ENV, decide
 
-TOKEN = {"HF_TOKEN": "hf_xxx"}
+#: Shaped like a real one: `hf_` plus 34 characters. `hf_xxx` is not a token, and
+#: since the placeholder incident the code says so.
+TOKEN = {"HF_TOKEN": "hf_" + "A" * 34}
 
 
 class TestTheThreshold:
@@ -50,7 +52,7 @@ class TestRefusals:
 
     @pytest.mark.parametrize("name", TOKEN_ENV)
     def test_either_token_variable_works(self, name):
-        assert decide(95.0, 80.0, "dh-unibe", {name: "hf_x"}).publish is True
+        assert decide(95.0, 80.0, "dh-unibe", {name: "hf_" + "A" * 34}).publish is True
 
     def test_a_blank_token_does_not_count(self):
         assert decide(95.0, 80.0, "dh-unibe", {"HF_TOKEN": "   "}).publish is False
@@ -65,3 +67,27 @@ class TestPrivacy:
     def test_a_refusal_reads_as_a_sentence_because_it_lands_on_the_job_record(self):
         assert str(decide(50.0, 80.0, "o", TOKEN)).startswith("skip: ")
         assert str(decide(90.0, 80.0, "o", TOKEN)).startswith("publish: ")
+
+
+class TestTokenShape:
+    """`HF_TOKEN=...` was really set on the box — the placeholder from a command
+    that was pasted without substituting it. "Non-empty" accepted it, and the
+    upload would have failed inside huggingface_hub instead of here."""
+
+    @pytest.mark.parametrize("value", ["...", "xxx", "<your-token>", "TODO", "hf_"])
+    def test_a_placeholder_is_not_a_token(self, value):
+        d = decide(95.0, 80.0, "o", {"HF_TOKEN": value})
+        assert d.publish is False and "does not look like" in d.reason
+
+    def test_a_real_looking_token_is_accepted(self):
+        assert decide(95.0, 80.0, "o", {"HF_TOKEN": "hf_" + "a" * 34}).publish is True
+
+    def test_the_reason_never_contains_the_value(self):
+        """It is logged and written to the job record."""
+        secret = "hf_" + "S3CR3T" * 6
+        reason = decide(95.0, 80.0, "o", {"HF_TOKEN": secret[:5]}).reason
+        assert "S3CR3T" not in reason and secret[:5] not in reason
+
+    def test_a_valid_token_in_the_second_variable_still_works(self):
+        env = {"HF_TOKEN": "...", "HUGGINGFACE_HUB_TOKEN": "hf_" + "b" * 34}
+        assert decide(95.0, 80.0, "o", env).publish is True
