@@ -479,6 +479,23 @@ So a corpus-scale run needs *both* streaming (the default) and
 `ATR_TRAIN_CHUNK_PAGES` set. Without the second, the guard refuses and tells you
 which variable to set.
 
+**Dataset cards overstate their size, so measure the selection (#85).** The card
+for `rats-und-richtebuecher_xv-xvi` reports `num_bytes: 70729250850` — 65.9 GB —
+while `get_paths_info` over its 37 selected parquet shards returns **10.4 GB**.
+Same for `bullinger-autoren` (101.7 GB claimed, 7.9 GB measured) and `aaeb-xiv-xvii`
+(51.8 claimed, 6.8 measured). Plan disk from the shard sizes, never from the card,
+and treat any figure derived from `dataset_info` as an upper bound of unknown
+tightness.
+
+**The size lookup is batched, and an unknown size is not a small one (#85).**
+`get_paths_info` answers 413 Payload Too Large for a large path list —
+`koenigsfelden-charters-post-1500` selects 1,189 shards — and that failure used to
+become `needed_gb = 0.0`, which passes every comparison. The guard was switched
+off exactly where the selection was biggest. Paths are now sized 200 at a time,
+and a lookup that still fails propagates: the route reports
+`{valid: true, checked: false}`, so a submission is queued with
+`dataset_verified: false` rather than being told it is fine.
+
 **`--workers` scales with the manifest (#85).** Each `ketos compile` worker
 decodes pages independently, so peak RSS grows with `workers × page size`. It was
 a fixed 8, and `20260808T183111Z` compiled a single 461,586-page manifest with 8

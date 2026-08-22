@@ -414,6 +414,11 @@ def _default_list_repo_files(hf_repo: str, revision: str | None, repo_type: str 
         raise VerificationUnavailable(f"{type(exc).__name__}: {exc}") from exc
 
 
+#: Paths per ``get_paths_info`` call. The endpoint 413s well below the 1,189 a
+#: single corpus dataset selects; 200 is comfortably under and costs few requests.
+PATHS_INFO_BATCH = 200
+
+
 def _default_paths_size(hf_repo: str, paths: list[str], revision: str | None,
                         repo_type: str = "dataset") -> int:
     """Total size in bytes of ``paths``, **without downloading them**.
@@ -429,11 +434,24 @@ def _default_paths_size(hf_repo: str, paths: list[str], revision: str | None,
     except ModuleNotFoundError as exc:
         raise VerificationUnavailable(f"huggingface_hub is not installed: {exc}") from exc
 
-    try:
-        infos = HfApi().get_paths_info(hf_repo, paths, repo_type=repo_type, revision=revision)
-    except Exception as exc:  # noqa: BLE001 — a size estimate is never worth failing over
-        raise VerificationUnavailable(f"{type(exc).__name__}: {exc}") from exc
-    return sum(getattr(i, "size", 0) or 0 for i in infos)
+    api = HfApi()
+    total = 0
+    # Batched, because the endpoint rejects a large path list outright:
+    # `koenigsfelden-charters-post-1500` selects 1,189 shards and the API answered
+    # 413 Payload Too Large. That failure used to become `needed_gb = 0.0`, which
+    # is a guard switched off precisely when the selection is biggest (#85).
+    for start in range(0, len(paths), PATHS_INFO_BATCH):
+        batch = paths[start:start + PATHS_INFO_BATCH]
+        try:
+            infos = api.get_paths_info(hf_repo, batch, repo_type=repo_type,
+                                       revision=revision)
+        except Exception as exc:  # noqa: BLE001 — reported, never silently zeroed
+            raise VerificationUnavailable(
+                f"{type(exc).__name__} sizing {len(batch)} of {len(paths)} paths "
+                f"in {hf_repo}: {exc}"
+            ) from exc
+        total += sum(getattr(i, "size", 0) or 0 for i in infos)
+    return total
 
 
 def _oversize_error(needed_gb: float, shard_count: int, settings,
@@ -598,11 +616,12 @@ def verify_dataset_spec(
             selected = [f for f in all_files if f.endswith(".parquet")]
 
         if selected:
-            try:
-                needed_gb = paths_size_fn(spec.hf_repo, selected, spec.revision,
-                                          "dataset") / 1024 ** 3
-            except VerificationUnavailable:
-                needed_gb = 0.0
+            # Not swallowed to 0.0: an unknown size is not a small one, and the
+            # caller has a distinct outcome for it — `{valid: true, checked: false}`
+            # — which says the question could not be answered rather than
+            # answering it wrongly (#85).
+            needed_gb = paths_size_fn(spec.hf_repo, selected, spec.revision,
+                                      "dataset") / 1024 ** 3
             if needed_gb > settings.min_free_disk_gb:
                 oversize = _oversize_error(
                     needed_gb, len(selected), settings,

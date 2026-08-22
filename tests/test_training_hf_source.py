@@ -199,6 +199,12 @@ class FakeSettings:
         self.chunk_pages = chunk_pages
 
 
+
+def _small(repo, paths, revision=None, repo_type="dataset"):
+    """A selection well inside the disk floor, so the size check is a no-op."""
+    return 1024 ** 3
+
+
 class TestVerifyDatasetSpec:
     """Unit tests for verify_dataset_spec — all network calls are faked."""
 
@@ -248,7 +254,8 @@ class TestVerifyDatasetSpec:
                            train_projects=[THUN_TRAIN],
                            eval_projects=[THUN_TEST])
         errors = verify_dataset_spec(spec, FakeSettings(),
-                                     list_repo_files_fn=fake_list_ok)
+                                     list_repo_files_fn=fake_list_ok,
+                                     paths_size_fn=_small)
         assert errors == []
 
     def test_no_parquet_files_in_repo_is_an_error(self):
@@ -417,7 +424,8 @@ class TestVerifyDatasetSpec:
             return [f"data/train/{THUN_TRAIN}/s.parquet"]
 
         verify_dataset_spec(DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
-                            FakeSettings(), list_repo_files_fn=counting)
+                            FakeSettings(), list_repo_files_fn=counting,
+                            paths_size_fn=_small)
         assert len(calls) == 1
 
     # ── the size check measures the selection, not the corpus ───────────────
@@ -445,19 +453,31 @@ class TestVerifyDatasetSpec:
         assert errors == []
         assert sized == [[f"data/train/{THUN_TRAIN}/s.parquet"]]
 
-    def test_a_size_lookup_that_fails_does_not_invalidate_a_good_spec(self):
+    def test_a_size_lookup_that_fails_leaves_the_spec_unverified_not_valid(self):
+        """A hub hiccup must not make a good spec *invalid* — nor call it *valid*.
+
+        The failure used to be swallowed into ``needed_gb = 0.0``, which passes
+        every comparison: the guard was switched off exactly when it could not
+        measure. On the real catalogue that happened at the largest selection —
+        `koenigsfelden-charters-post-1500` asks about 1,189 shards and the API
+        answered 413 — so the biggest corpus was the least protected (#85).
+
+        VerificationUnavailable now propagates, and the route turns it into
+        ``{valid: true, checked: false}``: the question could not be answered,
+        which is neither a refusal nor a clean bill of health.
+        """
         def fake_list(repo, **kwargs):
             return [f"data/train/{THUN_TRAIN}/s.parquet"]
 
         def unreachable(repo, paths, revision=None, repo_type="dataset"):
             raise VerificationUnavailable("hub down")
 
-        errors = verify_dataset_spec(
-            DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
-            FakeSettings(min_free_disk_gb=50.0),
-            list_repo_files_fn=fake_list, paths_size_fn=unreachable,
-        )
-        assert errors == []
+        with pytest.raises(VerificationUnavailable, match="hub down"):
+            verify_dataset_spec(
+                DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
+                FakeSettings(min_free_disk_gb=50.0),
+                list_repo_files_fn=fake_list, paths_size_fn=unreachable,
+            )
 
 
 # ── line-level support (#45) ──────────────────────────────────────────────────
@@ -624,3 +644,51 @@ class TestLineImagesAreWritten:
             assert written.exists(), f"{sample['image']} was recorded but never written"
             assert written.read_bytes().startswith(b"\xff\xd8")
             assert sample["page"] == "scan1.jpg"       # kept, so the split can group
+
+
+# ── sizing a large selection (#85) ──────────────────────────────────────────
+class TestPathsSizeBatching:
+    """`get_paths_info` 413s on a large path list, and the guard used to
+    silently read that as zero — no protection at the largest selection."""
+
+    def test_the_batch_size_is_well_under_what_the_api_refused(self):
+        from atr_serving.training.hf_source import PATHS_INFO_BATCH
+
+        # koenigsfelden-charters-post-1500 selects 1,189 shards and got
+        # "413 Payload Too Large" for the single call.
+        assert PATHS_INFO_BATCH < 1189 / 2
+
+    def test_a_large_selection_is_sized_in_batches_and_summed(self, monkeypatch):
+        from atr_serving.training import hf_source
+
+        seen = []
+
+        class FakeApi:
+            def get_paths_info(self, repo, paths, repo_type="dataset", revision=None):
+                seen.append(len(paths))
+                if len(paths) > hf_source.PATHS_INFO_BATCH:
+                    raise RuntimeError("413 Payload Too Large")
+                return [type("I", (), {"size": 1000})() for _ in paths]
+
+        module = type("M", (), {"HfApi": FakeApi})
+        monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", module)
+
+        total = hf_source._default_paths_size("o/r", [f"p{i}" for i in range(1189)],
+                                              None, "dataset")
+        assert total == 1189 * 1000
+        assert max(seen) <= hf_source.PATHS_INFO_BATCH
+        assert len(seen) == 6                      # 1189 / 200, rounded up
+
+    def test_a_failing_batch_names_the_repo_and_the_scale(self, monkeypatch):
+        from atr_serving.training import hf_source
+
+        class FakeApi:
+            def get_paths_info(self, *a, **kw):
+                raise RuntimeError("nope")
+
+        module = type("M", (), {"HfApi": FakeApi})
+        monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", module)
+
+        with pytest.raises(VerificationUnavailable, match="of 1189 paths"):
+            hf_source._default_paths_size("o/r", [f"p{i}" for i in range(1189)],
+                                          None, "dataset")
