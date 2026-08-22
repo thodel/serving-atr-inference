@@ -196,8 +196,8 @@ parsable metric is `failed`, not `completed`.
 > 50 epochs that is **400 optimizer steps** for a 15.2 M-parameter network from random
 > weights, with `1cycle` ramping and annealing the learning rate across all of them.
 > That is what produced `kraken-thun-missiven-v1` at CER 0.98 with 11,191 insertions
-> and 2 deletions (§9): an unconverged CTC network has not learned blank-dominance and
-> emits a character at nearly every timestep.
+> and 2 deletions (§9): the hypothesis was nearly empty — CTC blank collapse. (In this
+> project `insertions` are characters *missing*; see §9a.)
 >
 > **Below ~100 K lines, fine-tune instead.** Set `base_model` to a registry id or a
 > Zenodo DOI and `resize: "union"`; `train_cmd` then emits `--load … --resize union`
@@ -509,17 +509,30 @@ truth survives.
 | network | 15.2 M parameters, random initialisation |
 | schedule | `1cycle`, ramping and annealing across those 400 steps |
 
-An unconverged CTC network has not yet learned blank-dominance: its per-timestep
-distribution is near-uniform, so greedy decoding emits a character at almost every
-timestep. The kraken+ spec downsamples width by 8, so the median 806 px line yields
-roughly 100 timesteps against a 66-character reference — a hypothesis about twice the
-reference length, which is exactly the 11,191-insertions/2-deletions signature. A
-*converged* CTC model cannot over-generate this way; a *collapsed* one emits blanks and
-scores deletions. Only the middle state does this.
+> **Read the edit counts in this project's convention, not the usual one.**
+> `insertions` are characters **missing** from the hypothesis; `deletions` are
+> characters the hypothesis **added**. Inverted from standard ASR usage, verified
+> against `kraken/ketos/recognition.py` and pinned by `tests/test_edit_convention.py`.
+> An earlier version of this section read them the standard way and described the
+> opposite mechanism.
+
+11,191 insertions against 2 deletions and 186 substitutions therefore means **11,191
+reference characters had nothing to match**: the hypothesis was very nearly empty. Not
+over-generation — **CTC blank collapse**. The substitution count settles it. A model
+emitting a character at every timestep would mismatch thousands of them; 186 is what you
+get when there is almost nothing there to mismatch.
+
+The mechanism is the ordinary failure of an under-trained CTC network. With 400
+optimizer steps from random weights the network cannot yet discriminate characters, and
+the fastest available loss reduction is to put mass on the blank label — which is
+correct at most timesteps in any case, since blanks outnumber characters. It settles
+there and never leaves, because `1cycle` has already annealed the learning rate to
+nothing by the time it might have.
 
 `kraken-medieval-scripts-v1` sits on the same curve from the other side: more data, CER
-0.707 rather than 0.984, insertions still dominant. The VLM run is a different mechanism
-with the same surface symptom — an instruct model that does not stop at the line
+0.707 rather than 0.984, insertions still dominant — the same collapse, less complete.
+The VLM run is the opposite failure with a superficially similar CER: an instruct model
+that does not stop at the line, which scores *deletions* under this convention
 (`docs/VLM_TRAINING.md`).
 
 ### 9b. Confirmed by a controlled re-run (2026-08-13)
@@ -660,13 +673,21 @@ it does not move the ranking, but they are not the identical denominator.)
 | `qwen3vl-german-medieval-v1` | vllm | 4,124 | **0.2324** | 232 | 866 | 1,575 |
 
 **More than twice the data, and still 6 % behind.** The error profile is the
-interesting part, not the total. The VLM makes **41 % fewer insertions** and its
-`length_ratio` is 1.055 — it produces well-calibrated transcription lengths, far
-from the runaway insertion behaviour of §9a. But it makes **20 % more
-substitutions**: it reads the wrong character more often. That is the signature of
-a language model producing plausible German where a CTC network maps visual
-evidence, and it is what a fine-tune on four thousand lines buys — enough to fix
-length calibration, not enough to teach the hands.
+interesting part, not the total — read in this project's convention, where
+`insertions` are characters *missing* and `deletions` are characters *added*
+(§9a):
+
+- **41 % fewer omissions** (232 vs 395): the VLM leaves less of the line unread.
+- **6 % more added text** (866 vs 814), and `length_ratio` **1.055** — it runs
+  slightly past the line. A mild form of the failure #55 documents for instruct
+  models, nowhere near that severity, but the same direction.
+- **20 % more substitutions** (1,575 vs 1,312): it reads the wrong character more
+  often.
+
+So the VLM reads more of the line and gets more of it wrong. That is what a
+language model does where a CTC network maps visual evidence — it produces
+plausible German rather than abstaining — and four thousand lines are not enough
+to anchor that in the hands themselves.
 
 Two cautions on reading this as a verdict on the approach:
 

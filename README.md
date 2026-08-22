@@ -60,10 +60,11 @@ first real run, CER 0.466 against 1.837 for the un-adapted base — see
 **The VLM backend, scored on the same eval set** (§9e). `qwen3vl-german-medieval-v1`
 trained a Qwen3-VL-8B QLoRA on 4,124 lines of mixed German and reached **CER 0.2324**
 — more than twice the data of `thun-kurrent-v2` and 6 % behind it. The profile differs
-more than the total: 41 % *fewer* insertions (232 vs 395, `length_ratio` 1.055) and
-20 % *more* substitutions (1,575 vs 1,312). A language model produces plausible German
-where a CTC network maps visual evidence; four thousand lines fix the length
-calibration but do not teach the hands.
+more than the total: 41 % fewer *omissions* (232 vs 395), 6 % more *added* text (866 vs
+814, `length_ratio` 1.055) and 20 % more substitutions (1,575 vs 1,312). The VLM reads
+more of each line and gets more of it wrong — a language model produces plausible German
+where a CTC network maps visual evidence, and four thousand lines do not anchor that in
+the hands.
 
 **Where the lever is now.** §9c spent the base, §9d spent the epochs, §9e spent the
 engine. What remains is the corpus — and that turned out to be a *selection* problem:
@@ -85,8 +86,12 @@ bad eval material, or a training-design problem. It was the second:
 > optimizer steps** over 50 epochs for a 15.2 M-parameter network from random weights —
 > with `1cycle` ramping and annealing the learning rate across all 400.
 
-An unconverged CTC network has not learned blank-dominance and emits a character at
-nearly every timestep, which *is* an insertion-dominated CER. The defaults are right for
+In this project `insertions` are characters **missing** from the hypothesis, not extra
+ones (inverted from standard ASR usage; pinned by `tests/test_edit_convention.py`), so
+11,191 insertions against 2 deletions and 186 substitutions means the output was very
+nearly **empty** — CTC blank collapse. An under-trained network cannot yet discriminate
+characters, and the fastest loss reduction available is to put all its mass on the blank
+label. The defaults are right for
 the ~18 M-line corpus they were written against and wrong by three orders of magnitude
 here. **The step-count guard (#72) now refuses such a configuration** between prepare
 and compile, before any GPU time, with the arithmetic in the error.

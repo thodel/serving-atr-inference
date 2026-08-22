@@ -144,9 +144,9 @@ The response is `202` with the job id:
 > `batch_size: 256` that is **8 batches per epoch, 400 optimizer steps over the whole
 > run**, for a 15.2 M-parameter network from random weights — and `1cycle` spends all
 > 400 ramping up and annealing back down. The result was
-> `kraken-thun-missiven-v1` at **CER 0.98**, insertion-dominated, because an
-> unconverged CTC network has not learned blank-dominance and emits a character at
-> nearly every timestep.
+> `kraken-thun-missiven-v1` at **CER 0.98** with a nearly empty output — CTC blank
+> collapse. (`insertions` here are characters *missing* from the hypothesis, inverted
+> from standard ASR usage; see `docs/TRAINING_PLAN.md` §9a.)
 >
 > **The trainer now enforces this.** A configuration whose line count and batch
 > size yield too few optimizer steps is refused between `prepare` and `compile`,
