@@ -74,7 +74,8 @@ the dataset every run above drew from is
 while 9,885 pages of Zurich council books sat in a dataset nobody had queried.
 `scripts/plan_corpus.py` (#87) scores the 32 dh-unibe datasets on period, language and
 script class, removes projects that two datasets both publish — there are several — and
-plans a **23,428-page** German corpus of the 14th–16th century. See
+plans a **23,161-page** German corpus of the 14th–16th century (~219,000 lines,
+against 4,124 for the hand-picked selection). See
 [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) §11 and
 [`docs/TRAINING.md`](docs/TRAINING.md) §8c.
 

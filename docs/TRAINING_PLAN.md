@@ -811,19 +811,57 @@ at 0.56 for a documentary corpus.
 
 ### What it plans
 
+Run against the real catalogue on the box (2026-08-22), not the cards summarised
+here:
+
 | dataset | pages | share |
 |---|---:|---:|
 | `rats-und-richtebuecher_xv-xvi` | 9,351 | 40 % |
-| `bullinger-autoren` | 8,022 | 34 % |
+| `bullinger-autoren` | 8,022 | 35 % |
 | `koenigsfelden-charters-post-1500` | 3,222 | 14 % |
 | `aaeb-xiv-xvii` | 2,566 | 11 % |
-| three small Königsfelden/AAEB remainders | 267 | 1 % |
-| **total** | **23,428** | |
+| **total** | **23,161** | |
 
-**~222,000 estimated lines against the 4,124 of §9e — 54×.** The estimate uses
+**~219,000 estimated lines against the 4,124 of §9e — 53×.** The estimate uses
 14.8 lines per usable page and a 64 % usable rate, both measured on that one run;
 treat it as an order of magnitude. Only `prepare` knows the real figure, and the
 plan says so in its own output.
+
+Four datasets, not seven. `koenigsfelden-adhr-colmar` and
+`koenigsfelden-charters-part-2` are wholly contained in
+`koenigsfelden-charters-post-1500`; `hgb-kf_mixture` keeps 3 of its 20 projects
+(the other 17 are its `u-17_*`, also in `kf-post-1500`) and `aaeb-xiv-xvii-part-2`
+keeps a similar remainder — 23 unique pages each, dropped by `--min-pages 100`
+rather than costing a prepare stream apiece for 0.2 % of the corpus.
+
+### What the first real run caught
+
+The heuristic was written against a hand-built catalogue and only met the true one
+on the box. It failed there, silently, in the way this whole section is about.
+
+`fetch_catalogue` had collected project names with `line.startswith("- ")` — every
+bullet in the card, which is the YAML frontmatter and the Markdown feature list as
+well as the project list:
+
+```
+163 names appear in more than one dataset
+   config_name: default                           32
+   **image**: `Image(mode=None, decode=False)`    28
+   htr                                             9
+```
+
+`config_name: default` is in all 32 cards, so every dataset looked like a
+duplicate of every other. The run reported **153 duplicate projects** and dropped
+real material behind tag names it happened to collide with — `bullinger`,
+`aaeb-xiv-xvii` and `kf-post-1500` each lost exactly 5, the length of the standard
+tag list. `pages_per_project` was meanwhile divided by a count that was mostly
+Markdown.
+
+Fixed in `ffecc04`: `parse_projects` reads the bullets under "Projects Included"
+and stops at the next heading, and a real card is pinned in the tests. Worth
+recording because the failure was invisible in the output — a plausible corpus,
+plausible page counts, and a duplicate count nobody would question without knowing
+what the real overlaps are.
 
 ### The cost of this, stated plainly
 
