@@ -17,6 +17,7 @@ from atr_serving.training.hf_source import (
     hub_cache_dir,
     page_stem,
     project_glob,
+    resolve_to_files,
     row_to_page,
     verify_dataset_spec,
 )
@@ -741,3 +742,55 @@ class TestCollapsingACompleteSelection:
         """`data/<split>/*.parquet` matches nothing on a repo laid out by project —
         the trap TRAINING_PLAN §1 records."""
         assert whole_split_glob("train") == "data/train/**/*.parquet"
+
+
+class TestResolvingToFiles:
+    """One listing instead of one tree call per project (#89).
+
+    koenigsfelden-charters-post-1500 selects 1,185 of ~1,190 projects: too few to
+    collapse to a whole-split glob, and 1,185 requests against a quota of 1,000
+    per five minutes. Listing the repo once describes the same files exactly.
+    """
+
+    FILES = [
+        "README.md",
+        "data/train/a/x-0000.parquet",
+        "data/train/a/x-0001.parquet",
+        "data/train/b/y.parquet",
+        "data/train/c/z.parquet",
+        "data/test/a/other.parquet",
+    ]
+
+    def lister(self, files=None):
+        return lambda repo, revision=None, repo_type="dataset": list(
+            self.FILES if files is None else files)
+
+    def test_only_the_selected_projects_shards_come_back(self):
+        got = resolve_to_files("train", ["a", "b"], "o/r", None, self.lister())
+        assert got == ["data/train/a/x-0000.parquet",
+                       "data/train/a/x-0001.parquet",
+                       "data/train/b/y.parquet"]
+
+    def test_every_shard_of_a_project_is_kept(self):
+        """A project is a directory, not a file — `a` has two."""
+        got = resolve_to_files("train", ["a"], "o/r", None, self.lister())
+        assert len(got) == 2
+
+    def test_another_split_is_not_picked_up(self):
+        got = resolve_to_files("train", ["a"], "o/r", None, self.lister())
+        assert not any("/test/" in f for f in got)
+
+    def test_non_parquet_files_are_ignored(self):
+        got = resolve_to_files("train", ["a", "b", "c"], "o/r", None, self.lister())
+        assert all(f.endswith(".parquet") for f in got)
+
+    def test_an_unlistable_repo_falls_back_to_the_globs(self):
+        def unreachable(repo, revision=None, repo_type="dataset"):
+            raise VerificationUnavailable("hub down")
+
+        assert resolve_to_files("train", ["a"], "o/r", None, unreachable) is None
+
+    def test_a_selection_matching_nothing_falls_back_rather_than_selecting_nothing(self):
+        """An empty data_files list would load the whole repo; the globs at least
+        fail with a name that is not there."""
+        assert resolve_to_files("train", ["nope"], "o/r", None, self.lister()) is None

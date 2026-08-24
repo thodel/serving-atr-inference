@@ -46,6 +46,7 @@ __all__ = [
     "data_files_for",
     "whole_split_glob",
     "collapse_complete_selection",
+    "resolve_to_files",
     "expand_all_projects",
     "granularity_files",
     "hub_cache_dir",
@@ -171,6 +172,39 @@ def whole_split_glob(split: str) -> str:
     return f"data/{split}/**/*.parquet"
 
 
+def resolve_to_files(
+    split: str, projects: list[str], hf_repo: str, revision: str | None = None,
+    list_repo_files_fn=None,
+) -> list[str] | None:
+    """The selection as concrete parquet paths, or None if it cannot be listed (#89).
+
+    ``datasets`` resolves every *glob* in ``data_files`` with its own tree API
+    call, so a selection of 1,825 project directories costs 1,825 requests against
+    a quota of 1,000 per five minutes. Both corpus runs died on that, and
+    :func:`collapse_complete_selection` only helps when the selection covers the
+    repo exactly — `koenigsfelden-charters-post-1500` selects 1,185 of ~1,190
+    projects and still paid 1,185 requests.
+
+    Listing the repo once and handing over the file paths costs **one** request and
+    describes the same set exactly, without widening it the way a coarser glob
+    would. This is the listing `verify_dataset_spec` already makes.
+    """
+    lister = list_repo_files_fn or _default_list_repo_files
+    prefix = f"data/{split}/"
+    wanted = set(projects)
+    try:
+        files = list(lister(hf_repo, revision, "dataset"))
+    except Exception as exc:  # noqa: BLE001 — any failure means "keep the globs"
+        logger.debug("cannot list {} to resolve data_files: {}", hf_repo, exc)
+        return None
+    selected = [
+        f for f in files
+        if f.endswith(".parquet") and f.startswith(prefix)
+        and f[len(prefix):].split("/", 1)[0] in wanted
+    ]
+    return selected or None
+
+
 def collapse_complete_selection(
     split: str, projects: list[str], hf_repo: str, revision: str | None = None,
     list_projects_fn=None,
@@ -247,15 +281,15 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
         # Validate every name even when the globs collapse: a typo must still be
         # an error, not silently absorbed into a whole-split glob.
         train_globs = [project_glob(resolved.split, p) for p in resolved.train_projects]
-        if not resolved.eval_projects:
-            collapsed = collapse_complete_selection(
-                resolved.split, resolved.train_projects, resolved.hf_repo,
-                resolved.revision,
-            )
-            if collapsed:
-                logger.info("{}: selection covers every project — one glob instead "
-                            "of {} (#89)", resolved.hf_repo, len(train_globs))
-                train_globs = collapsed
+        resolved_files = resolve_to_files(
+            resolved.split, resolved.train_projects, resolved.hf_repo,
+            resolved.revision,
+        )
+        if resolved_files:
+            logger.info("{}: {} project glob(s) resolved to {} file(s) in one "
+                        "listing (#89)", resolved.hf_repo, len(train_globs),
+                        len(resolved_files))
+            train_globs = resolved_files
         files = {"train": train_globs}
 
     if resolved.eval_projects:
