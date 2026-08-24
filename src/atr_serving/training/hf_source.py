@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 from atr_serving.training.contracts import (
     DatasetNotOnHub,
     DatasetSelectionError,
@@ -42,6 +44,8 @@ __all__ = [
     "PROJECT_COLUMNS",
     "TEXT_COLUMNS",
     "data_files_for",
+    "whole_split_glob",
+    "collapse_complete_selection",
     "expand_all_projects",
     "granularity_files",
     "hub_cache_dir",
@@ -162,6 +166,48 @@ def expand_all_projects(spec: DatasetSpec) -> DatasetSpec:
     return expanded
 
 
+def whole_split_glob(split: str) -> str:
+    """One glob for every project under ``data/<split>/``."""
+    return f"data/{split}/**/*.parquet"
+
+
+def collapse_complete_selection(
+    split: str, projects: list[str], hf_repo: str, revision: str | None = None,
+    list_projects_fn=None,
+) -> list[str] | None:
+    """One glob when ``projects`` is every project there is, else None (#89).
+
+    ``datasets`` resolves each entry of ``data_files`` with its own tree API call.
+    Four datasets selecting 1,825 project directories is 1,825 requests against a
+    quota of **1,000 per five minutes**, and both corpus runs died on it:
+
+        429: you hit the quota of 1000 api requests per 5 minutes period
+        url: .../tree/<sha>/data%2Ftrain%2Fu-17_0904?recursive=True
+
+    `koenigsfelden-charters-post-1500` is the case that makes the cost obvious: it
+    selects 1,185 of its ~1,190 projects — effectively the whole dataset — and paid
+    1,185 requests for a file set one glob describes exactly.
+
+    Collapsing is only correct when nothing is left out, so it is checked rather
+    than assumed, and a hub that cannot be listed falls back to the explicit globs
+    rather than quietly widening the selection.
+    """
+    lister = list_projects_fn or list_projects
+    try:
+        available = set(lister(hf_repo, split, revision))
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately broad: every failure here means "keep the explicit globs",
+        # which is correct in all of them — an unreachable hub, a missing
+        # huggingface_hub, a repo that does not exist. Narrowing this would trade a
+        # safe fallback for an exception in a function whose only job is to make
+        # the selection cheaper.
+        logger.debug("cannot check selection completeness for {}: {}", hf_repo, exc)
+        return None
+    if not available or not set(projects) >= available:
+        return None
+    return [whole_split_glob(split)]
+
+
 def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
     """Map role → ``data_files`` globs.
 
@@ -198,9 +244,19 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
                 f"projects appear in both train and eval: {overlap}. That leaks evaluation "
                 "pages into training."
             )
-        files = {
-            "train": [project_glob(resolved.split, p) for p in resolved.train_projects]
-        }
+        # Validate every name even when the globs collapse: a typo must still be
+        # an error, not silently absorbed into a whole-split glob.
+        train_globs = [project_glob(resolved.split, p) for p in resolved.train_projects]
+        if not resolved.eval_projects:
+            collapsed = collapse_complete_selection(
+                resolved.split, resolved.train_projects, resolved.hf_repo,
+                resolved.revision,
+            )
+            if collapsed:
+                logger.info("{}: selection covers every project — one glob instead "
+                            "of {} (#89)", resolved.hf_repo, len(train_globs))
+                train_globs = collapsed
+        files = {"train": train_globs}
 
     if resolved.eval_projects:
         files["eval"] = [project_glob(resolved.split, p) for p in resolved.eval_projects]

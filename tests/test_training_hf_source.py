@@ -12,6 +12,8 @@ from atr_serving.training.hf_source import (
     VerificationUnavailable,
     DatasetSelectionError,
     data_files_for,
+    whole_split_glob,
+    collapse_complete_selection,
     hub_cache_dir,
     page_stem,
     project_glob,
@@ -692,3 +694,50 @@ class TestPathsSizeBatching:
         with pytest.raises(VerificationUnavailable, match="of 1189 paths"):
             hf_source._default_paths_size("o/r", [f"p{i}" for i in range(1189)],
                                           None, "dataset")
+
+
+# ── one glob instead of 1,185 (#89) ─────────────────────────────────────────
+class TestCollapsingACompleteSelection:
+    """`datasets` resolves each data_files entry with its own tree API call.
+
+    Both corpus runs died on `429: you hit the quota of 1000 api requests per 5
+    minutes period` while resolving 1,825 project directories across four
+    datasets. koenigsfelden-charters-post-1500 alone selects 1,185 of its ~1,190
+    projects — the whole dataset, paid for one request at a time.
+    """
+
+    def lister(self, *projects):
+        return lambda repo, split, revision=None: list(projects)
+
+    def test_selecting_every_project_collapses_to_one_glob(self):
+        globs = collapse_complete_selection(
+            "train", ["a", "b", "c"], "o/r", None, self.lister("a", "b", "c"))
+        assert globs == ["data/train/**/*.parquet"]
+
+    def test_a_partial_selection_is_left_alone(self):
+        """Collapsing would silently widen it to projects nobody asked for."""
+        assert collapse_complete_selection(
+            "train", ["a", "b"], "o/r", None, self.lister("a", "b", "c")) is None
+
+    def test_a_superset_still_collapses(self):
+        """A spec naming a project the repo no longer has still covers the repo."""
+        assert collapse_complete_selection(
+            "train", ["a", "b", "gone"], "o/r", None, self.lister("a", "b")) == [
+            "data/train/**/*.parquet"]
+
+    def test_an_unlistable_hub_keeps_the_explicit_globs(self):
+        """Falling back must not widen the selection — 'unknown' is not 'all'."""
+        def unreachable(repo, split, revision=None):
+            raise VerificationUnavailable("hub down")
+
+        assert collapse_complete_selection(
+            "train", ["a"], "o/r", None, unreachable) is None
+
+    def test_an_empty_repo_does_not_collapse(self):
+        assert collapse_complete_selection(
+            "train", ["a"], "o/r", None, self.lister()) is None
+
+    def test_the_whole_split_glob_matches_the_project_layout(self):
+        """`data/<split>/*.parquet` matches nothing on a repo laid out by project —
+        the trap TRAINING_PLAN §1 records."""
+        assert whole_split_glob("train") == "data/train/**/*.parquet"
