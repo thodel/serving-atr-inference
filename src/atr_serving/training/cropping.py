@@ -21,7 +21,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from atr_serving.training.vlm_dataset import Sample
+from atr_serving.training.vlm_dataset import MIN_CROP_PX, Sample
 
 __all__ = ["write_crops"]
 
@@ -66,6 +66,7 @@ def write_crops(
     dest.mkdir(parents=True, exist_ok=True)
 
     out: list[Sample] = []
+    skipped: list[Sample] = []
     open_path: str | None = None
     page: "Image.Image | None" = None
 
@@ -93,6 +94,27 @@ def write_crops(
             min(bottom, page.height),
         )
 
+        # The clamp can invert the box, and one inverted box used to end the
+        # stage. `vlm_dataset` already rejects a degenerate bbox — but against the
+        # size the PageXML *declares*, while this clamps against the size the file
+        # actually has. When a page overstates its dimensions, a line that starts
+        # beyond the real width keeps its `left` and has its `right` pulled back
+        # below it, and PIL raises "Coordinate 'right' is less than 'left'".
+        #
+        # Job 20260822T143617Z died that way after materialising 12,288 pages:
+        # one bad line out of 328,229 took the whole compile with it. A page whose
+        # geometry disagrees with its own image is bad data, not a reason to
+        # discard the other 328,228 lines (#89).
+        if box[2] - box[0] < MIN_CROP_PX or box[3] - box[1] < MIN_CROP_PX:
+            skipped.append(sample)
+            if len(skipped) <= 5:
+                logger.warning(
+                    "skipping a line whose box does not survive clamping to the "
+                    "real image: {} bbox={} page={}x{} -> {}",
+                    sample.page, sample.bbox, page.width, page.height, box,
+                )
+            continue
+
         crop_path = dest / f"{index:07d}.jpg"
         page.crop(box).save(crop_path, format="JPEG", quality=95)
         logger.debug("cropped {} -> {}", sample.image, crop_path.name)
@@ -110,4 +132,11 @@ def write_crops(
     if page is not None:
         page.close()
 
+    if skipped:
+        logger.warning(
+            "write_crops: {} of {} line(s) skipped — their box did not survive "
+            "clamping to the real image size. The pages listed above declare "
+            "dimensions their scans do not have.",
+            len(skipped), len(samples),
+        )
     return out

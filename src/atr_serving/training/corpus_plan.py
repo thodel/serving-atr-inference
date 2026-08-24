@@ -63,11 +63,17 @@ class CorpusPlanError(ValueError):
 
 
 #: Transcribed lines per usable page, and the fraction of pages that carry any
-#: transcription at all. Both measured on 20260821T163926Z: 452 pages streamed,
-#: 291 usable (64 %), 4313 lines (14.8 per usable page). One corpus, so treat a
-#: derived line count as an order of magnitude, not a number.
-LINES_PER_PAGE = 14.8
-USABLE_PAGE_RATIO = 0.64
+#: transcription at all. Measured on 20260822T143617Z across four corpora:
+#: 13,896 pages streamed, 12,288 usable (88 %), 328,229 lines (26.7 per usable
+#: page). Supersedes the figures from 20260821T163926Z (14.8 and 64 %), which came
+#: from a single 452-page selection and were wrong in both directions.
+#:
+#: Still an estimate. That run also showed `plan_corpus` overestimating *pages* —
+#: 12,288 materialised against 23,161 planned — because per-project page counts
+#: are the dataset total divided by its project count, and projects are not equal.
+#: The two errors partly cancel, which is luck rather than accuracy.
+LINES_PER_PAGE = 26.7
+USABLE_PAGE_RATIO = 0.88
 
 #: Document types that imply a cursive documentary hand rather than a book hand.
 _CURSIVE_TYPES = ("protocol", "document", "letter", "charter", "file", "record")

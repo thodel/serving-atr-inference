@@ -168,8 +168,17 @@ class TestBalance:
 
 class TestPlanOutput:
     def test_estimated_lines_are_derived_from_the_measured_ratio(self):
+        """Reads the constants rather than restating them: they are measurements
+        and get corrected when a bigger run measures better (they already have —
+        14.8/0.64 from one 452-page selection became 26.7/0.88 across 13,896)."""
+        from atr_serving.training.corpus_plan import (
+            LINES_PER_PAGE,
+            USABLE_PAGE_RATIO,
+        )
+
         plan = plan_corpus([cand("x", pages=1000, projects=["p"])], MEDIEVAL_GERMAN)
-        assert plan.estimated_lines == int(1000 * 0.64 * 14.8)
+        assert plan.estimated_lines == int(1000 * USABLE_PAGE_RATIO * LINES_PER_PAGE)
+        assert plan.estimated_lines > 0
 
     def test_every_plan_says_its_numbers_are_estimates(self):
         plan = plan_corpus([cand("x", projects=["p"])], MEDIEVAL_GERMAN)

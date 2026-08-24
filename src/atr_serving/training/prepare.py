@@ -17,6 +17,8 @@ would degrade every training line for no reason.
 from __future__ import annotations
 
 import json
+import re
+import time
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +54,60 @@ class PageSource(Protocol):
     def stream(
         self, hf_repo: str, data_files: list[str], revision: str | None = None
     ) -> Iterator[dict]: ...
+
+
+#: How often to retry a hub call that answers 429, and the cap on the wait it
+#: asks for. The hub states its own backoff ("Retry after 9 sec"); anything much
+#: longer than this means the limit is not going to clear on this attempt.
+HUB_RETRIES = 5
+HUB_RETRY_CAP_S = 60.0
+
+_RETRY_AFTER = re.compile(r"retry\s+after\s+(\d+)\s*sec", re.IGNORECASE)
+
+
+def _retry_after(exc: BaseException) -> float | None:
+    """Seconds the hub asked us to wait, or None when this is not a rate limit.
+
+    Matched on the message rather than the exception type: `datasets` wraps hub
+    errors on the way out, and the message survives the wrapping while the class
+    does not.
+    """
+    text = str(exc)
+    if "429" not in text and "rate limit" not in text.lower():
+        return None
+    match = _RETRY_AFTER.search(text)
+    return float(match.group(1)) if match else 5.0
+
+
+def with_hub_retry(call, *, attempts: int = HUB_RETRIES, sleep=None):
+    """Run ``call``, retrying while the hub answers 429 (#89).
+
+    Job 20260822T143612Z died in `prepare` on::
+
+        429 Too Many Requests: you have reached your 'api' rate limit.
+        Retry after 9 sec
+
+    Nine seconds, against a stage that had already been running for minutes and
+    would have run for hours. A rate limit is the hub telling us when to come
+    back, not a reason to discard the run — and the limit is easy to reach
+    honestly, since verifying a four-dataset corpus lists every repo and sizes
+    1,800 shards before a single page is read.
+    """
+    sleep = time.sleep if sleep is None else sleep
+    last: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except BaseException as exc:  # noqa: BLE001 — re-raised below unless 429
+            wait = _retry_after(exc)
+            if wait is None or attempt == attempts:
+                raise
+            wait = min(wait * attempt, HUB_RETRY_CAP_S)
+            logger.warning("hub rate limit (attempt {}/{}), waiting {:.0f}s: {}",
+                           attempt, attempts, wait, str(exc)[:120])
+            sleep(wait)
+            last = exc
+    raise last  # unreachable; the loop either returns or raises
 
 
 class HFPageSource:
@@ -98,14 +154,14 @@ class HFPageSource:
         # 548,322 examples / 6.96 TB — and raises NonMatchingSplitsSizesError.
         # Selecting a subset with data_files can never match those numbers, so the
         # check is meaningless here and fails every job by construction.
-        ds = load_dataset(
+        ds = with_hub_retry(lambda: load_dataset(
             hf_repo,
             data_files={"train": list(data_files)},
             split="train",
             streaming=not self.cache,
             revision=revision,
             verification_mode="no_checks",
-        )
+        ))
         return iter(self._raw_images(ds))
 
     @staticmethod
