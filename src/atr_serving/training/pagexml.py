@@ -87,6 +87,68 @@ def rewrite_image_filename(xml_text: str, new_name: str) -> str:
     return xml_text[: page.start()] + new_tag + xml_text[page.end():]
 
 
+#: Width-to-height ratio above which a "line" is almost certainly mis-segmented —
+#: two columns merged, a rule read as a baseline, a marginal note swept into its
+#: neighbour. The counterpart to ``vlm_dataset.MIN_CROP_PX``, which rejects boxes
+#: that are too *small*; nothing rejected the absurd ones (#90).
+#:
+#: 60 is drawn from the corpus rather than chosen: over 328,229 German lines the
+#: median ratio is 9.9 and p99 is 58.1, so this drops roughly the top percent. The
+#: maximum measured was 135 — 8,657 px wide at the 64 px height kraken normalises
+#: to, which is not a line of text.
+#:
+#: It matters beyond data quality. kraken pads every batch to its widest member,
+#: so peak VRAM is ``batch_size x 64 x max(aspect in batch)`` and **one outlier is
+#: paid for by every other line in its batch**. That is why halving the batch
+#: raised memory instead of lowering it (64 -> 32.3 GiB, 32 -> 36.8 GiB): a
+#: smaller batch merely regrouped the outliers.
+MAX_LINE_ASPECT = 60.0
+
+
+_TEXTLINE_BLOCK_RE = re.compile(
+    r"[ \t]*<(?P<p>\w+:)?TextLine\b.*?</(?P=p)?TextLine>[ \t]*\n?", re.DOTALL
+)
+_COORDS_RE = re.compile(r"<(?:\w+:)?Coords\b[^>]*?points\s*=\s*([\"'])(.*?)\1", re.DOTALL)
+
+
+def drop_wide_lines(xml_text: str, max_aspect: float = MAX_LINE_ASPECT) -> tuple[str, int]:
+    """Remove ``TextLine`` elements whose box is absurdly wider than it is tall.
+
+    Returns the edited document and how many lines were removed.
+
+    Reporting the outliers was not enough for the kraken backend: it reads the
+    PageXML itself through ``ketos compile``, so a ceiling that only filtered the
+    VLM path left them in. One of them ended a run at ``batch_size: 16`` with a
+    **single 21.69 GiB allocation** — kraken pads a batch to its widest member, so
+    one 135:1 line costs more than the other fifteen together (#90).
+
+    Regex surgery rather than an ElementTree round-trip, for the reason this
+    module gives at the top: re-serializing rewrites namespace prefixes, and the
+    PageXML that goes to ``ketos`` should differ from the source only where we
+    meant it to.
+    """
+    dropped = 0
+
+    def replace(match: "re.Match[str]") -> str:
+        nonlocal dropped
+        block = match.group(0)
+        coords = _COORDS_RE.search(block)
+        if not coords:
+            return block                     # no geometry to judge; leave it alone
+        points = parse_points(coords.group(2))
+        if len(points) < 2:
+            return block
+        xs = [x for x, _ in points]
+        ys = [y for _, y in points]
+        width, height = max(xs) - min(xs), max(ys) - min(ys)
+        if height > 0 and width > 0 and (width / height) > max_aspect:
+            dropped += 1
+            return ""
+        return block
+
+    return _TEXTLINE_BLOCK_RE.sub(replace, xml_text), dropped
+
+
 def line_texts(xml_text: str) -> list[str]:
     """Transcription of every ``TextLine``, in document order.
 
@@ -210,24 +272,6 @@ def line_boxes(xml_text: str) -> list[TextLineBox]:
             continue
         boxes.append(TextLineBox(index, text, left, top, right, bottom, line.get("id")))
     return boxes
-
-
-#: Width-to-height ratio above which a "line" is almost certainly mis-segmented —
-#: two columns merged, a rule read as a baseline, a marginal note swept into its
-#: neighbour. The counterpart to ``vlm_dataset.MIN_CROP_PX``, which rejects boxes
-#: that are too *small*; nothing rejected the absurd ones (#90).
-#:
-#: 60 is drawn from the corpus rather than chosen: over 328,229 German lines the
-#: median ratio is 9.9 and p99 is 58.1, so this drops roughly the top percent. The
-#: maximum measured was 135 — 8,657 px wide at the 64 px height kraken normalises
-#: to, which is not a line of text.
-#:
-#: It matters beyond data quality. kraken pads every batch to its widest member,
-#: so peak VRAM is ``batch_size x 64 x max(aspect in batch)`` and **one outlier is
-#: paid for by every other line in its batch**. That is why halving the batch
-#: raised memory instead of lowering it (64 -> 32.3 GiB, 32 -> 36.8 GiB): a
-#: smaller batch merely regrouped the outliers.
-MAX_LINE_ASPECT = 60.0
 
 
 def is_plausible_line(box: "TextLineBox", max_aspect: float = MAX_LINE_ASPECT) -> bool:

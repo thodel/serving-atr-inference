@@ -33,7 +33,7 @@ from atr_serving.training.hf_source import (
     row_to_page,
 )
 from atr_serving.training.manifests import split_pages
-from atr_serving.training.pagexml import page_stats, rewrite_image_filename
+from atr_serving.training.pagexml import drop_wide_lines, page_stats, rewrite_image_filename
 
 from atr_serving.training.preflight import PreflightError, free_disk_gb
 
@@ -251,8 +251,18 @@ def materialize(
         page = row_to_page(index, row)
         index += 1
 
-        stats = page_stats(page.xml)
-        if not stats.usable:
+        # Drop mis-segmented lines *before* judging the page: kraken reads this
+        # PageXML through `ketos compile`, so a ceiling that only filtered the VLM
+        # path left them in — and one 135:1 line asked for a single 21.69 GiB
+        # allocation at batch_size 16, because a batch is padded to its widest
+        # member (#90).
+        page_xml, dropped = drop_wide_lines(page.xml)
+        out.wide_lines += dropped
+        stats = page_stats(page.xml)          # measured before the drop, so the
+        out.max_aspect = max(out.max_aspect, stats.max_aspect)   # tail is reported
+        if not page_stats(page_xml).usable:
+            # Either the page never had a transcription, or every line it had was
+            # an outlier. Both mean nothing trainable is left.
             out.pages_skipped += 1
             continue
 
@@ -268,15 +278,14 @@ def materialize(
         image_path = dest / page.image_name
         xml_path = dest / page.xml_name
         image_path.write_bytes(page.image)
-        xml_path.write_text(rewrite_image_filename(page.xml, page.image_name), encoding="utf-8")
+        xml_path.write_text(rewrite_image_filename(page_xml, page.image_name), encoding="utf-8")
 
         out.xml_paths.append(xml_path)
         out.pages_written += 1
-        out.lines += stats.transcribed_lines
-        out.chars += stats.chars
-        out.charset |= stats.charset
-        out.wide_lines += stats.wide_lines
-        out.max_aspect = max(out.max_aspect, stats.max_aspect)
+        written = page_stats(page_xml)
+        out.lines += written.transcribed_lines
+        out.chars += written.chars
+        out.charset |= written.charset
         out.bytes_written += len(page.image)
 
     if not out.pages_written:

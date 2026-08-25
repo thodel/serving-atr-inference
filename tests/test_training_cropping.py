@@ -118,3 +118,60 @@ class TestAspectCeiling:
         stats = page_stats(xml)
         assert stats.wide_lines == 1
         assert stats.max_aspect > 100
+
+
+class TestDropWideLines:
+    """Reporting was not enough for kraken, which reads the PageXML itself.
+
+    One 135:1 line asked for a single **21.69 GiB** allocation at batch_size 16 —
+    a batch is padded to its widest member, so one outlier costs more than the
+    other fifteen together.
+    """
+
+    XML = """<PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15">
+ <Page imageFilename="p.jpg" imageWidth="9000" imageHeight="500">
+  <TextRegion id="r1">
+   <TextLine id="l1"><Coords points="0,0 990,0 990,100 0,100"/>
+     <TextEquiv><Unicode>an ordinary line</Unicode></TextEquiv></TextLine>
+   <TextLine id="l2"><Coords points="0,200 8657,200 8657,264 0,264"/>
+     <TextEquiv><Unicode>two columns merged</Unicode></TextEquiv></TextLine>
+  </TextRegion>
+ </Page></PcGts>"""
+
+    def test_the_outlier_goes_and_the_ordinary_line_stays(self):
+        from atr_serving.training.pagexml import drop_wide_lines, line_texts
+
+        out, dropped = drop_wide_lines(self.XML)
+        assert dropped == 1
+        assert line_texts(out) == ["an ordinary line"]
+
+    def test_the_rest_of_the_document_is_untouched(self):
+        """Regex surgery, not an ElementTree round-trip — that would rewrite the
+        namespace prefixes of every element."""
+        from atr_serving.training.pagexml import drop_wide_lines
+
+        out, _ = drop_wide_lines(self.XML)
+        assert 'imageFilename="p.jpg"' in out
+        assert 'xmlns="http://schema.primaresearch.org/PAGE' in out
+        assert '<TextRegion id="r1">' in out
+
+    def test_a_line_without_coords_is_left_alone(self):
+        """No geometry to judge is not the same as bad geometry."""
+        from atr_serving.training.pagexml import drop_wide_lines
+
+        xml = self.XML.replace('<Coords points="0,200 8657,200 8657,264 0,264"/>', "")
+        _, dropped = drop_wide_lines(xml)
+        assert dropped == 0
+
+    def test_nothing_to_drop_returns_the_document_unchanged(self):
+        from atr_serving.training.pagexml import drop_wide_lines
+
+        xml = self.XML.replace("8657", "990")
+        out, dropped = drop_wide_lines(xml)
+        assert dropped == 0 and out == xml
+
+    def test_the_threshold_is_honoured(self):
+        from atr_serving.training.pagexml import drop_wide_lines
+
+        assert drop_wide_lines(self.XML, max_aspect=200)[1] == 0
+        assert drop_wide_lines(self.XML, max_aspect=5)[1] == 2
