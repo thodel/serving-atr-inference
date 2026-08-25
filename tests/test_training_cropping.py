@@ -64,3 +64,57 @@ class TestDegenerateAfterClamping:
                       bbox=[10, 10, 10 + MIN_CROP_PX, 10 + MIN_CROP_PX],
                       page="p.xml")
         assert len(write_crops([edge], tmp_path, tmp_path / "crops")) == 1
+
+
+# ── the aspect ceiling (#90) ────────────────────────────────────────────────
+class TestAspectCeiling:
+    """`MIN_CROP_PX` rejected boxes that were too small; nothing rejected the
+    absurd ones. Measured over 328,229 German lines: median 9.9, p99 58.1,
+    max 135 — 8,657 px wide at the 64 px height kraken normalises to."""
+
+    def box(self, w, h):
+        from atr_serving.training.pagexml import TextLineBox
+
+        return TextLineBox(0, "text", 0, 0, w, h, "l1")
+
+    def test_an_ordinary_line_passes(self):
+        from atr_serving.training.pagexml import is_plausible_line
+
+        assert is_plausible_line(self.box(990, 100)) is True      # ~9.9:1, the median
+
+    def test_the_worst_measured_line_is_rejected(self):
+        from atr_serving.training.pagexml import is_plausible_line
+
+        assert is_plausible_line(self.box(8657, 64)) is False     # 135:1
+
+    def test_the_ceiling_sits_just_above_p99(self):
+        """Dropping ~1 % is the trade; dropping 10 % would not be."""
+        from atr_serving.training.pagexml import MAX_LINE_ASPECT
+
+        assert 58.1 <= MAX_LINE_ASPECT <= 70.0
+
+    def test_exactly_at_the_ceiling_is_kept(self):
+        from atr_serving.training.pagexml import MAX_LINE_ASPECT, is_plausible_line
+
+        assert is_plausible_line(self.box(int(64 * MAX_LINE_ASPECT), 64)) is True
+
+    def test_a_zero_height_box_is_not_plausible_rather_than_a_zero_division(self):
+        from atr_serving.training.pagexml import is_plausible_line
+
+        assert is_plausible_line(self.box(100, 0)) is False
+
+    def test_page_stats_counts_the_tail_so_a_corpus_can_report_it(self):
+        from atr_serving.training.pagexml import page_stats
+
+        xml = """<PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15">
+          <Page imageWidth="9000" imageHeight="500">
+            <TextRegion id="r1">
+              <TextLine id="l1"><Coords points="0,0 990,0 990,100 0,100"/>
+                <TextEquiv><Unicode>normal</Unicode></TextEquiv></TextLine>
+              <TextLine id="l2"><Coords points="0,200 8657,200 8657,264 0,264"/>
+                <TextEquiv><Unicode>merged region</Unicode></TextEquiv></TextLine>
+            </TextRegion>
+          </Page></PcGts>"""
+        stats = page_stats(xml)
+        assert stats.wide_lines == 1
+        assert stats.max_aspect > 100

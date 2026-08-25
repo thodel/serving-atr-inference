@@ -188,6 +188,18 @@ def resolve_to_files(
     Listing the repo once and handing over the file paths costs **one** request and
     describes the same set exactly, without widening it the way a coarser glob
     would. This is the listing `verify_dataset_spec` already makes.
+
+    **Not currently wired into** :func:`data_files_for`. Handing these bare paths
+    to ``load_dataset(repo_id, data_files=…)`` makes ``datasets`` resolve them on
+    the **local filesystem** — only patterns are treated as hub-relative — and the
+    job died with::
+
+        FileNotFoundError: Couldn't find any data file at
+        <cwd>/dh-unibe/image-text_koenigsfelden-charters-post-1500
+
+    Making this work needs fully-qualified ``hf://datasets/<repo>@<rev>/<path>``
+    URIs and the ``"parquet"`` loader rather than the repo id, which is a larger
+    change than the rate limit warrants right now (#89).
     """
     lister = list_repo_files_fn or _default_list_repo_files
     prefix = f"data/{split}/"
@@ -281,15 +293,15 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
         # Validate every name even when the globs collapse: a typo must still be
         # an error, not silently absorbed into a whole-split glob.
         train_globs = [project_glob(resolved.split, p) for p in resolved.train_projects]
-        resolved_files = resolve_to_files(
-            resolved.split, resolved.train_projects, resolved.hf_repo,
-            resolved.revision,
-        )
-        if resolved_files:
-            logger.info("{}: {} project glob(s) resolved to {} file(s) in one "
-                        "listing (#89)", resolved.hf_repo, len(train_globs),
-                        len(resolved_files))
-            train_globs = resolved_files
+        if not resolved.eval_projects:
+            collapsed = collapse_complete_selection(
+                resolved.split, resolved.train_projects, resolved.hf_repo,
+                resolved.revision,
+            )
+            if collapsed:
+                logger.info("{}: selection covers every project — one glob instead "
+                            "of {} (#89)", resolved.hf_repo, len(train_globs))
+                train_globs = collapsed
         files = {"train": train_globs}
 
     if resolved.eval_projects:

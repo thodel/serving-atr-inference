@@ -29,7 +29,12 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from atr_serving.training.contracts import VLM_PIXEL_BUDGET
-from atr_serving.training.pagexml import line_boxes, line_texts
+from atr_serving.training.pagexml import (
+    MAX_LINE_ASPECT,
+    is_plausible_line,
+    line_boxes,
+    line_texts,
+)
 
 __all__ = [
     "VlmDatasetError",
@@ -40,6 +45,7 @@ __all__ = [
     "Sample",
     "DEFAULT_LINE_PAD",
     "MIN_CROP_PX",
+    "MAX_LINE_ASPECT",
     "MIN_TEXT_LEN",
     "page_sample",
     "line_samples",
@@ -153,6 +159,11 @@ def line_samples(
     for box in line_boxes(xml_path.read_text(encoding="utf-8")):
         padded = box.padded(pad, width, height)
         if padded.width < MIN_CROP_PX or padded.height < MIN_CROP_PX:
+            continue
+        # And the ceiling, which nothing enforced: a box 60x wider than it is tall
+        # is a segmentation error far more often than a line, and it sets the
+        # memory ceiling for every batch it lands in (#90).
+        if not is_plausible_line(padded):
             continue
         if len(box.text) < MIN_TEXT_LEN:
             continue

@@ -266,6 +266,8 @@ class BasePipeline(ABC):
                 pages_skipped=train_set.pages_skipped,
                 lines=train_set.lines,
                 chars=train_set.chars,
+                wide_lines=train_set.wide_lines,
+                max_aspect=train_set.max_aspect,
             )
         ]
         # Held separately from lines_written, which goes on to include the eval
@@ -420,6 +422,8 @@ class BasePipeline(ABC):
                 pages_skipped=train_set.pages_skipped,
                 lines=train_set.lines,
                 chars=train_set.chars,
+                wide_lines=train_set.wide_lines,
+                max_aspect=train_set.max_aspect,
             )
 
             if "eval" in files:

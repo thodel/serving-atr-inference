@@ -212,12 +212,41 @@ def line_boxes(xml_text: str) -> list[TextLineBox]:
     return boxes
 
 
+#: Width-to-height ratio above which a "line" is almost certainly mis-segmented —
+#: two columns merged, a rule read as a baseline, a marginal note swept into its
+#: neighbour. The counterpart to ``vlm_dataset.MIN_CROP_PX``, which rejects boxes
+#: that are too *small*; nothing rejected the absurd ones (#90).
+#:
+#: 60 is drawn from the corpus rather than chosen: over 328,229 German lines the
+#: median ratio is 9.9 and p99 is 58.1, so this drops roughly the top percent. The
+#: maximum measured was 135 — 8,657 px wide at the 64 px height kraken normalises
+#: to, which is not a line of text.
+#:
+#: It matters beyond data quality. kraken pads every batch to its widest member,
+#: so peak VRAM is ``batch_size x 64 x max(aspect in batch)`` and **one outlier is
+#: paid for by every other line in its batch**. That is why halving the batch
+#: raised memory instead of lowering it (64 -> 32.3 GiB, 32 -> 36.8 GiB): a
+#: smaller batch merely regrouped the outliers.
+MAX_LINE_ASPECT = 60.0
+
+
+def is_plausible_line(box: "TextLineBox", max_aspect: float = MAX_LINE_ASPECT) -> bool:
+    """Does this box look like one line of text rather than a segmentation error?"""
+    if box.height <= 0 or box.width <= 0:
+        return False
+    return (box.width / box.height) <= max_aspect
+
+
 @dataclass
 class PageStats:
     lines: int = 0
     transcribed_lines: int = 0
     chars: int = 0
     charset: set[str] = field(default_factory=set)
+    #: Lines whose aspect ratio exceeds :data:`MAX_LINE_ASPECT`.
+    wide_lines: int = 0
+    #: The worst ratio on the page, so a corpus summary can report its tail.
+    max_aspect: float = 0.0
 
     @property
     def usable(self) -> bool:
@@ -231,6 +260,12 @@ def page_stats(xml_text: str) -> PageStats:
     base model's codec has never seen are exactly what ``union`` has to add.
     """
     stats = PageStats()
+    for box in line_boxes(xml_text):
+        if box.height > 0 and box.width > 0:
+            aspect = box.width / box.height
+            stats.max_aspect = max(stats.max_aspect, aspect)
+            if aspect > MAX_LINE_ASPECT:
+                stats.wide_lines += 1
     for text in line_texts(xml_text):
         stats.lines += 1
         stripped = text.strip()

@@ -197,6 +197,9 @@ class DatasetCounts(BaseModel):
     lines: int = 0
     chars: int = 0
     samples_written: int = 0
+    #: Lines whose aspect ratio marks them as probably mis-segmented (#90).
+    wide_lines: int = 0
+    max_aspect: float = 0.0
 
 
 class KrakenTrainParams(BaseModel):

@@ -198,13 +198,25 @@ class PreparedSet:
     chars: int = 0
     charset: set[str] = field(default_factory=set)
     bytes_written: int = 0
+    #: Lines whose width:height exceeds ``pagexml.MAX_LINE_ASPECT`` — almost always
+    #: a segmentation error, and the thing that sets peak VRAM for every batch it
+    #: lands in. Reported before the first epoch rather than diagnosed after the
+    #: third OOM (#90).
+    wide_lines: int = 0
+    max_aspect: float = 0.0
 
     @property
     def summary(self) -> str:
+        tail = ""
+        if self.lines:
+            share = 100.0 * self.wide_lines / self.lines
+            tail = (f", {self.wide_lines} over-wide lines ({share:.2f} %), "
+                    f"worst aspect {self.max_aspect:.0f}:1")
         return (
             f"{self.role}: {self.pages_written} pages, {self.lines} transcribed lines, "
             f"{self.chars} chars, {len(self.charset)} distinct characters, "
             f"{self.pages_skipped} pages skipped, {self.bytes_written / 1e6:.1f} MB"
+            f"{tail}"
         )
 
 
@@ -263,6 +275,8 @@ def materialize(
         out.lines += stats.transcribed_lines
         out.chars += stats.chars
         out.charset |= stats.charset
+        out.wide_lines += stats.wide_lines
+        out.max_aspect = max(out.max_aspect, stats.max_aspect)
         out.bytes_written += len(page.image)
 
     if not out.pages_written:
