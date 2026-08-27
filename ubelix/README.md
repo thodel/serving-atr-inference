@@ -51,20 +51,27 @@ tail -f ~/ubelix/logs/vlm-smoke-<jobid>.out
 Read-only, and it goes through the `ubelix` ssh alias (ProxyJump via asterAIx), so it
 needs no VPN.
 
-## Paying for GPUs
+## Paying for GPUs — short version: don't, for H100s
 
-The free `job_gpu_preemptable` QoS already grants **4× H100** — paying buys freedom
-from preemption, not more GPUs, and the 24 h walltime is the same either way. A PAYGO
-project must be created by an institute technology manager in the IAM portal with a
-credit number and a cost limit; see [`docs/UBELIX_PLAN.md`](../docs/UBELIX_PLAN.md)
-§4.3 for the request checklist and the GPU-hour figures to budget against. Once it
-exists, only the job header changes:
+Checked 2026-08-27 against the internal price page and `sacctmgr show qos`:
+
+* **H100 CHF 0.60/h, RTX 4090 CHF 0.10/h**, per-minute billing.
+* **Preemptable and debug jobs are free**, project or no project.
+* The free `job_gpu_preemptable` QoS grants **h100=4**. The paid `job_gpu` QoS
+  grants **h100=1**. Paying gets you *fewer* H100s, not more — more than 4
+  needs an investment, and GPU investments are closed until the 2026 DC expansion.
+
+So the free 4× H100 preemptable path is both cheaper and ~3× faster than anything
+purchasable. A project is still worth having for the **F2 free tier** (up to
+CHF 1000/year refunded per cost centre — the whole campaign is ~CHF 510) and so that
+a billed RTX 4090 fallback is a header edit rather than a procurement. Ordered by the
+institute's IT-responsible person at `iamportal.unibe.ch` → "HPC - Order new Project
+Space". See [`docs/UBELIX_PLAN.md`](../docs/UBELIX_PLAN.md) §4.3.
 
 ```bash
-#SBATCH --account=paygo
-#SBATCH --wckey=<PROJECT>
-#SBATCH --partition=gpu
-#SBATCH --qos=job_gpu
+#SBATCH --account=gratis              # the primary path: free, 4x H100, killable
+#SBATCH --partition=gpu-invest
+#SBATCH --qos=job_gpu_preemptable
 #SBATCH --gres=gpu:h100:4
 ```
 

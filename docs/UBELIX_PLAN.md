@@ -19,7 +19,7 @@ all in our favour except the last:
 | what | assumed | **actual** |
 |---|---|---|
 | getting the data there | ticket + possibly a 1 TB transfer | **already there** — `/storage/research/wbkolleg_dh_1` is mounted, and the full dataset is cached |
-| free-tier GPU ceiling | 1× H100 | **4× H100** preemptable (24 h), or 1× H100 / 2× RTX 4090 on the 96 h `job_gratis` |
+| free-tier GPU ceiling | 1× H100 | **4× H100** preemptable (24 h) — and **paying gets only 1**, see §4.3 |
 | share headroom | ≥5 TB workspace | **88 % full — 1.4 TB and 3.2 M inodes free** |
 
 ### Login
@@ -268,74 +268,86 @@ far came from changing the base model and the batch size, not from more data.
 
 ### 4.2 Money
 
-**As things stand, nothing costs anything**: there is no PAYGO project, and the
-`gratis` account never bills. The figures below apply only if we later buy
-non-preemptable time. UBELIX PAYGO prices are behind the internal calculator (UniBE
-VPN), so this plan still cannot state CHF. On GPU nodes **only the GPU is billed** —
-CPU and memory on a GPU node are free — so the budget is exactly `GPU-hours × rate`:
+**As things stand, nothing costs anything**: there is no PAYGO project, the `gratis`
+account never bills, and preemptable jobs are free even under a project. Prices are now
+known (§4.3): **H100 CHF 0.60/h, RTX 4090 CHF 0.10/h**, billed per minute. On GPU nodes
+only the GPU is billed — CPU and memory there are free — so the budget is exactly
+`GPU-hours × rate`:
 
-* subsample, 3 epochs: **~90 H100-GPU-hours**
-* full set, 3 epochs: **~750 H100-GPU-hours**
+* subsample, 3 epochs: ~90 H100-GPU-hours → **CHF 54**
+* full set, 3 epochs: ~750 H100-GPU-hours → **CHF 450**
 * data prep: **0 GPU-hours** (CPU partition, and CPU billing is `max(cpu, mem)`)
 
-## 4.3 Getting a PAYGO project (4× H100, non-preemptable)
+## 4.3 What paying would buy — checked, 2026-08-27
 
-**What paying actually buys.** The free `job_gpu_preemptable` QoS already grants
-**h100=4**. A PAYGO project at the same 4 GPUs therefore buys *no extra capacity* —
-it buys **freedom from preemption** and a shorter queue. That is a real thing to want
-for a 10-day run, but it is worth naming, because the intuition "we need to pay to get
-4 H100s" is not correct here.
+**Published prices** (intern.unibe.ch, UniBE VPN; per-minute billing):
 
-| | free (`job_gpu_preemptable`) | PAYGO (`job_gpu`) |
-|---|---|---|
-| GPUs | h100=4 | h100=4 (confirm with `sqos` once the project exists) |
-| walltime | 24 h | 24 h — **same** |
-| interrupted? | **yes, any time** | no |
-| cost | none | GPU-hours × rate |
-
-Both cap at 24 h, so **checkpoint-and-requeue is required either way**. Paying does
-not remove the need for a working restart path; it only removes the unplanned restarts.
-
-**What it costs.** Only the GPU is billed on GPU nodes — CPU and RAM there are free.
-So the budget is `GPU-hours × rate`, and our figures are:
-
-| run | H100-GPU-hours |
+| resource | CHF/hour |
 |---|---:|
-| phase 3 scaling test | ~10 |
-| phase 4, subsample 800 K lines, 3 epochs | ~90 |
-| phase 5, full 8 M lines, 3 epochs | ~750 |
-| **all three** | **~850** |
+| 1 CPU | 0.002 |
+| 1 GPU — RTX 4090 | **0.10** |
+| 1 GPU+ — H100 | **0.60** |
 
-The rate is only visible on the internal UBELIX calculator (UniBE VPN), so **check it
-before setting a cost limit** — 850 GPU-hours is the number to multiply.
+and, decisively: **"debug/preemptable jobs are free."**
 
-**How to request one.** This cannot be done from the command line, and it needs
-authority and a budget that a job script does not have:
+### The ceiling: 4 H100s, and only for free
 
-1. A **technology manager of the institute** creates the PAYGO project in the **IAM
-   portal** (`serviceportal.unibe.ch`). Only they can; they may appoint delegates.
-2. It requires a **credit number** (cost centre) and a **cost limit** at creation.
-3. Add `th19c587` as a project member.
-4. The project gets a **wckey**; verify with `swckeys` (today it returns `noop`) and
-   check the granted ceilings with `sqos`.
+Every QoS on the cluster, checked with `sacctmgr show qos`:
 
-Then the job header changes, and nothing else does:
+| QoS | H100/user | walltime | cost | ours? |
+|---|---:|---|---|---|
+| **`job_gpu_preemptable`** | **4** | 24 h | **free** | **yes** |
+| `job_gratis` | 1 | 96 h | free | yes |
+| `job_gpu` (**paygo**) | **1** | 24 h | 0.60/h | needs a project |
+| `job_interactive` | 1 | 12 h | 0.60/h | needs a project |
+| `job_debug` | 1 | 20 min | free | yes |
+| `job_gpu_<investor>` | **no cap** | up to **7 days** | CAPEX | **closed until the 2026 DC expansion** |
 
-```bash
-#SBATCH --account=paygo
-#SBATCH --wckey=<PROJECT>
-#SBATCH --partition=gpu
-#SBATCH --qos=job_gpu
-#SBATCH --gres=gpu:h100:4
-```
+**Paying does not get us 4 H100s — it gets us one.** The only non-investor QoS on
+UBELIX that grants more than a single H100 is the free preemptable one. 40 H100s exist
+across five nodes, but no QoS we can obtain releases more than four of them.
 
-`sbatch` prints `This job generates no costs!` on the gratis account — its absence is
-the confirmation that a job is billing.
+So the answer to "how many H100s can we reasonably put together" is **four**, and that
+is both the administrative ceiling and roughly the technical one: an 8B LoRA is
+single-card work, DDP across 4 cards on one node is the sweet spot, and multi-node
+NCCL for a model that fits in 24 GB buys complexity, not speed.
 
-**Recommendation: do phases 2–4 free first.** They cost ~100 GPU-hours we do not have
-to pay for, and they produce the two numbers that would otherwise make the cost limit a
-guess — the real line count and the real samples/s. Phase 5 is the only stage where
-preemption genuinely hurts, and by then we will know what it costs.
+### Which means paying is strictly worse here
+
+Three epochs over 8 M lines, using §4's throughput estimates:
+
+| configuration | samples/s | wall clock | CHF/h | **total** |
+|---|---:|---:|---:|---:|
+| **4× H100, preemptable** | ~41 | **6.8 days** | — | **free** |
+| 1× H100, paygo | ~12 | 23 days | 0.60 | 333 |
+| 4× RTX 4090, paygo | ~12 | 23 days | 0.40 | 224 |
+| 1× RTX 4090, paygo | ~3.5 | 79 days | 0.10 | 190 |
+
+The free option is **both cheaper and 3.4× faster** than the best paid one. Paying buys
+freedom from preemption, but at one quarter of the parallelism — so a paid run finishes
+*later* than a preempted free run would, even with no interruptions at all.
+
+**Recommendation: do not set up a paid plan to get H100s. It is not on offer.**
+
+### When a project is still worth creating
+
+Two reasons that have nothing to do with H100 count:
+
+1. **The F2 free tier refunds up to CHF 1000 per cost centre per year**, applied at
+   the end of the fiscal year by internal transfer. Our entire campaign — phases 3, 4
+   and 5, ~850 H100-GPU-hours — would be **CHF 510**, comfortably inside that. Paid
+   fallback capacity is therefore effectively free up to the ceiling.
+2. **Preemptable jobs stay free under a project.** Having a wckey costs nothing and
+   changes nothing about the primary plan; it just means that when preemption starts
+   thrashing a run, switching to a billed 4× RTX 4090 job is a header edit rather than
+   a two-week procurement.
+
+If you want it: the IT-responsible person of the institute orders it at
+`iamportal.unibe.ch` → **"HPC - Order new Project Space"**, giving organisational unit,
+project name (this becomes the wckey), **cost-centre number without the REF prefix**,
+administrators, members, and a **monthly** cost ceiling. The cost-centre owner must
+confirm before it activates. Prices are re-quoted twice a year and may move — GPU
+pricing is volatile, and the page says so.
 
 ## 5. Pipeline
 
