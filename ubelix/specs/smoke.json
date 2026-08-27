@@ -1,0 +1,13 @@
+{
+  "engine": "vllm",
+  "model_id": "qwen3vl-thun-smoke-ubelix",
+  "datasets": [
+    {
+      "hf_repo": "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",
+      "train_projects": ["GT_Thun-Training_(TEST-DEMO)"],
+      "eval_projects": ["GT_Thun-Test_(DEMO_TEST)"],
+      "max_pages": 40
+    }
+  ],
+  "params": { "epochs": 1, "eval_samples": 25 }
+}

@@ -1,0 +1,46 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+# Dependency image for the VLM QLoRA trainer. Mirrors asterAIx deliberately:
+# Ubuntu 24.04 + system python3.12 + torch 2.8.0+cu128, the combination
+# docs/asteraix-environment.md pins. The repo itself is NOT baked in — it is
+# bind-mounted at runtime so code edits do not need a rebuild.
+
+%files
+    # Relative to the build CWD, which must be the repo root — see ubelix/README.md.
+    engines/vlm_train_svc/requirements.txt /opt/requirements.txt
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3.12-dev \
+        git ca-certificates libgl1 libglib2.0-0 libgomp1
+    rm -rf /var/lib/apt/lists/*
+
+    python3.12 -m venv /opt/vlm-train
+    /opt/vlm-train/bin/pip install -U pip wheel
+
+    # torch first, from the cu128 index — same order as scripts/make_venvs.sh,
+    # so the requirements resolve against the pinned torch instead of pulling
+    # a CUDA 12.9 wheel.
+    /opt/vlm-train/bin/pip install --no-cache-dir \
+        torch==2.8.0 torchvision==0.23.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+    /opt/vlm-train/bin/pip install --no-cache-dir -r /opt/requirements.txt
+
+    /opt/vlm-train/bin/python -c "import torch, transformers, peft, bitsandbytes, datasets; \
+        print(\"torch\", torch.__version__, \"transformers\", transformers.__version__, \
+              \"peft\", peft.__version__, \"datasets\", datasets.__version__)"
+
+%environment
+    export PATH=/opt/vlm-train/bin:$PATH
+    export PYTHONNOUSERSITE=1
+
+%runscript
+    exec /opt/vlm-train/bin/python "$@"
+
+%labels
+    Purpose  Qwen3-VL QLoRA HTR training on UBELIX
+    Mirrors  asterAIx vlm-train venv
