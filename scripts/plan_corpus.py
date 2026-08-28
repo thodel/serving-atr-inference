@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nno plan: {exc}", file=sys.stderr)
         return 1
 
-    print(f"\n── corpus ─────────────────────────────────────────────────────")
+    print("\n── corpus ─────────────────────────────────────────────────────")
     for s in plan.selections:
         share = s.pages / plan.pages if plan.pages else 0
         extra = f"  (-{len(s.dropped_duplicates)} dup)" if s.dropped_duplicates else ""

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Iterable, Sequence
 
 __all__ = [
@@ -310,10 +310,10 @@ def score_candidate(candidate: Candidate, target: Target) -> Scored:
     say is penalised rather than excluded.
     """
     p = period_score(candidate, target)
-    l = language_score(candidate, target)
+    lang = language_score(candidate, target)
     s = script_score(candidate, target)
     weights = (target.w_period, target.w_language, target.w_script)
-    values = (p, l, s)
+    values = (p, lang, s)
     if min(values) <= 0.0:
         total = 0.0
     else:
@@ -324,13 +324,13 @@ def score_candidate(candidate: Candidate, target: Target) -> Scored:
         reasons.append(f"period {candidate.period} lies wholly outside {target.period}")
     elif p < 0.5:
         reasons.append(f"period {candidate.period} only {p:.0%} inside {target.period}")
-    if l <= 0.0:
+    if lang <= 0.0:
         reasons.append(f"no target language in {candidate.languages}")
-    elif l < 0.5:
+    elif lang < 0.5:
         reasons.append(f"languages {candidate.languages or '(none given)'}")
     if s < 0.5:
         reasons.append(f"{candidate.doc_type!r} is a book hand, not a documentary one")
-    return Scored(candidate, total, p, l, s, "; ".join(reasons))
+    return Scored(candidate, total, p, lang, s, "; ".join(reasons))
 
 
 # ── planning ────────────────────────────────────────────────────────────────

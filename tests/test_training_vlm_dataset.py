@@ -208,7 +208,6 @@ def test_score_with_no_characters_reports_no_rate():
 
 # ── apply_visual_budget (#86) ───────────────────────────────────────────────
 from atr_serving.training.vlm_dataset import (  # noqa: E402
-    AppliedBudget,
     VisualBudgetError,
     apply_visual_budget,
 )
