@@ -165,3 +165,31 @@ def test_a_cache_size_of_one_restores_the_old_behaviour(svc, monkeypatch):
     app._load("b")
     app._load("a")
     assert len(loads) == 3 and list(app._resident) == ["a"]
+
+
+# ── the log must not read as an over-full cache ──────────────────────────────
+
+def test_the_cache_log_never_reports_more_than_the_limit(svc):
+    """Live on srv the line read "(cache 4/3)" — `len(_resident) + 1` was printed
+    BEFORE the insert-and-evict, so a full cache always looked over-full. Nothing
+    was actually wrong (4 evictions, 3 resident, limit 3), but the log said
+    otherwise, and a number that cries wolf is worse than none.
+
+    Captured through a loguru sink, not pytest's caplog: this project logs through
+    loguru, which caplog does not see — a caplog assertion here would pass on an
+    empty string and prove nothing.
+    """
+    from loguru import logger
+    app, _loads = svc
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        for name in ("a", "b", "c", "d"):    # the fourth evicts
+            app._load(name)
+    finally:
+        logger.remove(sink)
+
+    text = "".join(lines)
+    assert "cache 4/3" not in text, text
+    assert "cache 3/3" in text, text          # the load that filled it
+    assert "cache now 3/3" in text, text      # after eviction, still at the limit

@@ -105,13 +105,14 @@ def _load(model_id: str):
         return net
     path = _model_file(model_id)
     logger.info("Loading recognition model {} from {} on {} (cache {}/{})",
-                model_id, path, DEVICE, len(_resident) + 1, MODEL_CACHE_SIZE)
+                model_id, path, DEVICE, len(_resident), MODEL_CACHE_SIZE)
     net = load_recognition_model(path, device=DEVICE)
     _resident[model_id] = net
     while len(_resident) > MODEL_CACHE_SIZE:
         evicted_id, evicted = _resident.popitem(last=False)   # least-recently used
-        logger.info("Evicting recognition model {} (cache full at {})",
-                    evicted_id, MODEL_CACHE_SIZE)
+        # popitem already removed it, so len(_resident) IS the new occupancy.
+        logger.info("Evicting recognition model {}, cache now {}/{}",
+                    evicted_id, len(_resident), MODEL_CACHE_SIZE)
         del evicted
         # The eviction is pointless if the VRAM is not actually returned, and a
         # slow OOM is worse than the reload this cache exists to avoid.
