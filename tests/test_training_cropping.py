@@ -5,7 +5,6 @@ the PageXML *declares*. `cropping` clamps again against the size the image file
 actually has, and when the two disagree that clamp can invert the box.
 """
 
-import pytest
 
 from atr_serving.training.cropping import write_crops
 from atr_serving.training.vlm_dataset import Sample
