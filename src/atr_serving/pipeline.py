@@ -9,6 +9,7 @@ segmentation step.
 from __future__ import annotations
 
 import io
+import asyncio
 import time
 from typing import Awaitable, Callable
 
@@ -65,21 +66,45 @@ async def recognize_page_vllm(image, content_type, spec, vllm_client, max_tokens
 
 
 async def recognize_lines(
-    image, filename, content_type, model_id, engine, segmenter, recognize_line: RecognizeLine
+    image, filename, content_type, model_id, engine, segmenter, recognize_line: RecognizeLine,
+    concurrency: int = 1,
 ) -> RecognitionResult:
     """Engine-agnostic line pipeline: segment -> crop each line -> recognize ->
     assemble. ``recognize_line`` runs one line image through whichever backend
-    (a line-level vLLM model, or the TrOCR engine)."""
+    (a line-level vLLM model, or the TrOCR engine).
+
+    Lines are recognised up to ``concurrency`` at a time. The loop used to await one
+    line before starting the next: a 79-line page cost 79 round trips at ~0.58s each,
+    about 46s, which measurement made the largest single item in an ensemble page
+    (agentic_historian#404).
+
+    **Order is reconstructed from the index, never from completion.** Concurrent
+    results arrive out of order, and a transcription whose lines are shuffled is
+    worse than a slow one — it would be wrong in a way that reads as plausible.
+    """
     t0 = time.perf_counter()
     seg = await segmenter.segment(image, filename, content_type, mode="baseline")
     pil = decode_image(image)
-    out_lines: list[Line] = []
-    texts: list[str] = []
+
+    # Crop first, synchronously: cropping is CPU-bound and shares one PIL image, so
+    # there is nothing to overlap, and doing it up front keeps the index stable.
+    crops: list[tuple[int, object, bytes]] = []
     for ln in seg.lines:
         crop = crop_line(pil, ln)
-        if crop is None:
-            continue
-        txt = await recognize_line(_png_bytes(crop), "image/png")
+        if crop is not None:
+            crops.append((len(crops), ln, _png_bytes(crop)))
+
+    sem = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def _one(idx: int, ln, png: bytes) -> tuple[int, object, str]:
+        async with sem:
+            return idx, ln, await recognize_line(png, "image/png")
+
+    done = await asyncio.gather(*(_one(i, ln, png) for i, ln, png in crops))
+
+    out_lines: list[Line] = []
+    texts: list[str] = []
+    for _idx, ln, txt in sorted(done, key=lambda r: r[0]):
         out_lines.append(Line(order=ln.order, bbox=ln.bbox, baseline=ln.baseline, text=txt))
         texts.append(txt)
     return RecognitionResult(

@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     # 17 GB of weights on GPU 1. Cap it — OCR/HTR needs nothing close.
     vllm_max_model_len: int | None = 16384
     vllm_startup_timeout_s: int = 300  # 8B load + CUDA graph capture can exceed 180s
+    #: How many line crops are recognised at once in the line pipeline. The loop was
+    #: strictly sequential: a 79-line page cost 79 round trips at ~0.58s, ~46s, which
+    #: measurement made the largest single item in an ensemble page
+    #: (agentic_historian#404). Bounded rather than unbounded — one GPU serves these,
+    #: and flooding it trades latency for queueing plus a memory risk.
+    line_concurrency: int = 6
     vllm_max_new_tokens: int = 512
     # The Qwen3-VL / LightOnOCR models are LoRA adapters whose adaptation includes
     # the vision tower, which vLLM can't serve as a runtime LoRA. scripts/merge_loras.py
