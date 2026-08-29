@@ -90,7 +90,8 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
         return res.text
 
     return await recognize_lines(
-        raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line
+        raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line,
+        concurrency=_settings(request).line_concurrency,
     )
 
 
@@ -276,7 +277,8 @@ async def recognize(
                 )
 
             return await recognize_lines(
-                raw, filename, ctype, model, "vllm", _kraken_client(request), _vllm_line
+                raw, filename, ctype, model, "vllm", _kraken_client(request), _vllm_line,
+                concurrency=_settings(request).line_concurrency,
             )
     except EngineError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
