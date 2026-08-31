@@ -68,14 +68,26 @@ Scene-text CRNNs use 32; historical HTR implementations cluster at 60–128. Our
 controlled comparison is 64 (run 2, 0.7809) vs 120 (run 3, 0.8226). Strong prior, and
 cheap to vary.
 
-**Horizontal downsampling / frames per character** — total width stride 2 / 4 / 8.
-CTC cannot emit more labels than it has timesteps, and over-downsampling makes narrow
-or compact characters unrepresentable; the literature warns explicitly against
-reducing sequence length too far. Our eval audit measured **13.5 px per character
-(p50 12.15)** and **60.9 characters per line**. At width stride 8 that is ~1.7 frames
-per character — tight. **Add a diagnostic that reports frames-per-character for every
-config before training starts**; anything under ~2 should be flagged, not silently
-trained.
+**Horizontal downsampling / frames per character** — total width stride 2 / 4 / 8,
+and input height, which cannot be separated from it.
+CTC cannot emit more labels than it has timesteps, and the literature warns
+explicitly against reducing sequence length too far. The quantity that decides this
+is scale-free — `width / (height × characters)` — because kraken normalises every
+crop to the spec's input height and scales the width with it. Measured on
+`val_clean.arrow` (6,319 lines): crops are a median 91 px tall at 33.1 px per
+character, **aspect_per_char 0.326, p10 0.246**. That puts the two trained
+architectures at:
+
+| spec | height | stride | frames/char (p10) |
+|---|---|---|---|
+| run 2 (kraken+) | 64 | 8 | **1.97** |
+| run 3 (default) | 120 | 8 | **3.69** |
+
+So run 3 sees nearly **twice the horizontal resolution** of run 2 from the same
+pages — a measured mechanism for part of the 0.7809 → 0.8226 gap, and an argument
+that height and stride should be searched as one axis rather than two. Implemented
+as S10 (`training/vgsl_geometry.py`), which runs after `prepare` and refuses a spec
+that leaves under 1.25 frames per character.
 
 **Augmentation on/off** — `--augment`.
 Random rotation and elastic distortion both beat the baseline on historical material

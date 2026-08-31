@@ -630,6 +630,11 @@ class TrainJob(BaseModel):
     #: anyway (#72) — so a CER from a run that was known not to converge is never
     #: mistaken for an ordinary one.
     convergence_override: str | None = None
+    #: Set when the line-geometry guard refused the spec and ``force`` ran it
+    #: anyway (#91, S10). Kept separate from ``convergence_override``: they refuse
+    #: for unrelated reasons — too few optimizer steps versus too few CTC
+    #: timesteps — and a record that conflated them could not say which.
+    geometry_override: str | None = None
     #: Local scratch holding this run's checkpoints (outside the job directory —
     #: see TrainerSettings.checkpoint_root). Recorded so it is discoverable and
     #: can be cleaned up with the job.

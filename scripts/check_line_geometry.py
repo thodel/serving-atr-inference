@@ -3,11 +3,11 @@
 
     scripts/check_line_geometry.py --spec '[1,120,0,1 Cr3,13,32 Mp2,2 ... ]'
     scripts/check_line_geometry.py --known                 # the specs we have trained
-    scripts/check_line_geometry.py --spec ... --px-per-char 12.15
+    scripts/check_line_geometry.py --spec ... --aspect-per-char 0.246
 
-``--px-per-char`` is measured from the PageXML by ``scripts/audit_eval_material.py``
-and defaults to the median of the medieval corpus. Use a low percentile rather than
-the mean: it is the tight lines that fail, and the mean is pulled up by sparse hands.
+``--aspect-per-char`` is width/(height*characters) of the material — scale-free, so
+one measurement serves every candidate input height. It defaults to the p10 measured
+on the medieval corpus, because it is the dense hands that run out of frames.
 
 Exit status is 1 when a spec is refused, so this can gate a sweep.
 """
@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from atr_serving.training.contracts import KRAKEN_PLUS_SPEC  # noqa: E402
 from atr_serving.training.vgsl_geometry import (  # noqa: E402
-    MEDIEVAL_PX_PER_CHAR,
+    MEDIEVAL_ASPECT_PER_CHAR_P10,
     LineGeometryError,
     check_line_geometry,
 )
@@ -43,7 +43,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--spec", action="append", default=[], help="VGSL spec (repeatable)")
     ap.add_argument("--known", action="store_true", help="check the specs we have trained")
-    ap.add_argument("--px-per-char", type=float, default=MEDIEVAL_PX_PER_CHAR)
+    ap.add_argument("--aspect-per-char", type=float, default=MEDIEVAL_ASPECT_PER_CHAR_P10,
+                help="width/(height*chars) of the material; default is the "
+                     "p10 measured on the medieval corpus")
     args = ap.parse_args(argv)
 
     specs = [(f"spec {i + 1}", s) for i, s in enumerate(args.spec)]
@@ -53,16 +55,16 @@ def main(argv: list[str] | None = None) -> int:
     refused = 0
     for name, spec in specs:
         try:
-            verdict = check_line_geometry(spec, args.px_per_char)
+            verdict = check_line_geometry(spec, args.aspect_per_char)
         except LineGeometryError as exc:
             print(f"  error  {name}: {exc}")
             refused += 1
             continue
         mark = {"ok": "  ok   ", "warn": "  warn ", "refuse": "  REFUSE"}[verdict.severity]
         print(f"{mark} {name}")
-        print(f"         width stride {verdict.width_stride}, "
-              f"{verdict.frames_per_char:.2f} frames/char "
-              f"at {verdict.px_per_char:.2f} px/char")
+        print(f"         input height {verdict.input_height}, width stride "
+              f"{verdict.width_stride} → {verdict.frames_per_char:.2f} frames/char "
+              f"at aspect_per_char {verdict.aspect_per_char:.3f}")
         print(f"         {verdict.reason}")
         refused += verdict.severity == "refuse"
     return 1 if refused else 0

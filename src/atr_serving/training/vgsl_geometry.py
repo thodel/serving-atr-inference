@@ -1,55 +1,65 @@
 """What a VGSL spec does to the width of a line — and whether CTC can still align (#91, S10).
 
-CTC cannot emit more labels than it has timesteps. A recognition network reduces
-a line image's width by the product of the horizontal strides in its convolution
-and pooling layers, so the usable output length is::
+CTC cannot emit more labels than it has timesteps. Two things decide how many
+timesteps a line gets, and **both** are needed:
 
-    frames = line_width_px / width_stride
+* the spec's **input height**, because kraken normalises every line crop to it and
+  scales the width with it — the same page yields twice the horizontal resolution
+  at 120 px that it does at 64;
+* the spec's **horizontal stride**, the product of the x-strides of its
+  convolutions and pooling layers.
 
-and the quantity that decides whether a configuration can represent its own
-ground truth is **frames per character**:
+So the material statistic that matters is scale-free — width per character
+divided by line height:
 
-    frames_per_char = px_per_char / width_stride
+    aspect_per_char = crop_width / (crop_height * characters)
+    frames_per_char = input_height * aspect_per_char / width_stride
 
-``px_per_char`` is a property of the *material*, measured by
-``scripts/audit_eval_material.py`` straight from the PageXML — for the medieval
-corpus, mean 13.5 px and median 12.15 px per character over 60.9 characters per
-line. ``width_stride`` is a property of the *spec*, and this module computes it.
+Measured on the compiled ``val_clean.arrow`` (6,319 lines of the medieval
+corpus): crops are a median 91 px tall at 33.1 px per character, giving
+**aspect_per_char 0.326 (p10 0.246)**. That puts the two architectures trained so
+far at:
 
-**The floors are set from what has been observed to work here, not from taste.**
-Both architectures trained so far reduce width by 8, which at 13.5 px/char gives
-**1.69 frames per character** — and the better of them reaches CER 0.1335. An
-earlier draft of #91 proposed refusing anything under 2.0 frames per character;
-that would have refused the best model this project has produced. The refusal
-floor is therefore set below what demonstrably works, and the band between the
-two is a warning rather than a veto.
+    run 2, height  64, stride 8 → 2.61 frames/char (p10 1.97)
+    run 3, height 120, stride 8 → 4.89 frames/char (p10 3.69)
+
+An earlier version of this module used a fixed px-per-character constant and
+ignored input height entirely. That was wrong twice over: the constant came from
+a different corpus at a different resolution, and a scale-free spec cannot be
+judged by an absolute pixel count.
+
+**Judge the tight lines, not the typical one.** Pass the low percentile of
+``aspect_per_char``; dense hands and long lines are what run out of frames, and
+the median hides them.
 
 What the floors mean:
 
-* under :data:`FLOOR_REFUSE` there are fewer frames than characters plus the
-  blanks CTC needs between repeated symbols — the alignment does not exist, and
-  no amount of training finds it;
-* under :data:`FLOOR_WARN` the alignment exists but is tight: compact hands, long
-  lines and doubled letters have no slack, and the literature on scene text warns
-  specifically against reducing sequence length this far.
+* under :data:`FLOOR_REFUSE` there are barely more frames than characters, leaving
+  no room for the blanks CTC needs between repeated symbols — the alignment does
+  not exist and no amount of training finds it;
+* under :data:`FLOOR_WARN` the alignment exists but has little slack.
 
-Pure and dependency-light on purpose: it parses a string and does arithmetic, so
-the sweep planner can check hundreds of candidate specs without a GPU, a dataset
-or an import of kraken.
+Pure and dependency-light: it parses a string and does arithmetic, so a sweep
+planner can check hundreds of candidate specs without a GPU or a dataset.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from statistics import median, quantiles
+from typing import Iterable
 
 __all__ = [
     "LineGeometryError",
     "GeometryVerdict",
     "FLOOR_REFUSE",
     "FLOOR_WARN",
-    "MEDIEVAL_PX_PER_CHAR",
+    "MEDIEVAL_ASPECT_PER_CHAR",
+    "MEDIEVAL_ASPECT_PER_CHAR_P10",
     "width_stride",
+    "input_height",
+    "aspect_per_char",
     "frames_per_char",
     "check_line_geometry",
 ]
@@ -62,16 +72,19 @@ FLOOR_REFUSE = 1.25
 #: no slack. Both current models sit here.
 FLOOR_WARN = 2.0
 
-#: Median px per character measured on the medieval corpus by
-#: ``scripts/audit_eval_material.py`` (mean 13.5, p50 12.15). The median is the
-#: default because the mean is pulled up by sparse, widely-spaced hands, and it
-#: is the *tight* lines that fail.
-MEDIEVAL_PX_PER_CHAR = 12.15
+#: Median ``aspect_per_char`` over 6,319 lines of ``val_clean.arrow``.
+MEDIEVAL_ASPECT_PER_CHAR = 0.326
+#: The 10th percentile — the dense hands and long lines that actually run out of
+#: frames. This is the value to judge a configuration by.
+MEDIEVAL_ASPECT_PER_CHAR_P10 = 0.246
 
 #: Optional ``{name}`` prefix that every VGSL layer may carry.
 _NAME = r"(?:\{[^}]*\})?"
 #: ``C(s|t|r|l|m|lr)<y>,<x>,<d>[,<y_stride>,<x_stride>]`` — strides default to 1.
 _CONV = re.compile(rf"^C{_NAME}[a-z]{{1,2}}(\d+),(\d+),(\d+)(?:,(\d+),(\d+))?$")
+#: The input block, ``[<batch>,<height>,<width>,<depth>``. Height is what kraken
+#: normalises every line crop to; width 0 means "variable".
+_INPUT = re.compile(r"^(\d+),(\d+),(\d+),(\d+)$")
 #: ``Mp<y>,<x>[,<y_stride>,<x_stride>]`` — when the strides are omitted the
 #: window itself is the stride, which is the usual pooling convention and the
 #: reason ``Mp2,2`` halves the width while ``Mp1,2,1,2`` also halves it.
@@ -88,7 +101,8 @@ class GeometryVerdict:
 
     spec: str
     width_stride: int
-    px_per_char: float
+    input_height: int
+    aspect_per_char: float
     frames_per_char: float
     #: ``ok`` | ``warn`` | ``refuse``
     severity: str
@@ -99,8 +113,9 @@ class GeometryVerdict:
         return self.severity != "refuse"
 
     def __str__(self) -> str:
-        return (f"{self.severity}: width stride {self.width_stride}, "
-                f"{self.frames_per_char:.2f} frames/char — {self.reason}")
+        return (f"{self.severity}: height {self.input_height} / stride "
+                f"{self.width_stride} → {self.frames_per_char:.2f} frames/char — "
+                f"{self.reason}")
 
 
 def _layers(spec: str) -> list[str]:
@@ -141,16 +156,66 @@ def width_stride(spec: str) -> int:
     return stride
 
 
-def frames_per_char(spec: str, px_per_char: float = MEDIEVAL_PX_PER_CHAR) -> float:
+def input_height(spec: str) -> int:
+    """The height every line crop is normalised to, from the spec's input block."""
+    tokens = _layers(spec)
+    if not tokens:
+        raise LineGeometryError(f"empty VGSL spec: {spec!r}")
+    match = _INPUT.match(tokens[0])
+    if match is None:
+        raise LineGeometryError(
+            f"first token of a VGSL spec must be <batch>,<height>,<width>,<depth>, "
+            f"got {tokens[0]!r}"
+        )
+    height = int(match.group(2))
+    if height <= 0:
+        raise LineGeometryError(
+            f"input height must be fixed, got {height} in {tokens[0]!r} — a variable "
+            "height gives CTC no defined horizontal resolution"
+        )
+    return height
+
+
+def aspect_per_char(
+    samples: Iterable[tuple[float, float, int]], percentile: int = 10
+) -> float:
+    """``width / (height * characters)`` over ``(width, height, chars)`` lines.
+
+    Scale-free by construction, which is the point: it survives the height
+    normalisation kraken applies, so one measurement of a corpus serves every
+    candidate input height.
+
+    ``percentile`` defaults to 10 rather than 50 because the decision is about the
+    lines that *fail*: dense hands and long lines have the least width per
+    character, and a median hides them behind the comfortable majority.
+
+    Lines shorter than five characters are dropped — a two-character line's ratio
+    is dominated by its margins, not by the hand.
+    """
+    ratios = [
+        width / (height * chars)
+        for width, height, chars in samples
+        if chars >= 5 and height > 0 and width > 0
+    ]
+    if not ratios:
+        raise LineGeometryError("no usable lines to measure aspect_per_char from")
+    if percentile == 50 or len(ratios) < 10:
+        return median(ratios)
+    return quantiles(ratios, n=100)[max(1, min(99, percentile)) - 1]
+
+
+def frames_per_char(spec: str, material_aspect_per_char: float = MEDIEVAL_ASPECT_PER_CHAR_P10) -> float:
     """CTC timesteps available per ground-truth character for this spec/material."""
-    if px_per_char <= 0:
-        raise LineGeometryError(f"px_per_char must be positive, got {px_per_char}")
-    return px_per_char / width_stride(spec)
+    if material_aspect_per_char <= 0:
+        raise LineGeometryError(
+            f"aspect_per_char must be positive, got {material_aspect_per_char}"
+        )
+    return input_height(spec) * material_aspect_per_char / width_stride(spec)
 
 
 def check_line_geometry(
     spec: str,
-    px_per_char: float = MEDIEVAL_PX_PER_CHAR,
+    material_aspect_per_char: float = MEDIEVAL_ASPECT_PER_CHAR_P10,
     *,
     refuse_below: float = FLOOR_REFUSE,
     warn_below: float = FLOOR_WARN,
@@ -163,24 +228,26 @@ def check_line_geometry(
     that is a mistake rather than a result.
     """
     stride = width_stride(spec)
-    frames = px_per_char / stride
+    height = input_height(spec)
+    frames = height * material_aspect_per_char / stride
     if frames < refuse_below:
         reason = (
-            f"{px_per_char:.2f} px per character reduced by {stride} leaves fewer "
-            f"frames than characters plus separating blanks; CTC has no alignment to "
-            f"find. Lower the horizontal stride (fewer pooling stages, or Mp with an "
-            f"x-stride of 1) or raise the input height so characters are wider."
+            f"input height {height} over stride {stride} leaves {frames:.2f} frames per "
+            f"character — barely more than the characters themselves, with nothing left "
+            f"for the blanks CTC needs between repeats. Raise the input height, or lower "
+            f"the horizontal stride (fewer pooling stages, or Mp with an x-stride of 1)."
         )
         severity = "refuse"
     elif frames < warn_below:
         reason = (
-            "trainable but tight — this is where both models trained so far sit "
-            "(stride 8, 1.69 frames/char, best CER 0.1335). Compact hands and "
-            "doubled letters have no slack at this ratio."
+            f"trainable but tight at {frames:.2f} frames per character. For reference the "
+            f"two architectures trained here sit at 1.97 (height 64) and 3.69 "
+            f"(height 120) on the same p10 material, and the taller one is better."
         )
         severity = "warn"
     else:
-        reason = "comfortable margin for CTC alignment"
+        reason = f"{frames:.2f} frames per character — comfortable margin for CTC alignment"
         severity = "ok"
-    return GeometryVerdict(spec=spec, width_stride=stride, px_per_char=px_per_char,
+    return GeometryVerdict(spec=spec, width_stride=stride, input_height=height,
+                           aspect_per_char=material_aspect_per_char,
                            frames_per_char=frames, severity=severity, reason=reason)

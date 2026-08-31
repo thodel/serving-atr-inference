@@ -54,8 +54,14 @@ from atr_serving.training.prepare import (
     materialize_lines,
     split_line_samples,
 )
+from atr_serving.training.pagexml import line_boxes
 from atr_serving.training.promote import PromotionResult
 from atr_serving.training.settings import TrainerSettings
+from atr_serving.training.vgsl_geometry import (
+    LineGeometryError,
+    aspect_per_char,
+    check_line_geometry,
+)
 
 __all__ = [
     "Cancelled",
@@ -389,6 +395,82 @@ class BasePipeline(ABC):
             return
 
         raise StageFailed(verdict.reason)
+    #: How many prepared pages to sample when measuring line geometry. The
+    #: statistic is a percentile over thousands of lines, so a couple of hundred
+    #: pages is ample and keeps the guard well under a second.
+    GEOMETRY_SAMPLE_PAGES = 200
+
+    def _line_samples(self, job: TrainJob) -> list[tuple[float, float, int]]:
+        """``(width, height, characters)`` for lines of the prepared pages.
+
+        Reads the PageXML ``prepare`` just wrote rather than the corpus on the
+        hub: what matters is the geometry of the lines *this run* will train on,
+        after any dropping #90 did.
+        """
+        pages_dir = self.store.paths(job.id).data / "pages"
+        if not pages_dir.is_dir():
+            return []
+        samples: list[tuple[float, float, int]] = []
+        for xml in sorted(pages_dir.glob("*.xml"))[: self.GEOMETRY_SAMPLE_PAGES]:
+            try:
+                boxes = line_boxes(xml.read_text(encoding="utf-8", errors="replace"))
+            except Exception:  # a single unreadable page must not fail the guard
+                continue
+            for box in boxes:
+                chars = len(box.text.strip())
+                if chars and box.width > 0 and box.height > 0:
+                    samples.append((float(box.width), float(box.height), chars))
+        return samples
+
+    def _guard_line_geometry(self, job: TrainJob) -> None:
+        """Refuse a spec that leaves CTC too few timesteps for this material (#91, S10).
+
+        Runs after ``prepare`` for the same reason the convergence guard does:
+        that is the first moment the actual lines exist, and it is before
+        ``compile`` spends hours producing a dataset for a doomed configuration.
+
+        Three cases return without judging, all of them because the spec does not
+        govern the geometry:
+
+        * **not kraken** — the VLM backend has no VGSL spec;
+        * **fine-tuning** — kraken ignores ``--spec`` when ``--load`` is given, so
+          the loaded network's own architecture decides, and this spec is dead
+          text;
+        * **no PageXML** — line-level datasets (#45) arrive as crops with no
+          geometry to measure. A guard that cannot measure must not refuse.
+        """
+        if job.request.engine != "kraken" or job.request.base_model:
+            return
+        spec = getattr(job.request.params, "spec", None)
+        if not spec:
+            return
+        samples = self._line_samples(job)
+        if not samples:
+            logger.info("line geometry: no PageXML to measure, guard skipped")
+            return
+
+        try:
+            measured = aspect_per_char(samples)
+            verdict = check_line_geometry(spec, measured)
+        except LineGeometryError as exc:
+            # An unparseable spec is ketos' business to reject, with its own error.
+            logger.warning("line geometry: not checked ({})", exc)
+            return
+
+        if verdict.severity == "ok":
+            logger.info("line geometry: {}", verdict)
+            return
+        if verdict.severity == "warn":
+            logger.warning("line geometry: {}", verdict)
+            return
+
+        if job.request.force:
+            job.geometry_override = verdict.reason
+            self.store.save(job)
+            logger.warning("line geometry guard OVERRIDDEN by force=true: {}", verdict.reason)
+            return
+        raise StageFailed(verdict.reason)
+
     def _prepare_multi(
         self, job: TrainJob, specs: list, paths
     ) -> tuple[Path, Path]:
@@ -562,6 +644,7 @@ class BasePipeline(ABC):
                 pages_train, pages_val = self._prepare(job)
 
             self._guard_convergence(job)
+            self._guard_line_geometry(job)
 
             self.store.advance(job, "compiling")
             with self._stage(job, "compile") as rec:
