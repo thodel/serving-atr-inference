@@ -875,3 +875,72 @@ not be put in the same table as §9e without saying so.
 Running it needs `ATR_TRAIN_CHUNK_PAGES` set: 23,428 pages is ~294 GB of parquet,
 far past the disk guard, and §8b of `TRAINING.md` explains why streaming alone is
 not enough.
+### 9c. The learning rate was never what we asked for (2026-08-31, #96)
+
+Read out of the checkpoints rather than inferred:
+
+| run | batch | epoch | `lr` in the optimizer | `--lrate` requested |
+|---|---|---:|---:|---:|
+| run 2 | 256 | 85 | **4.324e-05** | 1e-3 |
+| kraken+ | 256 | 41 | **4.079e-05** | 1e-3 |
+
+`OneCycleLR` is built with `steps_per_epoch=len_train_set`, and that is the **sample**
+count, not the batch count — so `total_steps` comes out `batch_size` times too large
+(24,951,540 against the 97,470 optimizer steps a 30-epoch run at batch 256 actually
+takes). The cycle's warmup alone would need 2,304 epochs.
+
+Every kraken run in this project has therefore trained at a **near-constant
+`lrate/25`**, the value `OneCycleLR` starts from. The annealing phase that gives
+1cycle its name has never been reached.
+
+Consequences for what is written above:
+
+* §9a's account of run 1 is right about the step count and incomplete about the rate:
+  `--lrate 1e-4` meant an actual **4e-6**, held flat. Both explanations point the same
+  way, which is why the fix worked.
+* The comparison "1e-3 learns, 1e-4 collapses" was in truth **4e-5 against 4e-6**.
+* run 2's long tail after epoch 30 was *not* annealed-to-zero creeping. The rate was
+  rising the whole time — from 4.000e-05 to 4.324e-05 across 50 epochs.
+
+It does **not** confound the architecture comparison: run 2 and run 3 both sat at
+~4e-5 despite different batch sizes, because the warmup is far too long for the batch
+size to matter over the epochs they ran.
+
+### 10a. shard_00 experiment series (2026-08-10 … 31)
+
+All on `shard_00.arrow` (24,744 pages / 831,718 lines, compiled before #89/#90) with
+the document-grouped `val_clean.arrow`; held-out test on `test.arrow` (6,186 pages,
+35 unseen documents).
+
+| run | architecture | val acc | test CER | note |
+|---|---|---|---|---|
+| run 1 | kraken+ wortgetreu, `--lrate 1e-4` | 0.0000 | — | Blank-Collapse, 11 Epochen; effektiv 4e-6 |
+| run 2 | kraken+ ohne `Cr255,1,85` | 0.7809 (Ep. 80) | **0.181** | 84 Epochen, `--lag 15` |
+| run 3 | kraken-Default, 120 px | **0.8226** (Ep. 60) | **0.1335** | 4.5× weniger FLOPs, 4× langsamere Epoche |
+| kraken+ | wie run 2, plus `Cr1,1,85` | läuft (0.7418 @ Ep. 41) | — | `--lag 8` — **kürzeres Budget als run 2** |
+
+Zwei Vorbehalte, die beim Lesen dieser Tabelle gelten:
+
+* **kraken+ und run 2 haben ungleiche Abbruchregeln** (`--lag 8` gegen `--lag 15`).
+  run 2 hat seinen Endwert erst in den ~50 Epochen nach dem nominellen Zeitplanende
+  erreicht; kraken+ stoppt deutlich früher. Ein niedrigerer Endwert wäre damit kein
+  Beleg gegen die 85-Kanal-Schicht.
+* **`shard_00.arrow` ist vor #89/#90 kompiliert** und enthält noch Zeilen, die diese
+  Fixes heute verwerfen. Die Reihenfolge der Läufe untereinander ist davon unberührt,
+  die absoluten Werte nicht.
+
+### 10b. Betriebsnotizen
+
+* **`kraken-medieval-german-v2`** (Feintuning auf `kraken-early_modern_german`, 12.286
+  Seiten / 325.454 Zeilen aus vier Datensätzen) wurde in Epoche 44 bei val 0.7741 von
+  Hand gestoppt und als privates Repo `dh-unibe/kraken-medieval-german-v2` publiziert.
+  Die `test`-Stufe lief nie, deshalb trägt die Model-Card **keinen CER** — nur die
+  Validierungszahl, mit dem Vermerk, dass `prepare` seitenweise splittet und Dokumente
+  nicht trennt. Ein Transfer-Test gegen `test.arrow` läuft nach.
+* **Ein Abbruch schreibt keine `best_*.mlmodel`.** kraken konvertiert den besten
+  Checkpoint erst am regulären Ende; nach `cancel` oder `SIGTERM` bleibt nur
+  `checkpoint_*.ckpt` plus `checkpoint_abort.ckpt`. `ketos convert -o … --weights-format
+  coreml <ckpt>` holt das nach.
+* **Der CIFS-Share war am 31.08. über Stunden weg** (`Errno 112: Host is down`). Das
+  laufende Training blieb unberührt, weil Arrows, Checkpoints und TMPDIR auf lokaler
+  Platte liegen — die Regel aus `docs/DEPLOY.md`, in der Praxis bestätigt.
