@@ -917,14 +917,15 @@ the document-grouped `val_clean.arrow`; held-out test on `test.arrow` (6,186 pag
 | run 1 | kraken+ wortgetreu, `--lrate 1e-4` | 0.0000 | — | Blank-Collapse, 11 Epochen; effektiv 4e-6 |
 | run 2 | kraken+ ohne `Cr255,1,85` | 0.7809 (Ep. 80) | **0.181** | 84 Epochen, `--lag 15` |
 | run 3 | kraken-Default, 120 px | **0.8226** (Ep. 60) | **0.1335** | 4.5× weniger FLOPs, 4× langsamere Epoche |
-| kraken+ | wie run 2, plus `Cr1,1,85` | läuft (0.7418 @ Ep. 41) | — | `--lag 8` — **kürzeres Budget als run 2** |
+| kraken+ | wie run 2, plus `Cr1,1,85` | 0.7927 (Ep. 130) | **0.1655** | 134 Epochen / 44,7 h |
 
 Zwei Vorbehalte, die beim Lesen dieser Tabelle gelten:
 
-* **kraken+ und run 2 haben ungleiche Abbruchregeln** (`--lag 8` gegen `--lag 15`).
-  run 2 hat seinen Endwert erst in den ~50 Epochen nach dem nominellen Zeitplanende
-  erreicht; kraken+ stoppt deutlich früher. Ein niedrigerer Endwert wäre damit kein
-  Beleg gegen die 85-Kanal-Schicht.
+* **Die ungleichen Abbruchregeln (`--lag 8` gegen `--lag 15`) haben sich erledigt.**
+  kraken+ verbesserte sich fast durchgehend, setzte den Zähler damit ständig zurück
+  und lief 134 Epochen — 50 mehr als run 2. Beide erreichten ihr eigenes Plateau, der
+  Vergleich ist also gültig. Ergebnis: die 85-Kanal-Schicht schadet nicht, sie hilft
+  leicht (siehe `docs/KRAKEN_PLUS.md`).
 * **`shard_00.arrow` ist vor #89/#90 kompiliert** und enthält noch Zeilen, die diese
   Fixes heute verwerfen. Die Reihenfolge der Läufe untereinander ist davon unberührt,
   die absoluten Werte nicht.

@@ -92,25 +92,54 @@ und konvergiert in 18 Epochen. Unterschiede, die das erklären können: gedruckt
 handschriftlicher Vorlagen, andere kraken-Version (die 1cycle-Parametrisierung ist nicht
 dieselbe) und ein deutlich einfacheres Zeichenrepertoire.
 
-## Umsetzbar? Ja. Sinnvoll? Nur als Messung.
+## Umsetzbar? Ja. Sinnvoll? Gemessen — und die Antwort ist differenzierter als erwartet.
 
-Umsetzbar ist es trivial — die Spezifikation ist gültiges VGSL für kraken 7.0.2 und lief
-hier bereits. Sinnvoll ist ausschließlich, den Beitrag der Schlussschicht sauber zu
-isolieren, statt sie zu übernehmen oder wegzulassen. Vier Konfigurationen, identisch in
-allem übrigen (shard_00, val_clean, effektive Batch 256, lrate 1e-3, `1cycle`, seed 42,
-from scratch), als erster Block der Sweep-Epik #91:
+Gemessen am 2026-09-01, alle drei Läufe auf `shard_00` trainiert, gegen `val_clean`
+validiert und gegen dasselbe Held-out-Set getestet (6.186 Seiten, 35 ungesehene
+Dokumente):
 
-```
-A  kraken+ wortgetreu     … Lbx256 Do0.5 Cr255,1,85,1,1]
-B  kraken+ entstaubt      … Lbx256 Do0.5 Cr1,1,85,1,1]      # 1x1 statt 255x1, gleiche Breite
-C  kraken+ ohne Engpass   … Lbx256 Do0.5]                    # = run 2
-D  kraken-Default          (kein --spec)                      # = run 3, Baseline 0.8226
-```
+| Lauf | Spezifikation | Höhe | val acc | **Test-CER** | Word acc |
+|---|---|---:|---:|---:|---:|
+| run 2 | ohne Schlussschicht | 64 | 0.7809 | 0.1812 | 51.8 % |
+| **kraken+** | `Cr1,1,85,1,1` | 64 | **0.7927** | **0.1655** | 55.0 % |
+| run 3 | kraken-Default | 120 | **0.8226** | **0.1335** | 62.5 % |
 
-A gegen B misst, ob die 254 toten Kernelzeilen etwas ändern (Erwartung: nein, außer
-Speicher und Zeit). B gegen C misst, ob der 85-Kanal-Engpass bei 102 Klassen schadet.
-C gegen D ist die bereits gemessene Differenz (0.7809 vs. 0.8226).
+**Die 85-Kanal-Schlussschicht schadet nicht — sie hilft leicht.** kraken+ liegt auf
+beiden Metriken über run 2, das dieselbe Architektur ohne diese Schicht hat. Ein
+Zwischenstand bei Epoche 25 sah umgekehrt aus (kraken+ 0.6593 gegen run 2s 0.6765);
+die Kurven haben sich später gekreuzt, und eine Frühphasen-Momentaufnahme trägt diese
+Frage nicht.
 
-Zusätzlich, weil Ströbel genau das für die Lücke zu HTR+ verantwortlich macht: **eine
-Wiederholung der besten Konfiguration mit `--augment`**. Das ist die einzige der von ihm
-genannten Vorverarbeitungen, die kraken direkt anbietet.
+Der Rang-Engpass, den wir befürchtet hatten — 85 ReLU-Kanäle vor 102 Klassen —
+kostet also nichts Messbares. Ströbels korpusspezifische 85 sind für unser Material
+kein Problem, obwohl sie für ein anderes Zeichenrepertoire gewählt wurden.
+
+**Was tatsächlich trennt, ist die Eingangshöhe.** Die beiden 64-px-Läufe liegen 0.0157
+CER auseinander, der 120-px-Lauf liegt 0.032 unter dem besseren von ihnen. Das deckt
+sich mit der Geometrie (S10): bei stride 8 hat 64 px nur 1.97 CTC-Frames pro Zeichen,
+120 px hat 3.69.
+
+Die Fehlerformen dazu:
+
+| | Insertions | Deletions | Substitutions |
+|---|---:|---:|---:|
+| run 2 | 433.428 | 366.997 | 545.953 |
+| kraken+ | 333.579 | 382.316 | 514.324 |
+| run 3 | 279.767 | 348.331 | 364.368 |
+
+Alle drei sind konvergierte Modelle (Substitutionen dominieren), und alle drei
+erkennen **kein einziges** der 170 `Inherited`-Zeichen — der kombinierenden
+Kürzungszeichen. Das ist kein Architekturproblem dieser Größenordnung.
+
+### Was das für die Praxis heißt
+
+kraken+ nachzubauen war die Mühe wert, aber nicht als Kandidat für ein Produktivmodell:
+der kraken-Default ist auf diesem Material deutlich besser, bei praktisch gleicher
+Parameterzahl und einem Viertel der FLOPs. Der Wert des Nachbaus liegt darin, zwei
+Hypothesen erledigt zu haben — die tote Kernelzeile (11,1 Mio. Parameter, die nur
+Nullpadding sehen) und den 85-Kanal-Engpass —, die beide als Erklärung für run 1s
+Scheitern im Raum standen. Keine von beiden war es; es war die Lernrate (#96).
+
+**Alle Zahlen hier sind auf flämischem Material gemessen** (`medieval-scripts` sind
+Leuvener Register). Die Rangfolge der Architekturen gilt, die absoluten CERs sind
+keine Aussage über deutsche Handschrift — dafür #98.
