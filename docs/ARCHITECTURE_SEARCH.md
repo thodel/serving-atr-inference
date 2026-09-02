@@ -44,8 +44,28 @@ small sets favour small models — so promotion is never the final word.
 
 ## 2. Fairness rules (each one is a bug we already hit)
 
-1. **Fixed optimizer-step budget, not fixed epochs.** run 3's epoch was 4× run 2's,
-   partly because its OOM forced batch 64 and therefore 4× the steps.
+1. **Equal epochs *are* equal compute once rule 2 holds — do not "improve" on this.**
+   The original wording was "fixed optimizer-step budget, not fixed epochs", motivated
+   by run 3's epoch being 4× run 2's after an OOM forced batch 64. Implemented
+   literally in the first height sweep, the budget was computed as
+   `epochs × lines / micro_batch` — which counts **micro-batches, not optimizer
+   steps**. Gradient accumulation was never divided out:
+
+   | | micro-batches | accum | actual optimizer steps |
+   |---|---:|---:|---:|
+   | h48, 4 epochs | 12,996 | 1 | **12,996** |
+   | h120, 1 epoch | 12,996 | 4 | **3,249** |
+
+   The tall configurations ran on a quarter of the budget and returned val 0.27
+   against 0.55–0.65 for the short ones — which reads as "tall is far worse" and means
+   "undertrained". Rerun at four epochs each, that same h120 reaches **0.7154**, the
+   best of the sweep.
+
+   Rule 2 already fixes the *effective* batch, and then
+   `optimizer steps = lines × epochs / effective_batch` — nothing else enters, so equal
+   epochs are equal steps by construction. Fix a step budget only where the effective
+   batch genuinely varies, and count it as `micro_batches / accumulation`, which is what
+   Lightning's `global_step` records and what the checkpoints can be checked against.
 2. **Fixed *effective* batch, micro-batch found per config.** run 3 OOMed at 256 where
    run 2 did not — activation memory, not parameters. Probe the largest micro-batch
    that fits, then set `--accumulate-grad-batches` to reach the common effective batch.
@@ -156,3 +176,31 @@ and mechanisable, not because it is where the remaining error lives.
   https://arxiv.org/pdf/1811.07768
 * *2D-CTC for Scene Text Recognition* — https://arxiv.org/pdf/1907.09705
 * Ströbel, dissertation, Kap. 3.6.1 — see `docs/KRAKEN_PLUS.md`
+
+
+## 6. Results — height sweep, rung 0 (2026-09-02)
+
+`shard_00` / `val_clean`, kraken default architecture, **only the input height varies**.
+Effective batch 256 throughout (the micro-batch shrinks with height because 120 px OOMs
+at 256), 4 epochs = 12,996 optimizer steps each, lrate 1e-3, seed 42, `--no-augment`.
+
+| height | micro × accum | val accuracy | frames/char (S10) | wall |
+|---:|---|---:|---:|---:|
+| 48 | 256 × 1 | 0.5528 | 1.48 `warn` | 1 h 43 |
+| 64 | 256 × 1 | 0.6475 | 1.97 `warn` | 2 h 34 |
+| 96 | 128 × 2 | 0.6827 | 2.95 `ok` | 4 h 10 |
+| 120 | 64 × 4 | **0.7154** | 3.69 `ok` | 5 h 28 |
+| 128 | 64 × 4 | *running* | 3.94 `ok` | — |
+
+**Monotone: every step up in height buys accuracy**, and the gain has not flattened
+inside the range tested. The ordering matches the S10 geometry: the two heights flagged
+`warn` for leaving under two CTC frames per character are the two worst, and the gap
+between them (0.0947) is wider than between any adjacent `ok` pair.
+
+It also explains run 3 against run 2 retrospectively — **0.8226 vs 0.7809 was the
+height, not the architecture**. kraken+ (`Cr1,1,85`, height 64) landing between them
+supports the same reading; see `docs/KRAKEN_PLUS.md`.
+
+The cost: 120 px takes ~3× the wall time of 48 px for the same number of optimizer
+steps. Height is both the most valuable knob found so far and the most expensive per
+epoch — precisely the trade a rung ladder exists to manage.
