@@ -111,6 +111,154 @@ The other departure is the base model: lassberg targets the 30B-A3B MoE. It is
 selectable (`"base_model": "Qwen/Qwen3-VL-30B-A3B-Instruct"`) but nothing here
 could then serve the result — vLLM 0.11 would want the whole card.
 
+## Runbook: a corpus-scale run, end to end
+
+The section above submits a 52-page smoke test. This one is what a real run costs,
+written after four consecutive failures on a 325 K-line corpus. Read the timing
+section before you start: at corpus scale the VLM backend is **slow enough that
+the schedule is the main decision**, not the hyperparameters.
+
+### 1. Before you start
+
+```bash
+# the venv exists and the backend is reachable
+curl -s localhost:8204/health | python3 -c 'import json,sys; print(json.load(sys.stdin)["backends"]["vllm"])'
+
+# GPU 1 has room — the trainer needs ~24 GB and the serving engines hold ~7 GB
+nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv
+
+# nothing else is queued: one GPU, one job at a time
+curl -s localhost:8204/jobs | python3 -c 'import json,sys
+for j in json.load(sys.stdin)["jobs"][:3]: print(j["status"], j["id"])'
+```
+
+A queued job waits **indefinitely** behind a running one. Submitting a VLM job
+behind a kraken job is fine; submitting a kraken job behind a corpus-scale VLM job
+means it starts in days.
+
+### 2. Choose the corpus
+
+Do not hand-pick project directories. `scripts/plan_corpus.py` (§8c of
+`TRAINING.md`) scores the 32 dh-unibe datasets, removes projects that two datasets
+both publish — several do — and writes a submittable request. The alternative is
+what happened before it existed: 21 projects picked by eye out of a dataset whose
+card says **Flemish**, yielding 291 usable pages.
+
+### 3. Verify before submitting
+
+```bash
+curl -s -X POST "http://localhost:8200/train/jobs?verify_only=true" \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)" \
+  -H "Content-Type: application/json" -d @/tmp/corpus-vlm.json | python3 -m json.tool
+```
+
+`{"valid": true, "checked": true}` means every repo and every project name resolves
+and the selection fits the disk guard. `checked: false` means the hub could not be
+reached and **the question was not answered** — that is not the same as a pass.
+
+### 4. The parameters that actually matter at scale
+
+```json
+"params": {
+  "granularity": "line",
+  "epochs": 1,
+  "max_epochs": 5,
+  "patience": 2,
+  "min_delta": 0.0001,
+  "batch_size": 4,
+  "accumulate_grad_batches": 4,
+  "eval_samples": 200
+}
+```
+
+- **`epochs` is a floor, `max_epochs` a ceiling.** With both set, the run keeps
+  going while validation loss improves and stops after `patience` evaluations
+  without it (§8c-bis of `TRAINING.md`). At corpus scale set `epochs: 1` — one
+  epoch over 325 K lines is already 20 K optimizer steps, against 774 for the
+  4 K-line run that preceded it.
+- **`batch_size: 4` is the tested value.** The default of 1 is right for
+  `granularity: page`; for line crops it leaves throughput on the table (#82). 8
+  is untested — if it OOMs it does so in the first minutes, which is cheap, but do
+  not discover that overnight.
+- **`eval_samples: 200`** because generation costs ~1 s per sample. A full
+  validation split would take longer than the training.
+
+### 5. Timing — read this before committing the GPU
+
+Measured on the 325 K-line German corpus, `batch_size: 4`:
+
+| | |
+|---|---|
+| prepare | **1 h 40 min** (12,286 pages materialised) |
+| compile | **1 h 27 min** (325 K line crops written to the share) |
+| train | **5.94 s per batch of 4** = 0.67 samples/s |
+| one epoch | **~154 h — 6.4 days** |
+
+That throughput is **three times worse** than the 1.94 samples/s measured on the
+Thun smoke test, and the gap is the thing to plan around. Two causes, and this
+project has not separated them:
+
+1. **IO.** `compile` writes one JPEG per line — 337,623 files — onto the CIFS
+   share, and `train` reads them back one at a time. `/` has ~500 GB free and is
+   local NVMe; copying the crops there before training is the obvious experiment
+   and has not been run.
+2. **Longer lines.** This corpus has a median aspect ratio of 9.9 against Thun's
+   much squarer crops, so more visual tokens per sample at the same budget.
+
+**Consequence:** the continuation logic is close to useless at this scale. With
+`patience: 2`, a stop decision needs three epochs — nineteen days. Either subset
+the corpus (`max_pages` per dataset) or accept a single-epoch run.
+
+### 6. Monitoring
+
+```bash
+J=<job-id>
+# stages and counts
+curl -s localhost:8204/jobs/$J | python3 -c 'import json,sys
+j = json.load(sys.stdin); print(j["status"])
+for s in j.get("stages", []): print(" ", s["name"].ljust(9), s["status"])
+p = j.get("progress") or {}
+print("lines:", p.get("lines_written"), "samples:", p.get("samples_written"))
+for d in (p.get("dataset_counts") or []):
+    print("  ", d["hf_repo"].split("/")[-1][:34], d["lines"], "lines, dropped:", d.get("wide_lines"))'
+
+# the live progress bar — the only place the ETA appears
+curl -s "localhost:8204/jobs/$J/log?stage=train&lines=1" | python3 -c 'import json,sys
+print(json.load(sys.stdin)["lines"][0])'
+```
+
+The startup lines — the visual budget, the continuation policy — are written
+**before** the first step, so a tail-limited query on a long run will not show
+them. Ask for `lines=5000` and they still may have scrolled past; that is expected,
+not a fault.
+
+### 7. Failure modes seen in practice
+
+| symptom | cause | fix |
+|---|---|---|
+| `Mismatch in image token count` at step 2 | the visual budget never bound; `max_pixels` is a Qwen2-VL idiom (#86) | fixed in `03aed5c`; if you see it, the box is behind |
+| `Coordinate 'right' is less than 'left'` in compile | one degenerate box out of 328 K; the clamp against the *real* image size inverted it (#89) | fixed in `84a6dc7` |
+| `429 … quota of 1000 api requests per 5 minutes` in prepare | `datasets` makes one tree call per project glob; 1,825 projects is 1,825 requests (#89) | partially fixed; a selection covering a whole repo collapses to one glob. A partial selection of 1,185 projects still costs 1,185 |
+| `CUDA out of memory` with a huge single allocation | a mis-segmented line; batches are padded to their widest member (#90) | `MAX_LINE_ASPECT` drops them in `prepare` |
+| job stuck in `queued` with no reason | another job holds the GPU | `curl -s localhost:8204/jobs` — one at a time, by design |
+
+### 8. After the run
+
+`register` leaves the adapter under `~/atr-cache/trained/<model_id>/` with a
+`metadata.json`. If `ATR_TRAIN_AUTO_PUBLISH_MIN_ACCURACY` is set and the run
+reaches it, the model is pushed to a **private** hub repo automatically; either
+way the job record says what happened and why:
+
+```bash
+curl -s localhost:8204/jobs/$J | python3 -c 'import json,sys
+j = json.load(sys.stdin); print(j.get("published")); print(j.get("metrics"))'
+```
+
+A CER from a corpus-scale run is measured against that corpus's own `partition`
+split, **not** against `GT_Thun-Test`, so it does not belong in the same table as
+the numbers in `TRAINING_PLAN.md` §9–9e. Say which eval set produced a number
+whenever you report one.
+
 ## Serving what you trained
 
 A finished job registers the adapter in `config/models.local.yaml` as
