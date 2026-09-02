@@ -28,6 +28,9 @@ TROCR_MODELS = [
     "dh-unibe/trocr-medieval-escriptmask",
     "dh-unibe/trocr-kurrent-XVI-XVII",
     "dh-unibe/trocr-essoins-middle-latin",
+    # 19th-century German Kurrent. Appended rather than inserted: _WARM_MODEL is
+    # TROCR_MODELS[0], so the warm-up choice stays where it was.
+    "dh-unibe/trocr-kurrent",
 ]
 
 
