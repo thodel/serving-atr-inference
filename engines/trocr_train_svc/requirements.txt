@@ -14,6 +14,14 @@
 #     driver 565 / CUDA 12.7.
 #   * 2.8.0+cu128 is the build proven on this driver by the vLLM venv
 #     (docs/asteraix-environment.md), so the trainer reuses it.
+# The runner executes the SHARED BasePipeline (atr_serving.training.runner_base),
+# so this venv needs the same core as every other backend — not just the model
+# stack. Missing pydantic-settings made `python -m trocr_train_svc.runner` fail
+# at import in a venv that otherwise looked complete.
+pydantic>=2.6
+pydantic-settings>=2.2
+pyyaml>=6.0
+Pillow>=10.0
 torch==2.8.0
 torchvision==0.23.0
 transformers>=4.41,<5
@@ -21,6 +29,12 @@ transformers>=4.41,<5
 # transformers 4.41. The upper bound follows the pattern in vlm_train_svc:
 # a major-version arrival silently breaks the code that drives it.
 sentencepiece>=0.2
+# transformers' Trainer needs accelerate at RUNTIME, not at import: `from
+# transformers import Seq2SeqTrainer` succeeds without it, and the ImportError
+# only fires when Seq2SeqTrainingArguments resolves its devices — i.e. inside the
+# train stage, after prepare and compile have already spent hours. Pinned at the
+# lower bound transformers itself demands.
+accelerate>=0.26
 # Ground truth comes from the HuggingFace hub as streamed parquet — never a full
 # repo download. Same upper bound as kraken-train and vlm-train.
 datasets>=3.0,<4
