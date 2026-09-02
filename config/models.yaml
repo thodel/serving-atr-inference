@@ -371,6 +371,48 @@ models:
     vram_mb: 500
     residency: lazy
     gpu_affinity: 1
+  # FoNDUE-GD — Simon Gabay, Universite de Geneve. A large multilingual model
+  # aggregating 28 published corpora; the widest coverage in this registry, and
+  # the reason training_datasets is recorded: two of those corpora are test sets
+  # this project measures on, which is not visible from the model's name.
+  - id: kraken-fondue_gd_v2
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.21536798"
+    task: htr
+    level: page
+    languages: [fr, de, es, la, nl]
+    scripts: [Latn]
+    centuries: [16, 17, 18, 19, 20, 21]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - "https://doi.org/10.5281/zenodo.4746342"   # Swiss Federal Council minutes 1848-1903
+      - "https://github.com/PonteIneptique/valais-recensement"  # Valais census 1870/80
+      - "https://doi.org/10.5281/zenodo.5153262"   # StABS Basel, Urfehdenbuch
+      - "https://doi.org/10.5281/zenodo.3517776"
+      - "https://doi.org/10.5281/zenodo.7695130"
+      - "https://doi.org/10.5281/zenodo.3945087"
+      - "https://github.com/FoNDUE-HTR/FONDUE-DE-MSS-18"
+      - "https://github.com/FoNDUE-HTR/FONDUE-DE-AAEB-17"
+      - "https://github.com/FoNDUE-HTR/FONDUE-FR-MSS-19"
+      - "https://github.com/FoNDUE-HTR/FONDUE-FR-MSS-18"
+      - "https://github.com/HTR-United/CREMMA-MSS-18"
+      - "https://github.com/HTR-United/CREMMA-MSS-20"
+      - "https://github.com/HTR-United/cremma-wikipedia"
+      - "https://github.com/HTR-United/lectaurep-repertoires"
+      - "https://github.com/HTR-United/lectaurep-bronod"
+      - "https://github.com/HTR-United/CREMMA-AN-TestamentsDePoilus"
+      - "https://github.com/HTRomance-Project/modern-roman-languages"
+      - "https://github.com/Proyecto-Ocupacion-Araucania-UChile/HTR_Araucania_XIX"
+      - "https://github.com/16thExegesisDH/HTR-Corpus-A"
+      - "https://github.com/16thExegesisDH/HTR-Corpus-C"
+      - "https://github.com/ARCHEO-POL/OCR_corpus_principal"
+      - "https://github.com/Masculinites-Esclavagistes/MEGV-FR-MSS-18"
+      - "https://github.com/PaulineJac/GasparoSardiToponomasia"
+      - "https://github.com/alix-tz/moonshines"
+      - "https://github.com/alix-tz/peraire-ground-truth"
+      - "https://github.com/FoNDUE-HTR/FoNDUE_Wolfflin_Fotosammlung"
   # OpenITI Arabic — Kraken
   - id: kraken-openiti_arabic
     engine: kraken

@@ -43,3 +43,32 @@ def test_duplicate_ids_rejected(tmp_path: Path):
     )
     with pytest.raises(ValueError):
         load_registry(cfg)
+
+def test_training_datasets_survive_loading_and_default_to_empty():
+    """A model that aggregates corpora must be able to say which ones.
+
+    Extra keys in models.yaml are silently dropped by pydantic, so recording the
+    provenance as a comment or an unmodelled field would look present in the file
+    and be invisible to any code that wants to check it. An evaluation cannot
+    judge from a model's name or its score whether it has seen a test set —
+    FoNDUE-GD_v2 reads two of this project's benchmark corpora at a level no
+    other local model reaches, because both are in its training data.
+
+    Empty means "not recorded", never "trained on nothing".
+    """
+    spec = ModelSpec(
+        id="m", engine="kraken", zenodo_id="10.5281/zenodo.1",
+        training_datasets=["https://doi.org/10.5281/zenodo.4746342"],
+    )
+    assert spec.training_datasets == ["https://doi.org/10.5281/zenodo.4746342"]
+    assert ModelSpec(id="n", engine="kraken", zenodo_id="z").training_datasets == []
+
+
+def test_fondue_records_the_corpora_it_was_trained_on():
+    """The registry entry keeps the overlap discoverable (see the docstring above)."""
+    reg = load_registry(REPO_ROOT / "config" / "models.yaml")
+    spec = reg.get("kraken-fondue_gd_v2")
+    assert spec is not None, "kraken-fondue_gd_v2 missing from config/models.yaml"
+    joined = " ".join(spec.training_datasets)
+    assert "zenodo.4746342" in joined, "Federal Council minutes missing from the list"
+    assert "valais-recensement" in joined, "Valais census missing from the list"
