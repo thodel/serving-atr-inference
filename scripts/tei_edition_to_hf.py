@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import io
 import json
 import sys
 import time
@@ -162,11 +161,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         names = sorted(f.name for f in source.glob("*.xml"))
         print(f"reading TEI from {source}")
-        read_tei = lambda n: (source / n).read_text(encoding="utf-8", errors="replace")
+        def read_tei(name: str) -> str:
+            return (source / name).read_text(encoding="utf-8", errors="replace")
     else:
         print(f"listing {args.tei_repo}/{args.tei_path} …", flush=True)
         names = list_tei(args.tei_repo, args.tei_path, token)
-        read_tei = lambda n: fetch_tei(args.tei_repo, args.tei_path, n, token)
+
+        def read_tei(name: str) -> str:
+            return fetch_tei(args.tei_repo, args.tei_path, name, token)
     if args.limit:
         names = names[: args.limit]
     print(f"{len(names)} TEI file(s)")
