@@ -39,6 +39,12 @@ class ModelSpec(BaseModel):
     residency: Literal["pinned", "lazy"] = "lazy"
     gpu_affinity: int | None = None
     prompt: str | None = None  # optional VLM instruction; None = image-only (e.g. LightOnOCR)
+    # Corpora this model was trained on, as DOIs or repository URLs. A model that
+    # aggregates dozens of datasets cannot be checked for overlap with a test set
+    # from its name or its score — only from this list. Optional, and empty for
+    # every model registered before it existed, so absence means "not recorded",
+    # never "trained on nothing".
+    training_datasets: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_source(self) -> "ModelSpec":
