@@ -707,6 +707,53 @@ and it came from more data rather than from a better configuration.
 base lever spent; this shows the engine lever is not where the gain is either. The
 remaining lever is the corpus, and §11 is about pulling it.
 
+### 9f. Breadth reaches what in-domain fine-tuning reached (2026-09-03)
+
+The corpus §11 planned was trained and scored. The result answers §9d's question —
+*is the data the lever?* — and the answer is more interesting than a yes.
+
+`kraken-medieval-german-v2` fine-tuned `kraken-early_modern_german` on **325,454
+lines** from four archives: Zurich council books, Bullinger's correspondence,
+Königsfelden charters, Basel protocols. It ran 44 epochs over three days and was
+**cancelled from outside** at `val_metric` 0.7741 while still improving at
++0.0009/epoch. `test` and `register` never ran, so the pipeline recorded no
+metrics; the best checkpoint survived on local disk.
+
+It was therefore scored by hand, with `ketos test` against **the same
+`val.arrow`** that produced `thun-kurrent-v2`'s number — identical 11,566
+characters, so the comparison is exact rather than approximate:
+
+| model | trained on | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|
+| `thun-kurrent-v2` | 1,898 Thun lines, fine-tuned **on this hand** | 0.2180 | 395 | 814 | 1,312 |
+| corpus `best_0.7741` | 325,454 lines, **never saw Thun** | **0.2138** | 497 | 686 | 1,290 |
+
+**171× the data for a 1.9 % relative gain** reads like a refutation of "the data
+is the lever". It is not, and the reason is the second column.
+
+`plan_corpus` rejected `medieval-scripts_xiv-xv-xvi` as Flemish (§11), and the
+Thun material lives inside it. The corpus model has therefore **never seen a page
+of Thun**, and it is being compared against a model fine-tuned on exactly that
+hand. A general model built from four unrelated archives matches — slightly beats
+— in-domain specialisation. That is a statement about transfer, not about volume,
+and it is the more useful finding: breadth now buys what specialisation used to
+require.
+
+Its error profile agrees. The corpus model **omits more** (497 against 395) and
+**adds less** (686 against 814), at `length_ratio` 1.016 — the caution of a model
+reading a hand it does not know.
+
+Two cautions on the number itself. It comes from the best checkpoint of an
+**interrupted** run whose curve was still rising, so it is a floor rather than
+that configuration's result. And the interruption came from outside this work —
+the box's GPU is shared with a parallel session — which is worth recording because
+nothing in the job record explains a `cancelled on request` that nobody here
+requested.
+
+The obvious next run follows from the table: fine-tune *this* model on Thun's
+1,898 lines. Breadth plus specialisation should beat both, and the data is long
+since compiled.
+
 ## 10. The full-dataset run (2026-08-08)
 
 The first attempt at all 690 projects, and what it cost to learn that the default

@@ -66,6 +66,13 @@ more of each line and gets more of it wrong — a language model produces plausi
 where a CTC network maps visual evidence, and four thousand lines do not anchor that in
 the hands.
 
+**Breadth reaches what specialisation reached** (§9f). A model trained on 325,454
+lines from Zurich, Bullinger, Königsfelden and Basel — and which **never saw a page
+of Thun** — scores **CER 0.2138** on the Thun eval set, against 0.2180 for a model
+fine-tuned on Thun itself. Same `val.arrow`, same 11,566 characters, so the two are
+exactly comparable. 171× the data for 1.9 % is not the story; *transfer* is: four
+unrelated archives now buy what in-domain fine-tuning used to require.
+
 **Where the lever is now.** §9c spent the base, §9d spent the epochs, §9e spent the
 engine. What remains is the corpus — and that turned out to be a *selection* problem:
 the dataset every run above drew from is

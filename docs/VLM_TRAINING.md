@@ -259,6 +259,54 @@ split, **not** against `GT_Thun-Test`, so it does not belong in the same table a
 the numbers in `TRAINING_PLAN.md` §9–9e. Say which eval set produced a number
 whenever you report one.
 
+## Page granularity from a TEI edition (#91)
+
+Everything above assumes PageXML: text anchored to pixels. An **edition** has no
+coordinates, so line crops are impossible — but page-level training never needed
+them. `page_sample` reads `line_texts` and joins them with newlines, and that is
+the whole requirement.
+
+`scripts/tei_edition_to_hf.py` converts a TEI edition plus a IIIF image server
+into a dataset this pipeline reads unchanged. Built for the St. Gallen missives:
+
+```bash
+.venvs/kraken-train/bin/python scripts/tei_edition_to_hf.py \
+    --tei-dir ~/Repo/sg-missiven-data --dry-run --check-images 10
+.venvs/kraken-train/bin/python scripts/tei_edition_to_hf.py \
+    --tei-dir ~/Repo/sg-missiven-data --target dh-unibe/image-text_sg-missiven
+```
+
+`--dry-run` fetches no images — a dry run that downloads 1,600 files is not one —
+and `--check-images N` samples the IIIF identifiers instead.
+
+**The judgement the converter encodes** is which text is on the page and which an
+editor wrote about it. `persName`, `placeName`, `orgName`, `origDate` wrap words
+written on the page: content kept, tags dropped. `note` is commentary — *"Es ist
+unklar, welche Person gemeint ist"* — and those subtrees are skipped whole, though
+**not their tails**, because a note interrupts a sentence that continues. An
+`<lb/>` can occur inside a name, so the walk is in document order.
+
+The result, over the full edition: **808 editions, 1,667 pages, 24,147 lines**,
+534 MB, two images missing (one 404, one 500 that four retries did not clear).
+Repos are created **private**: the TEI is CC-BY-SA-4.0 and the images carry no
+statement, which are not the same question.
+
+Train it as pages, and only with the VLM backend — kraken reads lines:
+
+```json
+{"engine": "vllm", "base_model": "Qwen/Qwen3-VL-8B-Instruct",
+ "datasets": [{"hf_repo": "dh-unibe/image-text_sg-missiven",
+               "train_projects": ["sg-missiven"],
+               "granularity": "page", "partition": 0.9}],
+ "params": {"granularity": "page", "epochs": 1, "max_epochs": 4,
+            "patience": 2, "batch_size": 1, "accumulate_grad_batches": 16}}
+```
+
+**Measured: 44.3 s per optimizer step** at effective batch 16, so 94 steps per
+epoch over 1,500 training pages and roughly **4.6 hours for four epochs**. Unlike
+the 325 K-line corpus at line granularity — 6.4 days per epoch — the continuation
+logic is actually useful at this size: `patience: 2` can decide within a day.
+
 ## Serving what you trained
 
 A finished job registers the adapter in `config/models.local.yaml` as

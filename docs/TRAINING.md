@@ -670,6 +670,36 @@ environment the same way, or authenticate once with
 picks up. A missing token is reported before the upload rather than discovered
 inside it.
 
+## 8e. Scoring a model the pipeline never scored
+
+A run that is cancelled leaves a trained model and no metrics: `test` never ran,
+so `job.metrics` is null and nothing was registered. The model is still there —
+kraken writes `best_<val_metric>.mlmodel` on abort — and it can be scored directly.
+
+**Score it against an existing job's `val.arrow`, not a fresh one.** Comparability
+is the whole point of the exercise, and an arrow compiled today from the same
+projects is not bit-identical to one compiled three weeks ago:
+
+```bash
+M=~/atr-cache/checkpoints/<job-id>/best_0.7741.mlmodel
+V=<jobs>/20260813T144649Z-kraken-thun-kurrent-v2/data/val_bin.lst
+.venvs/kraken-train/bin/ketos --device cuda:0 --workers 4 test \
+    --model "$M" --test-data "$V" --format-type binary --normalization NFD \
+    > /tmp/eval.log 2>&1
+```
+
+`ketos test` prints a confusion matrix after the summary, so read the head:
+
+```bash
+.venvs/kraken-train/bin/python -c 'import sys; sys.path.insert(0,"src")
+from atr_serving.training.ketos_cmd import parse_test_report
+print(parse_test_report(open("/tmp/eval.log", errors="replace").read().replace(chr(13), chr(10))))'
+```
+
+This registers nothing and touches no overlay — deliberately. A model scored for
+comparison is not thereby a model this box should serve, and conflating the two
+is how an unvalidated model ends up in the registry.
+
 ## 9. Troubleshooting
 
 ### OOM during training at batch 256
