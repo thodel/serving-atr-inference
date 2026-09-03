@@ -108,7 +108,10 @@ class TrocrDataCollator:
         for img in images:
             img.close()
 
-        labels = encoded["input_ids"].clone()
+        # TrOCRProcessor gibt bei Bild+Text `pixel_values` und `labels` zurueck —
+        # kein `input_ids`. Die vorige Fassung griff auf `input_ids` zu und brach
+        # im ersten Batch mit KeyError ab.
+        labels = encoded["labels"].clone()
         labels[labels == self.processor.tokenizer.pad_token_id] = self.ignore_index
         encoded["labels"] = labels
         return encoded
@@ -116,7 +119,14 @@ class TrocrDataCollator:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    from transformers import AutoProcessor, Seq2SeqTrainer, Seq2SeqTrainingArguments, set_seed
+    from transformers import (
+        AutoProcessor,
+        GenerationConfig,
+        Seq2SeqTrainer,
+        Seq2SeqTrainingArguments,
+        VisionEncoderDecoderModel,
+        set_seed,
+    )
 
     set_seed(args.seed)
     out_dir = Path(args.output_dir)
@@ -136,8 +146,39 @@ def main(argv: list[str] | None = None) -> int:
 
     collator = TrocrDataCollator(processor)
 
+    # Modell zuerst, Trainer danach. Die vorige Fassung baute den Trainer mit
+    # model=None und lud das Modell erst danach, ohne es je zuzuweisen — trainiert
+    # haette der Trainer mit None. transformers 4.57 lehnt model=None ohnehin ab.
+    model = VisionEncoderDecoderModel.from_pretrained(args.base_model)
+    # Der Prozessor kann Tokens ergaenzt haben. Der Resize muss an den *Decoder*:
+    # VisionEncoderDecoderModel implementiert set_input_embeddings nicht
+    # (transformers 4.57 wirft NotImplementedError), und die Bedingung davor
+    # spart den Aufruf ganz, wenn nichts dazugekommen ist — der Normalfall.
+    vocab_size = len(processor.tokenizer)
+    if model.decoder.get_input_embeddings().num_embeddings != vocab_size:
+        model.decoder.resize_token_embeddings(vocab_size)
+    if model.config.pad_token_id is None:
+        model.config.pad_token_id = processor.tokenizer.pad_token_id
+    if model.config.decoder_start_token_id is None:
+        model.config.decoder_start_token_id = (
+            processor.tokenizer.cls_token_id or processor.tokenizer.bos_token_id
+        )
+
+    # Generierungsparameter gehoeren in die GenerationConfig, nicht in die
+    # TrainingArguments: `length_penalty` ist dort kein Feld (transformers 4.57)
+    # und der Aufruf brach genau daran ab. `max_new_tokens` wurde als Argument
+    # entgegengenommen und danach nirgends benutzt — hier ist seine Stelle.
+    generation_config = GenerationConfig.from_model_config(model.config)
+    generation_config.num_beams = args.beam_size
+    if args.beam_size > 1:
+        # `length_penalty` wirkt nur in Beam-Suche. transformers 4.57 validiert
+        # das und lehnt die Kombination mit num_beams=1 ab, statt sie still zu
+        # ignorieren — der Default ist Greedy, also wird sie dort nicht gesetzt.
+        generation_config.length_penalty = args.length_penalty
+    generation_config.max_new_tokens = args.max_new_tokens
+
     trainer = Seq2SeqTrainer(
-        model=None,  # set after loading so the model can resize token embeddings
+        model=model,
         args=Seq2SeqTrainingArguments(
             output_dir=str(out_dir),
             num_train_epochs=args.epochs,
@@ -162,8 +203,12 @@ def main(argv: list[str] | None = None) -> int:
             gradient_checkpointing=args.gradient_checkpointing,
             dataloader_num_workers=args.workers,
             predict_with_generate=True,
-            generation_num_beams=args.beam_size,
-            length_penalty=args.length_penalty,
+            generation_config=generation_config,
+            # Der Trainer wirft sonst jede Dataset-Spalte weg, die in der
+            # forward-Signatur des Modells nicht vorkommt — also genau
+            # `image_path` und `text`, aus denen unser Collator die Batches
+            # ueberhaupt erst baut (RemoveColumnsCollator).
+            remove_unused_columns=False,
             report_to=["wandb"] if args.wandb_run else [],
             run_name=args.wandb_run,
             seed=args.seed,
@@ -171,14 +216,10 @@ def main(argv: list[str] | None = None) -> int:
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=collator,
-        tokenizer=processor.tokenizer,
+        # `tokenizer=` wurde in transformers 4.57 aus dem Trainer entfernt.
+        processing_class=processor.tokenizer,
     )
 
-    from transformers import VisionEncoderDecoderModel
-
-    model = VisionEncoderDecoderModel.from_pretrained(args.base_model)
-    # Resize token embeddings in case the processor added tokens.
-    model.resize_token_embeddings(len(processor.tokenizer))
     trainer.train()
 
     # Save the full checkpoint at the top of output_dir: find_checkpoint() looks
