@@ -204,3 +204,36 @@ supports the same reading; see `docs/KRAKEN_PLUS.md`.
 The cost: 120 px takes ~3× the wall time of 48 px for the same number of optimizer
 steps. Height is both the most valuable knob found so far and the most expensive per
 epoch — precisely the trade a rung ladder exists to manage.
+
+
+## 7. Results — height vs. capacity (2026-09-05)
+
+The height axis moves two things at once: `S1(1x0)1,3` folds the residual height into
+channels, so h48 gives the LSTM stack 384 inputs and h256 gives it 2048. A pure height
+sweep therefore cannot say whether resolution or capacity is doing the work. Arm A varies
+the height; Arm B holds it at 128 and buys the same parameter count through LSTM width.
+Pairs matched to ~1 % on parameters, measured with kraken's own VGSL builder.
+
+| params | Arm A (height, Lbx200) | Arm B (h128, LSTM width) | Δ | wall A : B |
+|---:|---|---|---:|---|
+| ~5.7 M | **h256: 0.7515** | Lbx248: 0.7411 | **+0.0104** | 19.9 h : 6.3 h |
+| ~4.9 M | **h192: 0.7494** | Lbx224: 0.7346 | **+0.0148** | 11.7 h : 6.3 h |
+
+**Height wins both pairs at matched capacity**, so the gain is not capacity in disguise —
+resolution contributes on its own.
+
+**LSTM width, by contrast, is inert.** At fixed height 128: 4.1 M → 0.7355, 4.9 M →
+0.7346, 5.7 M → 0.7411. Eight hundred thousand extra parameters buy 0.0009. It is not a
+usable axis on this material.
+
+**And height flattens.** 128 → 192 is +0.0139; 192 → 256 is +0.0021 for 70 % more wall
+time. The knee is around 192.
+
+*Caveat:* single runs, no seed repetition. Plateau fluctuation in earlier runs was
+±0.005–0.01, so the pair differences sit at the edge of that band. Both pairs pointing the
+same way while the capacity axis stays flat is what carries the finding; two seeds per
+configuration (~52 GPU-hours) would settle it.
+
+**For a production model: height 192, LSTM width 200.** And the ordering of the three
+earlier runs is now fully explained — run 3 (h120) beat run 2 and kraken+ (both h64)
+because of the height, not the architecture.
