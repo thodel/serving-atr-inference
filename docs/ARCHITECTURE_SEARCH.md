@@ -189,21 +189,34 @@ at 256), 4 epochs = 12,996 optimizer steps each, lrate 1e-3, seed 42, `--no-augm
 | 48 | 256 × 1 | 0.5528 | 1.48 `warn` | 1 h 43 |
 | 64 | 256 × 1 | 0.6475 | 1.97 `warn` | 2 h 34 |
 | 96 | 128 × 2 | 0.6827 | 2.95 `ok` | 4 h 10 |
-| 120 | 64 × 4 | **0.7154** | 3.69 `ok` | 5 h 28 |
-| 128 | 64 × 4 | *running* | 3.94 `ok` | — |
+| 120 | 64 × 4 | 0.7154 | 3.69 `ok` | 5 h 28 |
+| 128 | 64 × 4 | 0.7355 | 3.94 `ok` | 6 h 07 |
+| 160 | 32 × 8 | 0.7326 | 4.92 `ok` | 8 h 43 |
+| 192 | 32 × 8 | 0.7494 | 5.90 `ok` | 11 h 45 |
+| 256 | 16 × 16 | **0.7515** | 7.87 `ok` | 19 h 55 |
 
-**Monotone: every step up in height buys accuracy**, and the gain has not flattened
-inside the range tested. The ordering matches the S10 geometry: the two heights flagged
-`warn` for leaving under two CTC frames per character are the two worst, and the gap
-between them (0.0947) is wider than between any adjacent `ok` pair.
+**The trend rises across the whole range; the individual steps do not.** h160 comes in
+at 0.7326, *below* h128's 0.7355. An earlier version of this section claimed "monotone:
+every step up in height buys accuracy" on the basis of the first five heights, and h160
+falsifies that wording.
+
+The dip is 0.0029 and sits inside the ±0.005–0.01 band that plateau fluctuation showed in
+earlier runs, so it is not evidence that 160 is *worse* than 128 — it is evidence that
+single runs cannot resolve differences of this size. That matters beyond the wording:
+the Arm A/Arm B pair differences below are 0.0104 and 0.0148, only three to five times
+the noise floor, and they rest on one run each.
+
+What survives is the shape: **+0.19 from h48 to h256**, with the two heights flagged
+`warn` by S10 (under two CTC frames per character) as the two worst by a wide margin —
+the 48→64 gap alone is 0.0947, larger than everything from 64 to 256 combined.
 
 It also explains run 3 against run 2 retrospectively — **0.8226 vs 0.7809 was the
 height, not the architecture**. kraken+ (`Cr1,1,85`, height 64) landing between them
 supports the same reading; see `docs/KRAKEN_PLUS.md`.
 
-The cost: 120 px takes ~3× the wall time of 48 px for the same number of optimizer
-steps. Height is both the most valuable knob found so far and the most expensive per
-epoch — precisely the trade a rung ladder exists to manage.
+The cost: 256 px takes ~12× the wall time of 48 px for the same number of optimizer
+steps. Height is both the most valuable knob found so far and by far the most expensive
+per epoch — precisely the trade a rung ladder exists to manage.
 
 
 ## 7. Results — height vs. capacity (2026-09-05)
@@ -227,7 +240,9 @@ resolution contributes on its own.
 usable axis on this material.
 
 **And height flattens.** 128 → 192 is +0.0139; 192 → 256 is +0.0021 for 70 % more wall
-time. The knee is around 192.
+time. The knee is around 192. The intermediate h160 (0.7326) does not sit on a smooth
+curve between them, which is the clearest single reminder that these are unreplicated
+runs.
 
 *Caveat:* single runs, no seed repetition. Plateau fluctuation in earlier runs was
 ±0.005–0.01, so the pair differences sit at the edge of that band. Both pairs pointing the
