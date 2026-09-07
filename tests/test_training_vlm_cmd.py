@@ -266,3 +266,34 @@ class TestContinuationFlags:
 
         with pytest.raises(ValidationError, match="below epochs"):
             VlmTrainParams(epochs=5, max_epochs=2)
+
+
+class TestGenerationBudget:
+    """The input budget scaled with granularity and the output budget did not.
+
+    qwen3vl-sg-missiven-v1 was recorded at CER 0.5921 with length_ratio 0.515 —
+    every page cut in half at 256 tokens. The same adapter, re-scored at 1536,
+    gives 0.2785 at length_ratio 1.027. Nothing about the model changed (#92).
+    """
+
+    def test_a_line_keeps_the_old_default(self):
+        assert VlmTrainParams(granularity="line").generation_budget() == 256
+
+    def test_a_page_gets_room_for_a_page(self):
+        """~967 reference characters at ~2 chars/token in this orthography."""
+        assert VlmTrainParams(granularity="page").generation_budget() == 1536
+
+    def test_an_explicit_value_still_wins(self):
+        assert VlmTrainParams(granularity="page",
+                              max_new_tokens=4000).generation_budget() == 4000
+
+    def test_the_eval_command_passes_the_resolved_budget(self):
+        cmd = evaluate_cmd(PY, params=VlmTrainParams(granularity="page"),
+                           base_model="b", adapter_dir="/ckpt", val_jsonl="v",
+                           data_root="/j", report="/r.json")
+        assert value(cmd, "--max-new-tokens") == "1536"
+
+    def test_the_generation_budget_is_never_below_the_line_default(self):
+        """A page cannot need less room than a line of the same page."""
+        for g in ("line", "page"):
+            assert VlmTrainParams(granularity=g).generation_budget() >= 256

@@ -61,6 +61,19 @@ VLM_PROMPT = "Transcribe the handwritten text in this image exactly as written."
 VLM_PIXEL_BUDGET: dict[str, int] = {"line": 256 * 32 * 32, "page": 2048 * 32 * 32}
 #: Token budget per sample kind (prompt + image + transcription).
 VLM_MAX_SEQ_LEN: dict[str, int] = {"line": 512, "page": 4096}
+#: Tokens the model may *generate* at evaluation, per sample kind. This has to
+#: scale with granularity for the same reason the input budget does, and it did
+#: not: a flat 256 was right for a line and cut a page in half (#92).
+#:
+#: The failure is invisible, which is what makes it dangerous — it surfaces as a
+#: bad CER, not as an error. `qwen3vl-sg-missiven-v1` was recorded at CER 0.5921
+#: with `length_ratio` 0.515; re-scored at 1536 tokens the same adapter gives
+#: **0.2785** at `length_ratio` 1.027. Half the reference was never generated.
+#:
+#: A St. Gallen missive page averages 967 reference characters at roughly 2
+#: characters per token in this orthography, so ~500 tokens; 1536 leaves room for
+#: the long ones without inviting a runaway generation.
+VLM_MAX_NEW_TOKENS: dict[str, int] = {"line": 256, "page": 1536}
 
 # A model id doubles as a directory name and a registry id — keep it boring.
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -322,7 +335,9 @@ class VlmTrainParams(BaseModel):
     #: recorded in the report so a CER is never quietly measured on a subset the
     #: reader did not know about.
     eval_samples: int = Field(default=200, ge=1)
-    max_new_tokens: int = Field(default=256, ge=1)
+    #: None = the granularity's entry in VLM_MAX_NEW_TOKENS. An explicit value
+    #: overrides it, the same contract ``max_pixels`` and ``max_seq_len`` follow.
+    max_new_tokens: int | None = Field(default=None, ge=1)
 
     # ── run ──────────────────────────────────────────────────────────────────
     seed: int = 42
@@ -363,6 +378,10 @@ class VlmTrainParams(BaseModel):
 
     def sequence_budget(self) -> int:
         return self.max_seq_len or VLM_MAX_SEQ_LEN[self.granularity]
+
+    def generation_budget(self) -> int:
+        """How many tokens evaluation may generate for one sample."""
+        return self.max_new_tokens or VLM_MAX_NEW_TOKENS[self.granularity]
 
 
 class TrOCRTrainParams(BaseModel):

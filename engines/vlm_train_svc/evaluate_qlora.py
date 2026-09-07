@@ -102,6 +102,23 @@ def load_model(args):
     return model, processor
 
 
+def _looks_truncated(text: str, processor, cap: int) -> bool:
+    """Did generation stop because it hit the cap rather than because it was done?
+
+    Measured on the tokenizer rather than guessed from characters: the ratio of
+    characters to tokens varies with orthography, and early modern German runs
+    near two, which is exactly why 256 tokens looked like a plausible amount of
+    text while being half a page (#92).
+    """
+    if not text:
+        return False
+    try:
+        n = len(processor.tokenizer(text, add_special_tokens=False).input_ids)
+    except Exception:  # noqa: BLE001 — a diagnostic must never fail the run
+        return False
+    return n >= cap - 2
+
+
 def transcribe(model, processor, image_path: Path, prompt: str, max_new_tokens: int) -> str:
     import torch
     from PIL import Image
@@ -134,9 +151,14 @@ def main(argv: list[str] | None = None) -> int:
     model, processor = load_model(args)
     pairs: list[tuple[str, str]] = []
     examples: list[dict] = []
+    #: Predictions that stopped within a hair of the generation cap, which is what
+    #: a truncated transcription looks like from outside (#92).
+    at_cap = 0
     for index, sample in enumerate(samples, 1):
         prediction = transcribe(model, processor, root / sample.image,
                                 args.prompt, args.max_new_tokens)
+        if _looks_truncated(prediction, processor, args.max_new_tokens):
+            at_cap += 1
         pairs.append((prediction, sample.text))
         if len(examples) < 10:  # a handful in the report, for eyeballing
             examples.append({"image": sample.image, "reference": sample.text,
@@ -157,8 +179,20 @@ def main(argv: list[str] | None = None) -> int:
         # Named so a reader cannot mistake a capped run for a full one.
         "eval_cap": args.max_samples,
         "val_total": sum(1 for _ in read_jsonl(args.val_jsonl)),
+        "max_new_tokens": args.max_new_tokens,
+        # The number that turns a silent halving into a visible one. A CER is
+        # meaningless when the model was cut off, and nothing else in this report
+        # says so: qwen3vl-sg-missiven-v1 was recorded at CER 0.5921 with every
+        # page truncated at 256 tokens, and scored 0.2785 once the cap was raised.
+        "truncated_at_cap": at_cap,
         "examples": examples,
     })
+    if at_cap:
+        share = 100.0 * at_cap / len(pairs)
+        print(f"WARNING: {at_cap} of {len(pairs)} predictions ({share:.0f} %) ran to "
+              f"--max-new-tokens={args.max_new_tokens}. The CER below is a *floor*: "
+              f"those transcriptions were cut off, not wrong. Raise the cap "
+              f"(page granularity needs ~1500) and score again.", flush=True)
     out = Path(args.report)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")

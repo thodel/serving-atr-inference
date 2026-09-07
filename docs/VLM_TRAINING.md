@@ -307,6 +307,57 @@ epoch over 1,500 training pages and roughly **4.6 hours for four epochs**. Unlik
 the 325 K-line corpus at line granularity — 6.4 days per epoch — the continuation
 logic is actually useful at this size: `patience: 2` can decide within a day.
 
+### The generation budget has to match the granularity (#92)
+
+`max_new_tokens` defaulted to a flat **256** while `max_seq_len` scaled with
+granularity. On a page that is about half the text, and the failure is invisible:
+it surfaces as a bad CER, never as an error.
+
+`qwen3vl-sg-missiven-v1` was recorded at **CER 0.5921** with `length_ratio` 0.515.
+The same adapter, re-scored at 1536 tokens, gives **0.2785** at 1.027 — a factor
+of two, entirely in the measurement.
+
+Now resolved per granularity (`VLM_MAX_NEW_TOKENS = {"line": 256, "page": 1536}`,
+`generation_budget()`), and the report carries `truncated_at_cap`: how many
+predictions ran to the cap. Any non-zero value means the CER is a **floor**, not a
+result. If you score by hand, pass the cap yourself:
+
+```bash
+PYTHONPATH=$PWD/src:$PWD/engines .venvs/vlm-train/bin/python -m vlm_train_svc.evaluate_qlora \
+    --adapter <ckpt> --val-jsonl <job>/data/val.jsonl --data-root <job> \
+    --base-model Qwen/Qwen3-VL-8B-Instruct --prompt "…" \
+    --granularity page --max-pixels 2097152 --max-seq-len 4096 \
+    --max-samples 100 --max-new-tokens 1536 --report /tmp/eval.json
+```
+
+`PYTHONPATH` is not optional — the runner sets it, a hand invocation must too.
+
+### What the adapter actually learned
+
+Frobenius norm of `B@A` per projection, over 36 layers — the amount by which each
+base weight is actually shifted:
+
+| projection | ‖B@A‖ | |
+|---|---:|---|
+| `gate_proj` | 2.775 | FFN |
+| `up_proj` | 1.733 | FFN |
+| `down_proj` | 1.169 | FFN |
+| `q_proj` | 0.963 | attention |
+| `o_proj` | 0.883 | attention |
+| `k_proj` | 0.455 | attention |
+| `v_proj` | 0.389 | attention |
+
+**The feed-forward blocks move seven times more than `v_proj`.** The model is not
+learning where to look — attention barely changes — but what to emit. That fits
+HTR: the visual encoder already localises text, and what adapts is the mapping
+onto early modern German orthography.
+
+By depth the picture is a U — 10.3 at layers 0–5, **6.0** at 12–17, 10.6 at 30–35.
+Early layers adapt to the input distribution, late layers to the output
+distribution, and the middle, which carries general language, is left alone. That
+argues against restricting LoRA to the final layers, and for dropping `k_proj` and
+`v_proj`, which are ~28 % of the adapter for the least movement.
+
 ## Serving what you trained
 
 A finished job registers the adapter in `config/models.local.yaml` as

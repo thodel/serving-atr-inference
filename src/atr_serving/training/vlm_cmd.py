@@ -133,7 +133,7 @@ def evaluate_cmd(
             "--report", str(report),
             *_common(params, base_model, data_root),
             "--max-samples", str(params.eval_samples),
-            "--max-new-tokens", str(params.max_new_tokens),
+            "--max-new-tokens", str(params.generation_budget()),
             "--load-in-4bit" if params.load_in_4bit else "--no-load-in-4bit"]
 
 

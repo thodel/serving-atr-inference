@@ -60,7 +60,10 @@ def test_eval_argv_parses(params: VlmTrainParams):
     assert args.adapter == "/scratch/ckpt"
     assert args.report == "/j/data/eval_report.json"
     assert args.max_samples == params.eval_samples
-    assert args.max_new_tokens == params.max_new_tokens
+    # The *resolved* budget, not the raw field: None means "the granularity's
+    # default", the same contract max_pixels and max_seq_len follow. A flat 256
+    # cut every page in half and surfaced only as a doubled CER (#92).
+    assert args.max_new_tokens == params.generation_budget()
     assert args.load_in_4bit is params.load_in_4bit
 
 

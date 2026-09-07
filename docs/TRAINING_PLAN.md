@@ -754,6 +754,64 @@ The obvious next run follows from the table: fine-tune *this* model on Thun's
 1,898 lines. Breadth plus specialisation should beat both, and the data is long
 since compiled.
 
+### 9g. A halved CER that was a halved measurement (2026-09-07)
+
+Two runs finished from §9f's plan, and one of them recorded a number that was
+wrong by a factor of two.
+
+**`kraken-corpus-thun-ft-v1`** did what §9f predicted. Fine-tuning the corpus
+model on Thun's own 1,898 lines, 59 epochs, scored on the same 11,566 characters
+as everything else in this chain:
+
+| model | trained on | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|
+| `thun-kurrent-v2` | 1,898 Thun lines | 0.2180 | 395 | 814 | 1,312 |
+| corpus `best_0.7741` | 325,454 lines, never saw Thun | 0.2138 | 497 | 686 | 1,290 |
+| **`corpus-thun-ft-v1`** | **corpus + 1,898 Thun lines** | **0.2054** | 366 | 798 | 1,212 |
+
+Breadth *plus* specialisation beats either alone — 5.8 % relative over the Thun
+fine-tune, 3.9 % over the corpus model — and it cost hours, not days, because the
+Thun data was long since compiled. Auto-publish correctly declined at 79.46 %
+against the 80 % threshold.
+
+**`qwen3vl-sg-missiven-v1`** recorded **CER 0.5921**, and it was not the model.
+
+The `test` stage ran with `max_new_tokens: 256`, the default, which is the
+line-granularity value. A St. Gallen missive page averages 967 reference
+characters — roughly 500 tokens in this orthography — so every page stopped at
+about half. The report said so plainly and nobody read it that way:
+
+    chars 96,670 | hypothesis_chars 49,793 | length_ratio 0.515
+    insertions 48,188 | deletions 1,311 | substitutions 7,739
+
+48,188 "insertions" are, in this project's convention (§9a), 48,188 characters
+**missing**. The same adapter re-scored at `max_new_tokens: 1536`:
+
+| | at 256 | at 1536 |
+|---|---:|---:|
+| CER | 0.5921 | **0.2785** |
+| `length_ratio` | 0.515 | 1.027 |
+| ins / del / sub | 48,188 / 1,311 / 7,739 | 4,245 / 6,842 / 15,833 |
+
+Nothing about the model changed. The error profile turns over completely —
+omission-dominated becomes substitution-dominated — which is what a full
+transcription looks like next to a truncated one.
+
+**The defect was an inconsistency in the contract**: `VLM_MAX_SEQ_LEN` scaled with
+granularity and `max_new_tokens` did not. Fixed in #92 with
+`VLM_MAX_NEW_TOKENS = {"line": 256, "page": 1536}` and a `generation_budget()`
+resolver, plus a `truncated_at_cap` count in the report and a warning when any
+prediction runs to the cap — because the failure surfaces as a bad CER rather than
+an error, which is the dangerous kind.
+
+The job record was corrected in place, with the superseded values and the reason
+in `request.notes` and the original kept as `job.json.bak-precorrection`.
+
+**Read 0.2785 for what it is.** Page granularity, St. Gallen missives, scored
+against that edition's own `partition` split. It does not belong beside 0.2054 —
+different corpus, different eval set, and transcribing a whole page at once is a
+harder task than reading a cropped line.
+
 ## 10. The full-dataset run (2026-08-08)
 
 The first attempt at all 690 projects, and what it cost to learn that the default

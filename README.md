@@ -73,6 +73,11 @@ fine-tuned on Thun itself. Same `val.arrow`, same 11,566 characters, so the two 
 exactly comparable. 171× the data for 1.9 % is not the story; *transfer* is: four
 unrelated archives now buy what in-domain fine-tuning used to require.
 
+**Breadth plus specialisation beats either** (§9g). `corpus-thun-ft-v1` — the
+corpus model fine-tuned on Thun's own 1,898 lines — reaches **CER 0.2054** on the
+same 11,566 characters, against 0.2138 for the corpus model alone and 0.2180 for
+the Thun-only fine-tune.
+
 **Where the lever is now.** §9c spent the base, §9d spent the epochs, §9e spent the
 engine. What remains is the corpus — and that turned out to be a *selection* problem:
 the dataset every run above drew from is
