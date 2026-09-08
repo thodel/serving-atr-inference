@@ -135,12 +135,17 @@ async def gpu(request: Request) -> dict:
     take from the trainer is the job list, because the useful column is not the
     memory figure — it is whether a process belongs to a job at all.
 
-    Three flags carry the incidents this exists for. ``orphaned`` is a pid holding
+    Four fields carry the incidents this exists for. ``orphaned`` is a pid holding
     memory with no ``/proc`` entry: the data-loader worker that kept a dead
     parent's CUDA context alive for sixteen hours. ``registered`` is false for a
     process belonging to no job the trainer recorded — the hand-started ``ketos``
-    run that displaced a scheduled one. And ``unregistered_mib`` totals what that
-    costs, which is the number a queued job is really waiting for.
+    run that displaced a scheduled one. ``service`` names the systemd unit behind
+    a process, so our own engines are not read as strays: on this box four
+    gunicorn workers of a neighbouring RAG service hold 10 GB on card 0, and a
+    trocr engine holds 1.6 GB on card 1, and only one of those is somebody else's
+    problem. ``unaccounted_mib`` totals what is neither a job nor one of ours —
+    the number a queued job is really waiting for, with the explainable part
+    already taken out.
 
     A card with 0 % utilisation and no free memory is the shape of the problem;
     both numbers are here so nobody has to ssh in to see it.
@@ -177,8 +182,16 @@ async def gpu(request: Request) -> dict:
         procs = [vars(p) for p in card.processes]
         row = {k: v for k, v in vars(card).items() if k != "processes"}
         row["processes"] = procs
-        row["unregistered_mib"] = sum(
-            p["used_mib"] for p in procs if not p["registered"])
+        # What nobody here can explain: not a training job, not one of our
+        # services. An engine holding memory is expected and must not be summed
+        # with a stray, or the number stops meaning anything and the row that
+        # matters gets read past — which is how a sixteen-hour orphan stays
+        # invisible.
+        row["unaccounted_mib"] = sum(
+            p["used_mib"] for p in procs
+            if not p["registered"] and not p["own_service"])
+        row["service_mib"] = sum(
+            p["used_mib"] for p in procs if p["own_service"])
         row["orphaned_mib"] = sum(
             p["used_mib"] for p in procs if p["orphaned"])
         out.append(row)

@@ -30,6 +30,11 @@ from dataclasses import dataclass, field
 #: Give up rather than hang a request on a wedged driver.
 TIMEOUT_S = 8
 
+#: Unit-name prefixes that mark a service as this deployment's own. Everything
+#: else on the card belongs to somebody else and stays in the unaccounted total —
+#: a foreign process displacing a training run is precisely what #414 is about.
+OWN_UNIT_PREFIXES = ("atr-",)
+
 CARD_QUERY = ("index,name,memory.total,memory.used,memory.free,"
               "utilization.gpu,utilization.memory")
 APP_QUERY = "pid,used_gpu_memory,gpu_uuid"
@@ -47,6 +52,13 @@ class Process:
     #: flagging every one of them would bury the signal.
     registered: bool = False
     job_id: str | None = None
+    #: The systemd unit the process belongs to, from its cgroup. Answers the
+    #: question a bare command line does not: whose process is this.
+    service: str | None = None
+    #: One of *our* services rather than someone else's. An engine holding memory
+    #: is expected; the RAG box's gunicorn on the same card is not, and the two
+    #: must not be summed into one number.
+    own_service: bool = False
     user: str | None = None
     age_s: float | None = None
     command: str | None = None
@@ -125,6 +137,29 @@ def _proc_info(pid: int) -> tuple[str | None, float | None, str | None]:
         return None, None, None
 
 
+def _unit_of(pid: int) -> str | None:
+    """The systemd unit owning this pid, from ``/proc/<pid>/cgroup``.
+
+    Read from the cgroup rather than asked of systemd, for two reasons: it needs
+    no privileges and works for other users' processes, and it covers *children*.
+    ``systemctl show -p MainPID`` names one process; an engine's workers and a
+    trainer's data loaders are not it, and those are exactly the rows that would
+    otherwise look unexplained.
+
+        0::/user.slice/.../app.slice/atr-trocr.service   -> atr-trocr.service
+        0::/system.slice/gunicorn.service                -> gunicorn.service
+    """
+    try:
+        with open(f"/proc/{pid}/cgroup", encoding="utf-8") as fh:
+            path = fh.read().strip().rsplit(":", 1)[-1]
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    for part in reversed(path.split("/")):
+        if part.endswith(".service"):
+            return part
+    return None
+
+
 def _ancestors(pid: int, limit: int = 32) -> list:
     """pid and its ancestors, nearest first. Empty when /proc has no such pid."""
     chain, seen = [], set()
@@ -169,9 +204,12 @@ def inspect(job_pids: dict | None = None) -> list:
         user, age, command = _proc_info(pid)
         chain = _ancestors(pid)
         job_id = next((job_pids[p] for p in chain if p in job_pids), None)
+        unit = _unit_of(pid)
         process = Process(
             pid=pid, used_mib=_int(used_s), orphaned=user is None,
             registered=job_id is not None, job_id=job_id,
+            service=unit,
+            own_service=bool(unit and unit.startswith(OWN_UNIT_PREFIXES)),
             user=user, age_s=None if age is None else round(age, 1),
             command=command)
         card = by_uuid.get(uuid)
