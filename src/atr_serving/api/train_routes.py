@@ -126,6 +126,66 @@ async def get_curve(request: Request, job_id: str) -> dict:
     return await _forward(_client(request).curve(job_id))
 
 
+@router.get("/gpu")
+async def gpu(request: Request) -> dict:
+    """What holds GPU memory, and whether the trainer knows about it.
+
+    Read-only, and deliberately not a proxy: the cards are on *this* box, so the
+    gateway reads them directly rather than asking the trainer to. What it does
+    take from the trainer is the job list, because the useful column is not the
+    memory figure — it is whether a process belongs to a job at all.
+
+    Three flags carry the incidents this exists for. ``orphaned`` is a pid holding
+    memory with no ``/proc`` entry: the data-loader worker that kept a dead
+    parent's CUDA context alive for sixteen hours. ``registered`` is false for a
+    process belonging to no job the trainer recorded — the hand-started ``ketos``
+    run that displaced a scheduled one. And ``unregistered_mib`` totals what that
+    costs, which is the number a queued job is really waiting for.
+
+    A card with 0 % utilisation and no free memory is the shape of the problem;
+    both numbers are here so nobody has to ssh in to see it.
+    """
+    from atr_serving import gpu as gpu_probe
+
+    job_pids: dict = {}
+    try:
+        listing = await _forward(_client(request).list_jobs())
+        for job in (listing or {}).get("jobs", []):
+            pid = job.get("pid")
+            if pid:
+                job_pids[int(pid)] = job.get("id")
+    except HTTPException:
+        # The trainer being unreachable must not hide the cards. Everything is
+        # then reported unregistered, which is honest: nothing is known to belong
+        # to a job, and the response says the attribution is missing.
+        job_pids = {}
+        attribution = False
+    else:
+        attribution = True
+
+    try:
+        cards = gpu_probe.inspect(job_pids)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:                     # a wedged driver, a timeout
+        raise HTTPException(
+            status_code=502,
+            detail=f"nvidia-smi failed: {type(exc).__name__}: {exc}") from exc
+
+    out = []
+    for card in cards:
+        procs = [vars(p) for p in card.processes]
+        row = {k: v for k, v in vars(card).items() if k != "processes"}
+        row["processes"] = procs
+        row["unregistered_mib"] = sum(
+            p["used_mib"] for p in procs if not p["registered"])
+        row["orphaned_mib"] = sum(
+            p["used_mib"] for p in procs if p["orphaned"])
+        out.append(row)
+    return {"cards": out, "job_attribution_available": attribution,
+            "known_job_pids": len(job_pids)}
+
+
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(request: Request, job_id: str) -> dict:
     return await _forward(_client(request).cancel(job_id))
