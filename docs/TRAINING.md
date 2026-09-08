@@ -816,6 +816,56 @@ See §8b. If you are streaming (the default), this is asking you to set
 still refuses, the spec has no `eval_projects` — chunking cannot apply without
 them, and the guard says that rather than silently materializing everything.
 
+### A job stays `queued` for VRAM that nothing is using
+
+```
+queued — GPU 1 has 11185 MB free, need 24000 MB
+```
+
+with `nvidia-smi` reporting 0 % utilisation on both cards. The memory is held by a
+process that no longer exists:
+
+```bash
+nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader
+# 2743851, 27530 MiB, [Not Found]        ← the giveaway
+ls -d /proc/2743851                       # gone
+ps -p 2743851                             # no such process
+```
+
+`[Not Found]` means the driver still accounts 27.5 GB to a dead PID. It is **not**
+a driver leak, and it does not need a GPU reset. Look for who still has the device
+open:
+
+```bash
+fuser -v /dev/nvidia1
+#   tobias  2748335  F...m  pt_data_worker      ← ppid 1, orphaned
+```
+
+A PyTorch **data-loader worker** outlived the training process that spawned it.
+Orphaned to `init`, it sleeps in `do_poll` on a pipe whose other end is gone, does
+no work at all — and because it still has `/dev/nvidia1` mapped, the dead parent's
+CUDA context is never torn down. Confirm before killing anything:
+
+```bash
+ps -o pid,ppid,etime,stat,wchan:18,comm -p <worker>    # ppid 1, state S, do_poll
+cut -d' ' -f14,15 /proc/<worker>/stat; sleep 4; cut -d' ' -f14,15 /proc/<worker>/stat
+```
+
+Unchanged CPU ticks over several seconds, no children, no parent: the run it
+belonged to is already over. A plain `kill` releases the memory — 34.3 GB used
+became 1.6 GB in one step. The driver frees the context when the *last* mapper
+goes, so the figure may not move until other processes finish reloading; check
+again after a few seconds rather than concluding it failed.
+
+Reach for `sudo nvidia-smi --gpu-reset -i 1` (with every engine stopped) or a
+reboot only when no such worker exists. On this box the answer has so far always
+been the worker.
+
+**Why it happens here.** The GPU is shared with hand-started runs that the
+scheduler does not know about — `ketos` invoked directly rather than through the
+API. When one of those dies, nothing cleans up after it, and the trainer's VRAM
+guard then queues a legitimate job indefinitely against memory nobody is using.
+
 ### Permissions error on `pip install` during venv rebuild
 
 `TMPDIR` is on the CIFS share — pip stages packages there before installing them,

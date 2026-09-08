@@ -812,6 +812,34 @@ against that edition's own `partition` split. It does not belong beside 0.2054 �
 different corpus, different eval set, and transcribing a whole page at once is a
 harder task than reading a cropped line.
 
+### 9h. The combined page-level corpus (2026-09-08, running)
+
+`qwen3vl-german-pages-v1` puts the four German medieval corpora and the St. Gallen
+missives into one page-level VLM run — ~13,950 pages, ~12,550 of them training.
+
+**Page granularity is forced, not chosen.** The missives come from a TEI edition
+(§11, #91) and have no coordinates, so line crops are impossible for them. Page is
+the only common denominator, which also settles the engine: kraken reads lines.
+
+Parameters, and the evidence behind each departure from the defaults:
+
+| | value | why |
+|---|---|---|
+| `epochs` / `max_epochs` | 1 / 3 | 8.4× the data of the SG-only run, but each epoch costs 8.4× more |
+| `patience` | **1** | §9g's curve turned after a single bad epoch; at ~10 h per epoch, waiting for a second costs half a day for information already in hand |
+| `batch_size` × accum | 1 × 16 | page samples carry 2048 visual tokens against a line's 256 |
+| `max_new_tokens` | **1536, explicit** | the box was ten commits behind and lacked `generation_budget()`; an omitted value would have resolved to the line default of 256 and reproduced §9g's halving over a 29-hour run |
+
+**What was deliberately left alone.** The adapter analysis showed `k_proj` and
+`v_proj` barely move — 28 % of the parameters for the least movement — and
+dropping them is the obvious next experiment. It is not this one. Changing the
+corpus *and* the adapter shape together would make the result uninterpretable,
+which is the rule the whole of §9 was built on.
+
+Estimated at ~9.7 h per epoch from the SG measurement of 44.3 s per step. Treat it
+as an estimate: those pages average 967 reference characters where this corpus
+spans 453 to 1,425.
+
 ## 10. The full-dataset run (2026-08-08)
 
 The first attempt at all 690 projects, and what it cost to learn that the default
