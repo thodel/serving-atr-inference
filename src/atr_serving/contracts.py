@@ -24,6 +24,28 @@ class SegmentResponse(BaseModel):
     segmented_by: str
 
 
+class SecondOpinion(BaseModel):
+    """A parallel transcription from another engine, attached to a result.
+
+    Deliberately **not** a nested ``RecognitionResult``: a second opinion cannot
+    carry a second opinion of its own, and flattening it here keeps that
+    impossible rather than merely unused.
+
+    ``error`` carries an engine failure instead of raising. A second opinion is
+    an addition to the answer, never a precondition for it — if party is down,
+    the caller still gets the transcription it asked for, plus the reason the
+    extra one is missing.
+    """
+
+    engine: str
+    model: str
+    text: str = ""
+    lines: list[Line] = Field(default_factory=list)
+    confidence: float | None = None
+    timing_ms: int = 0
+    error: str | None = None
+
+
 class RecognitionResult(BaseModel):
     model: str
     engine: str
@@ -33,6 +55,10 @@ class RecognitionResult(BaseModel):
     timing_ms: int = 0
     segmented_by: str | None = None
     version: str
+    #: Party runs on every image (config/models.yaml), so every result can carry
+    #: its reading alongside the requested engine's. None when the second opinion
+    #: is switched off, or when party *is* the requested engine.
+    second_opinion: SecondOpinion | None = None
 
 
 class OcrResponse(BaseModel):
@@ -50,3 +76,6 @@ class OcrResponse(BaseModel):
     model: str
     version: str
     lines: int = 0
+    #: See RecognitionResult.second_opinion. KrakenResult maps fields explicitly,
+    #: so the extra key is ignored by existing clients.
+    second_opinion: SecondOpinion | None = None

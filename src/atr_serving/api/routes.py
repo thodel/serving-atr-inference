@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from loguru import logger
 from starlette.concurrency import run_in_threadpool
 
 from atr_serving import __version__
@@ -25,6 +27,7 @@ from atr_serving.api.schemas import (
     ModelsResponse,
     OcrResponse,
     RecognitionResult,
+    SecondOpinion,
     SegmentResponse,
 )
 from atr_serving.clients import EngineError, get_engine_client, get_kraken_client, get_vllm_client
@@ -215,6 +218,33 @@ async def segment(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+async def _party_second_opinion(request: Request, engine: str, raw: bytes,
+                                filename: str, ctype: str) -> SecondOpinion | None:
+    """Party's reading of the same image, for attaching to another engine's result.
+
+    Returns None — not an error — in the two cases where a second opinion is
+    meaningless: the switch is off, or party *is* the engine that was asked for.
+
+    **Never raises.** Party is an addition to the answer; if it fails, the caller
+    still gets the transcription it requested and the reason the extra one is
+    missing. Raising here would turn a working recognition into a 502.
+    """
+    if engine == "party" or not _settings(request).party_second_opinion:
+        return None
+    started = time.perf_counter()
+    try:
+        res = await _engine_client(request, "party").recognize(
+            raw, filename, ctype, model="party"
+        )
+    except Exception as exc:  # noqa: BLE001 - a second opinion may not fail the request
+        logger.warning("party second opinion failed: {}", exc)
+        return SecondOpinion(engine="party", model="party", error=str(exc),
+                             timing_ms=int((time.perf_counter() - started) * 1000))
+    return SecondOpinion(engine="party", model=res.model, text=res.text,
+                         lines=res.lines, confidence=res.confidence,
+                         timing_ms=res.timing_ms or int((time.perf_counter() - started) * 1000))
+
+
 @router.post(
     "/recognize",
     response_model=RecognitionResult,
@@ -245,6 +275,18 @@ async def recognize(
     kraken_ref = (spec.local_path or spec.zenodo_id or spec.id) if spec else model
     trocr_ref = (spec.local_path or spec.hf_repo or spec.id) if spec else model
 
+    # Party reads every image alongside the requested engine. Started here and
+    # awaited at the end, so the two run concurrently: the cost of the second
+    # opinion is the slower of the two, not the sum. It is a task rather than an
+    # awaited call for exactly that reason.
+    party_task = asyncio.ensure_future(
+        _party_second_opinion(request, engine, raw, filename, ctype)
+    )
+
+    async def _with_second_opinion(result: RecognitionResult) -> RecognitionResult:
+        result.second_opinion = await party_task
+        return result
+
     try:
         # kraken & party segment internally → one engine call.
         if engine == "kraken":
@@ -252,15 +294,18 @@ async def recognize(
                 raw, filename, ctype, model=kraken_ref, lines=_parse_lines(lines)
             )
             res.model = model  # echo the id the caller requested
-            return res
+            return await _with_second_opinion(res)
         if engine == "party":
+            party_task.cancel()  # party IS the engine here; no second opinion
             return await _engine_client(request, "party").recognize(
                 raw, filename, ctype, model=model
             )
 
         # trocr is line-level (engine handles one line) → gateway segments + crops.
         if engine == "trocr":
-            return await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref)
+            return await _with_second_opinion(
+                await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref)
+            )
 
         # vLLM: page = one call; line = segment + per-line chat.
         if engine == "vllm":
@@ -269,19 +314,29 @@ async def recognize(
             vclient = _vllm_client(request, port)
             max_tokens = _settings(request).vllm_max_new_tokens
             if spec.level == "page":
-                return await recognize_page_vllm(raw, ctype, spec, vclient, max_tokens)
+                return await _with_second_opinion(
+                    await recognize_page_vllm(raw, ctype, spec, vclient, max_tokens)
+                )
 
             async def _vllm_line(line_img: bytes, line_ct: str) -> str:
                 return await vclient.transcribe_image(
                     spec.id, line_img, line_ct, spec.prompt, max_tokens
                 )
 
-            return await recognize_lines(
-                raw, filename, ctype, model, "vllm", _kraken_client(request), _vllm_line,
-                concurrency=_settings(request).line_concurrency,
+            return await _with_second_opinion(
+                await recognize_lines(
+                    raw, filename, ctype, model, "vllm", _kraken_client(request), _vllm_line,
+                    concurrency=_settings(request).line_concurrency,
+                )
             )
     except EngineError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        # A request that failed, or an engine that never reached the attach step,
+        # must not leave the party call running: the task would outlive the
+        # response and asyncio would report it as destroyed-while-pending.
+        if not party_task.done():
+            party_task.cancel()
 
     raise HTTPException(status_code=501, detail=f"engine '{engine}' not wired yet")
 
@@ -289,6 +344,11 @@ async def recognize(
 @router.post(
     "/ocr",
     response_model=OcrResponse,
+    # exclude_none keeps the legacy projection byte-identical when there is no
+    # second opinion: this shape is what agentic_historian's KrakenResult reads,
+    # and a key that is always null would be noise in every response. It appears
+    # only when it carries something — a reading, or the reason there is none.
+    response_model_exclude_none=True,
     tags=["recognition"],
     dependencies=[Depends(require_api_key)],
 )
@@ -316,6 +376,10 @@ async def ocr(
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
+    # Concurrent with the engine below — see /recognize for why it is a task.
+    party_task = asyncio.ensure_future(
+        _party_second_opinion(request, engine, raw, filename, ctype)
+    )
     try:
         if engine == "kraken":
             # local_path first: a trained model has no DOI (#36).
@@ -331,11 +395,16 @@ async def ocr(
                 status_code=400,
                 detail=f"/ocr supports kraken + trocr (auto-segment); use /recognize for '{engine}'",
             )
+        second = await party_task
     except EngineError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        if not party_task.done():
+            party_task.cancel()
     return OcrResponse(
         text=result.text, confidence=result.confidence or 0.0,
         model=model, version=result.version, lines=len(result.lines),
+        second_opinion=second,
     )
 
 

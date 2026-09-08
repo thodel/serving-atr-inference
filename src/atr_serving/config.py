@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     kraken_url: str = "http://127.0.0.1:8201"
     trocr_url: str = "http://127.0.0.1:8202"
     party_url: str = "http://127.0.0.1:8203"
+    #: Party transcribes every image alongside the requested engine
+    #: (config/models.yaml calls it "always-on"). It costs real latency — its
+    #: decoder generates token by token, measured at ~8 s per line — so this is a
+    #: switch rather than a constant: a slow second opinion must be removable
+    #: without a redeploy.
+    party_second_opinion: bool = True
     # The training service (#34). Not a recognition engine — it is reached only by
     # the /train/* proxy (#35), which is the ONLY way in: atr-train binds
     # 127.0.0.1 and the ufw rule opens :8200 alone to the client host.
