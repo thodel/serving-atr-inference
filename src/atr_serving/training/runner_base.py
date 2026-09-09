@@ -32,6 +32,7 @@ from typing import Any, ClassVar, Protocol
 
 from loguru import logger
 
+from atr_serving.training.artefact_cache import ArtefactCache, ArtefactCacheError
 from atr_serving.training.chunking import CHUNK_PLAN_FILENAME
 from atr_serving.training.contracts import (
     DatasetCounts,
@@ -445,17 +446,30 @@ class BasePipeline(ABC):
         if not spec:
             return
         samples = self._line_samples(job)
-        if not samples:
-            logger.info("line geometry: no PageXML to measure, guard skipped")
-            return
-
         try:
-            measured = aspect_per_char(samples)
+            if samples:
+                measured = aspect_per_char(samples)
+            elif (cached := job.progress.aspect_per_char) is not None:
+                # Reused artefact (#109): the pages are long gone, but the number
+                # they yielded travelled with the artefact. The VGSL spec is a
+                # *train* parameter and so is not part of the cache key — a reused
+                # corpus can arrive under a new spec, which is precisely when this
+                # guard has something to say.
+                measured = cached
+                logger.info("line geometry: measured {:.3f} carried with the reused "
+                            "artefact", measured)
+            else:
+                logger.info("line geometry: no PageXML to measure, guard skipped")
+                return
             verdict = check_line_geometry(spec, measured)
         except LineGeometryError as exc:
             # An unparseable spec is ketos' business to reject, with its own error.
             logger.warning("line geometry: not checked ({})", exc)
             return
+
+        if job.progress.aspect_per_char is None:
+            job.progress.aspect_per_char = measured
+            self.store.save(job)
 
         if verdict.severity == "ok":
             logger.info("line geometry: {}", verdict)
@@ -631,6 +645,134 @@ class BasePipeline(ABC):
                    "registered but disabled"
         )
 
+    # ── reusing a compiled corpus (#109) ────────────────────────────────────
+    def _cache(self) -> ArtefactCache | None:
+        """The artefact cache, or None when this box has it switched off."""
+        if not getattr(self.settings, "artefact_cache", False):
+            return None
+        budget = getattr(self.settings, "artefact_cache_max_gb", 0) or 0
+        return ArtefactCache(self.settings.artefact_cache_root,
+                             max_bytes=int(budget * 1e9) if budget > 0 else None)
+
+    def _cache_key(self, job: TrainJob):
+        """The content key for this job's compiled corpus, or None to not cache.
+
+        None is the default and means "this backend does not reuse artefacts",
+        not "caching is off". A backend may only override this if what its
+        ``_compile`` writes is *relocatable*: the VLM backend's JSONL samples name
+        image paths inside the job directory, so they are not, and it stays out
+        until that is addressed.
+        """
+        return None
+
+    def _adopt_cached(self, job: TrainJob, entry) -> tuple[Any, Any]:
+        """Turn a cache entry back into the artefacts ``_train`` expects."""
+        raise NotImplementedError
+
+    def _cacheable(self, job: TrainJob, train_artifact: Any,
+                   val_artifact: Any) -> Path | None:
+        """The directory to store, or None if this run produced nothing reusable."""
+        return None
+
+    def _reuse_artefact(self, job: TrainJob) -> tuple[Any, Any] | None:
+        """Try to skip prepare and compile entirely. Never fails the job.
+
+        A cache is an optimisation; every way it can go wrong has to end in
+        "compile it then", because a run that fails because of the cache is
+        strictly worse than one that was slow.
+        """
+        cache = self._cache()
+        key = self._cache_key(job) if cache else None
+        if cache is None or key is None:
+            return None
+        try:
+            entry, why = cache.lookup(key)
+        except OSError as exc:
+            logger.warning("artefact cache unreadable ({}), compiling", exc)
+            return None
+        if entry is None:
+            logger.info("artefact cache: {} — compiling {}", why, key)
+            return None
+
+        try:
+            artefacts = self._adopt_cached(job, entry)
+        except (OSError, StageFailed) as exc:
+            logger.warning("artefact cache: {} could not be adopted ({}), compiling",
+                           entry.key[:12], exc)
+            return None
+
+        # The counts the guards read cannot be recomputed — the pages are gone.
+        for field, value in (entry.payload or {}).items():
+            if hasattr(job.progress, field):
+                setattr(job.progress, field, value)
+        job.progress.artefact = (
+            f"{entry.key[:12]} reused, built by "
+            f"{entry.payload.get('job_id') or entry.job_id}")
+        self.store.save(job)
+        logger.info("artefact cache HIT {} ({}) — skipping prepare and compile",
+                    entry.key[:12], why)
+        return artefacts
+
+    def _store_artefact(self, job: TrainJob, train_artifact: Any,
+                        val_artifact: Any) -> tuple[Any, Any]:
+        """Offer what compile just built to the cache. Never fails the job.
+
+        Returns the artefacts to train on. They change: the store **moves** the
+        files rather than copying them — duplicating 41 GB to cache 41 GB is not
+        an optimisation — so what train reads afterwards lives in the cache, and
+        the backend rebinds to it through the same :meth:`_adopt_cached` a later
+        job would use. One path, exercised on the run that fills the cache as well
+        as on the runs that hit it.
+
+        Every failure here returns the original artefacts untouched. A cache is an
+        optimisation, and a run that fails because of one is strictly worse than a
+        run that was slow.
+        """
+        cache = self._cache()
+        key = self._cache_key(job) if cache else None
+        if cache is None or key is None:
+            return train_artifact, val_artifact
+        try:
+            source = self._cacheable(job, train_artifact, val_artifact)
+            if source is None:
+                return train_artifact, val_artifact
+            entry = cache.put(key, source, job_id=job.id, move=True, payload={
+                "train_lines": job.progress.train_lines,
+                "lines_written": job.progress.lines_written,
+                "pages_written": job.progress.pages_written,
+                "aspect_per_char": job.progress.aspect_per_char,
+                "job_id": job.id,
+            })
+            rebound = self._adopt_cached(job, entry)
+            # "Which corpus did this run actually train on" has to stay answerable
+            # from the job record: after this the arrows live in the cache, not in
+            # the job directory anyone would look in first.
+            job.progress.artefact = f"{entry.key[:12]} built by this job"
+            self.store.save(job)
+            logger.info("artefact cache: stored {} ({:.1f} GB)",
+                        entry.key[:12], entry.bytes_ / 1e9)
+            removed, note = cache.evict()
+            if removed:
+                logger.info("artefact cache eviction: {}", note)
+            return rebound
+        except (OSError, ValueError, NotImplementedError, ArtefactCacheError) as exc:
+            logger.warning("artefact cache: not stored ({})", exc)
+            return train_artifact, val_artifact
+
+    def _skip_stage(self, job: TrainJob, name: JobStage, why: str | None) -> None:
+        """Record a stage that did not have to run, rather than one that did.
+
+        A skipped stage must not look like a completed one on the job record: the
+        difference between "compiled in 0 seconds" and "reused an artefact" is the
+        first thing anyone debugging a surprising CER needs to see.
+        """
+        record = StageRecord(name=name, status="completed",
+                             started_at=utcnow(), finished_at=utcnow(),
+                             log=f"skipped: reused artefact {why}")
+        job.stages = [st for st in job.stages if st.name != name] + [record]
+        self.store.save(job)
+        logger.info("stage {} skipped — reused artefact {}", name, why)
+
     # ── entry point ─────────────────────────────────────────────────────────
     def execute(self, job_id: str) -> TrainJob:
         job = self.store.load(job_id)
@@ -639,16 +781,34 @@ class BasePipeline(ABC):
         self.store.save(job)
 
         try:
-            self.store.advance(job, "preparing")
-            with self._stage(job, "prepare"):
-                pages_train, pages_val = self._prepare(job)
+            # #109: an identical selection compiled before is handed straight to
+            # train. Both stages are skipped together — reusing the arrow while
+            # still downloading the pages that produced it would save the ~20
+            # minutes of ketos compile and none of the two hours of prepare.
+            reused = self._reuse_artefact(job)
+            if reused is not None:
+                self.store.advance(job, "preparing")
+                self._skip_stage(job, "prepare", job.progress.artefact)
+                self._guard_convergence(job)
+                self._guard_line_geometry(job)
+                self.store.advance(job, "compiling")
+                self._skip_stage(job, "compile", job.progress.artefact)
+                train_artifact, val_artifact = reused
+            else:
+                self.store.advance(job, "preparing")
+                with self._stage(job, "prepare"):
+                    pages_train, pages_val = self._prepare(job)
 
-            self._guard_convergence(job)
-            self._guard_line_geometry(job)
+                self._guard_convergence(job)
+                self._guard_line_geometry(job)
 
-            self.store.advance(job, "compiling")
-            with self._stage(job, "compile") as rec:
-                train_artifact, val_artifact = self._compile(job, pages_train, pages_val, rec)
+                self.store.advance(job, "compiling")
+                with self._stage(job, "compile") as rec:
+                    train_artifact, val_artifact = self._compile(
+                        job, pages_train, pages_val, rec)
+
+                train_artifact, val_artifact = self._store_artefact(
+                    job, train_artifact, val_artifact)
 
             self.store.advance(job, "training")
             with self._stage(job, "train") as rec:

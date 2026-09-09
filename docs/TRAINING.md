@@ -281,9 +281,9 @@ All job state lives under **`~/atr-cache/training/jobs/<job_id>/`** (set by
     pages/              materialized JPG + PageXML files
     pages_train.lst     ketos manifest (path per line)
     pages_val.lst
-    train.arrow         compiled training set
-    val.arrow           compiled validation set
-    train_bin.lst       single-line manifest → train.arrow
+    train.arrow         compiled training set   ┐ absent when the artefact cache
+    val.arrow           compiled validation set ┘ is on — see §8b-bis
+    train_bin.lst       single-line manifest → train.arrow, or → the cache
     val_bin.lst
   checkpoints/
     best_0.9321.mlmodel  ← promoted to trained/ by the register stage
@@ -305,7 +305,7 @@ All job state lives under **`~/atr-cache/training/jobs/<job_id>/`** (set by
 |---|---|---|
 | `job.json` | yes | record of what ran; needed for reconciliation on restart |
 | `data/pages/` | no | can be re-materialized from the hub; delete after register |
-| `data/*.arrow` | no | re-compilable from pages; delete after register |
+| `data/*.arrow` | no | re-compilable from pages; delete after register. With the artefact cache on (§8b-bis) they are not here at all — they were moved to `~/atr-cache/artefacts/`, which this cleanup must **not** touch |
 | `checkpoints/` | no (only best.mlmodel) | large; re-trainable |
 | `model/` (promoted) | yes | the trained weights |
 | `logs/` | yes | needed for post-mortem on failures |
@@ -522,6 +522,88 @@ Also relevant at this scale: ~548 K pages is ~8 M lines, and at the throughput
 measured on the box one epoch is roughly **15 hours**. A full-corpus run is a
 multi-day job, and the step-count guard (#72) will hold you to a configuration
 that can actually converge at that size.
+
+## 8b-bis. Reusing a compiled corpus across jobs (#109)
+
+Between 24 August and 5 September the same four-dataset German corpus was
+compiled **eight times** — 12,301 pages, 325,768 lines, ~41 GB of arrow, about
+2½ hours each. Five of those runs differed from their predecessor only in a
+hyperparameter the *train* stage reads. The pair on 5 September is the plainest
+case: two jobs twelve minutes apart, identical page and line counts, the second
+rebuilding all 41 GB before failing in the same place as the first.
+
+The trainer now keys the compiled corpus on **what was selected**, and a job
+whose selection has been compiled before skips `prepare` and `compile` entirely.
+
+### What is in the key
+
+| in the key | not in the key |
+|---|---|
+| `hf_repo`, `revision`, `split` | `epochs`, `batch_size`, `lr`, `spec` |
+| `train_projects`, `eval_projects` (as **sets**) | `base_model`, `resize` |
+| `partition`, `seed`, `max_pages`, `granularity` | `model_id`, `device`, `force` |
+| the engine, and `chunk_pages` | everything else the train stage reads |
+
+Project order inside one dataset does not matter — a selection is a set. The
+**order of the datasets does**: a multi-dataset run pools pages with a
+per-dataset index offset, so reordering the list changes which page gets which
+index and therefore how the seeded split falls.
+
+Only **kraken** reuses artefacts. A ketos binary dataset embeds the line images it
+was compiled from, so an `.arrow` can be read from anywhere. The VLM backend's
+JSONL samples name image paths inside the job directory and do not survive being
+moved; it compiles every time until that is addressed.
+
+### Where it lives, and what it costs
+
+`~/atr-cache/artefacts/<key>/`, deliberately **not** under `jobs_root` — the job
+directory is the wrong home for something meant to outlive the job, and cleaning
+up finished jobs (which is how 221 GB of dead arrows were removed on 2026-09-08)
+must not take the cache with it.
+
+The arrows are **moved**, not copied: after `compile`, even the job that built
+them reads them from the cache, and `jobs/<id>/data/` holds only the two
+`*_bin.lst` manifests pointing there. `job.progress.artefact` records which
+artefact a run used and whether it built or reused it, so "which corpus did this
+run actually train on" stays answerable from the job record alone.
+
+### Staleness, and why `revision` matters
+
+`revision: null` means "whatever the dataset is today". An artefact built from
+such a spec is reusable for **7 days**; after that the job compiles again. A spec
+that names a revision is reusable indefinitely, because it cannot have moved.
+Pin the revision on anything you intend to compare runs against — a cache that
+ignored this would serve last month's pages while reporting a fresh compile,
+which is worse than the waste it replaces.
+
+### Eviction
+
+Automatic after every store, against `artefact_cache_max_gb` (default 150), least
+recently used first. **An entry used in the last 72 hours is never evicted**,
+whatever the budget says: nothing tracks which job holds which artefact, and a
+kraken run reads its arrow for the whole of training — going over budget beats
+deleting the corpus out from under a run that is three days into it. When that
+happens the log says so, and the cache sits over budget until the run ends.
+
+To look at it or prune by hand:
+
+```bash
+python scripts/artefact_cache.py                    # what is in there
+python scripts/artefact_cache.py --evict            # apply the budget now
+python scripts/artefact_cache.py --evict --max-gb 80
+python scripts/artefact_cache.py --drop 95b7c717    # remove one, by key prefix
+```
+
+### Turning it off
+
+```bash
+systemctl --user set-environment ATR_TRAIN_ARTEFACT_CACHE=false
+systemctl --user restart atr-train
+```
+
+Every failure path — an unreadable manifest, a missing arrow, a filesystem that
+refuses the move — logs a warning and compiles instead. A run that fails because
+of the cache would be strictly worse than one that was slow.
 
 ## 8c. Choosing what to train on: `scripts/plan_corpus.py` (#87)
 

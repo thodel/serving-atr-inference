@@ -119,6 +119,12 @@ def settings(tmp_path: Path) -> TrainerSettings:
         ketos=tmp_path / "ketos",
         min_free_disk_gb=0.0,
         gpu=1,
+        # Off by default: these tests are about what each stage does, and a cache
+        # hit means two of them do not run. The reuse tests below turn it on
+        # deliberately. The root is redirected regardless, so nothing here can
+        # reach the real ~/atr-cache even if the flag is flipped by accident.
+        artefact_cache=False,
+        artefact_cache_root=tmp_path / "artefacts",
     )
 
 
@@ -564,3 +570,107 @@ class TestChunkedCompile:
                            request=request_with(force=True))
         arrows = (store.paths(job.id).data / "train_bin.lst").read_text().split()
         assert len(arrows) == 1
+
+
+# ── reusing a compiled corpus (#109) ────────────────────────────────────────
+@pytest.fixture
+def caching(settings: TrainerSettings) -> TrainerSettings:
+    """The same settings, with the artefact cache on."""
+    return settings.model_copy(update={"artefact_cache": True})
+
+
+def _compiles(runner: FakeRunner) -> int:
+    return sum(1 for cmd in runner.commands if "compile" in cmd)
+
+
+def test_an_identical_selection_is_not_compiled_twice(store, caching):
+    # The case this exists for: between 24 August and 5 September the same
+    # four-dataset German corpus was compiled eight times, five of those runs
+    # differing only in a parameter the train stage reads.
+    first = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    second_runner = FakeRunner()
+    second = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}),
+                          second_runner, request_with(model_id="kraken-second-v1"))
+
+    assert first.status == "completed" and second.status == "completed", second.error
+    assert _compiles(second_runner) == 0
+    assert second.progress.artefact.endswith(first.id)
+    assert "reused artefact" in _stage_named(second, "compile").log
+    assert "reused artefact" in _stage_named(second, "prepare").log
+
+
+def test_a_reused_run_trains_on_the_cached_arrows(store, caching):
+    # Not copied back into the job: ketos only reads them, and a 41 GB copy per
+    # job would give back most of what the cache saves.
+    run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    second = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}),
+                          FakeRunner(), request_with(model_id="kraken-second-v1"))
+
+    listed = store.paths(second.id).data.joinpath("train_bin.lst").read_text().strip()
+    assert Path(listed).exists()
+    assert Path(listed).is_relative_to(caching.artefact_cache_root)
+
+
+def test_prepare_still_runs_when_the_selection_differs(store, caching):
+    run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    other = request_with(model_id="kraken-other-v1")
+    other.datasets[0].seed = 4242  # a different split of the same pages
+    runner = FakeRunner()
+    job = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), runner, other)
+
+    assert job.status == "completed", job.error
+    assert _compiles(runner) > 0
+    assert "built by this job" in job.progress.artefact
+
+
+def test_the_guards_still_run_against_a_reused_artefact(store, caching):
+    # Skipping prepare deletes what both guards measure. The counts and the
+    # geometry measurement travel with the artefact so they keep working — a VGSL
+    # spec is a *train* parameter and is not part of the key, so a reused corpus
+    # can arrive under a spec the guard has something to say about.
+    first = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    second = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}),
+                          FakeRunner(), request_with(model_id="kraken-second-v1"))
+
+    assert second.progress.train_lines == first.progress.train_lines
+    assert second.progress.aspect_per_char == pytest.approx(first.progress.aspect_per_char)
+
+
+def test_a_cache_that_cannot_be_read_only_costs_time(store, caching):
+    # Every way this can go wrong has to end in "compile it then". A run that
+    # fails because of the cache is strictly worse than one that was slow.
+    run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    for entry in caching.artefact_cache_root.iterdir():
+        (entry / "artefact.json").write_text("{ not json", encoding="utf-8")
+
+    runner = FakeRunner()
+    job = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}),
+                       runner, request_with(model_id="kraken-second-v1"))
+    assert job.status == "completed", job.error
+    assert _compiles(runner) > 0
+
+
+def test_caching_off_compiles_every_time(store, settings):
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    runner = FakeRunner()
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}),
+                 runner, request_with(model_id="kraken-second-v1"))
+    assert _compiles(runner) > 0
+    assert not settings.artefact_cache_root.exists()
+
+
+def _stage_named(job, name):
+    return next(s for s in job.stages if s.name == name)
+
+
+def test_the_run_that_fills_the_cache_moves_its_arrows_there(store, caching):
+    # The store moves rather than copies — duplicating 41 GB to cache 41 GB is
+    # not an optimisation — so the job that built the artefact reads it from the
+    # cache too, through the same path a later job will.
+    job = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    data = store.paths(job.id).data
+
+    assert list(data.glob("*.arrow")) == []
+    listed = data.joinpath("train_bin.lst").read_text().strip()
+    assert Path(listed).is_relative_to(caching.artefact_cache_root)
+    assert "built by this job" in job.progress.artefact

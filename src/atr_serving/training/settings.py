@@ -65,6 +65,22 @@ class TrainerSettings(BaseSettings):
     #: is why the default moved rather than the option disappearing.
     cache_datasets: bool = False
 
+    #: Reuse a compiled corpus across jobs (#109). Between 24 August and
+    #: 5 September the same four-dataset German corpus was compiled eight times —
+    #: 12,300 pages, ~41 GB of arrow, ~2.5 hours each — five of those differing
+    #: from their predecessor only in a hyperparameter the *train* stage reads.
+    #: The cache is keyed on the dataset selection (see
+    #: :mod:`atr_serving.training.artefact_cache`), so those five are one compile.
+    artefact_cache: bool = True
+    #: Deliberately **not** under ``jobs_root``: the job directory is the wrong
+    #: home for something meant to outlive the job, and cleaning up finished jobs
+    #: — which is how 221 GB of dead arrows were removed on 2026-09-08 — must not
+    #: take the cache with it.
+    artefact_cache_root: Path = Path.home() / "atr-cache" / "artefacts"
+    #: Size budget, in GB. 0 disables eviction by size (expired unpinned entries
+    #: are still dropped). Three corpus-scale artefacts is the intent.
+    artefact_cache_max_gb: int = 150
+
     # ── executables ───────────────────────────────────────────────────────
     ketos: Path = REPO_ROOT / ".venvs" / "kraken-train" / "bin" / "ketos"
     #: Where the per-engine venvs live. Each job is spawned with *its own*

@@ -16,12 +16,14 @@ Invoked as::
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
 from loguru import logger
 
 from atr_serving.registry import ModelSpec, load_registry
+from atr_serving.training.artefact_cache import key_for_specs
 from atr_serving.training.base_models import BaseModelError, resolve_base_model
 from atr_serving.training.contracts import Metrics, StageRecord, TrainJob, utcnow
 from atr_serving.training.ketos_cmd import (
@@ -104,6 +106,73 @@ class Pipeline(BasePipeline):
                 )
             out.append(binary_manifest(paths.data / f"{name}_bin.lst", arrow))
         return out[0], out[1]
+
+    # ── reusing a compiled corpus (#109) ────────────────────────────────────
+    #: A ketos binary dataset embeds the line images it was compiled from, so an
+    #: ``.arrow`` is self-contained and can be read from anywhere. That is what
+    #: makes kraken the backend that can do this: the VLM's JSONL samples name
+    #: image paths inside the job directory and do not survive being moved.
+    def _cache_key(self, job: TrainJob):
+        return key_for_specs(job.request.datasets, self.engine, extra={
+            # Chunked and unchunked compile write different numbers of arrows from
+            # the same selection, and the chunk size decides where the boundaries
+            # fall. Everything else ketos compile is given is derived from the
+            # manifest, not from the request.
+            "chunk_pages": self.settings.chunk_pages,
+        })
+
+    def _adopt_cached(self, job: TrainJob, entry) -> tuple[Path, Path]:
+        """Point this job's binary manifests at arrows in the cache.
+
+        The arrows are read where they lie — nothing is copied back. ``ketos``
+        only reads them, and a 41 GB copy per job would give back most of what the
+        cache saves.
+        """
+        paths = self.store.paths(job.id)
+        paths.data.mkdir(parents=True, exist_ok=True)
+        val = entry.path / "val.arrow"
+        train = sorted(entry.path.glob("train*.arrow"))
+        if not train or not val.exists():
+            raise StageFailed(
+                f"cached artefact {entry.key[:12]} has {len(train)} train arrow(s) and "
+                f"{'a' if val.exists() else 'no'} val arrow — not usable")
+        manifests = (binary_manifest(paths.data / "train_bin.lst", train),
+                     binary_manifest(paths.data / "val_bin.lst", val))
+
+        # On the run that *filled* the cache, the job still holds its own copies —
+        # and nothing points at them any more. Dropping one hard link costs
+        # nothing where linking worked; where it did not, it is the 41 GB the copy
+        # cost. On a plain cache hit there is nothing here to remove.
+        for stale in [*paths.data.glob("train*.arrow"), paths.data / "val.arrow"]:
+            if stale.exists():
+                stale.unlink()
+        return manifests
+
+    def _cacheable(self, job: TrainJob, train_bin: Path, val_bin: Path) -> Path | None:
+        """Collect this job's arrows into one directory for the cache to take.
+
+        Hard-linked where the filesystem allows it, copied where it does not —
+        ``/mnt/wbkolleg_dh_1`` is CIFS and refuses links, and this is not the place
+        to discover that. The originals stay in the job directory either way;
+        ``put(move=True)`` then takes this staging directory, not them.
+        """
+        paths = self.store.paths(job.id)
+        arrows = sorted(paths.data.glob("train*.arrow"))
+        val = paths.data / "val.arrow"
+        if not arrows or not val.exists():
+            logger.info("artefact cache: no arrows in {} to store", paths.data)
+            return None
+
+        staging = paths.data / "_cache_stage"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        for source in [*arrows, val]:
+            target = staging / source.name
+            try:
+                os.link(source, target)
+            except OSError:
+                shutil.copy2(source, target)
+        return staging
 
     def _compile_one(self, job: TrainJob, manifest: Path, arrow: Path,
                      record: StageRecord, what: str) -> Path:

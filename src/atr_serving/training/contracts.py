@@ -599,6 +599,16 @@ class Progress(BaseModel):
     #: Per-dataset materialisation counts (pages, skipped, lines, chars).
     #: Supersedes the flat counters above when multiple datasets are used.
     dataset_counts: list[DatasetCounts] = Field(default_factory=list)
+    #: Aspect ratio per character over the prepared lines — what the line-geometry
+    #: guard compares against the VGSL spec. Recorded so it can travel with a
+    #: cached artefact (#109), whose pages are deleted once it is stored.
+    aspect_per_char: float | None = None
+    #: The cached artefact (#109) this run's compiled corpus lives in, and
+    #: whether this job built it or reused one. Set on both paths, because after
+    #: compile the arrows are in the cache rather than in the job directory anyone
+    #: would look in first — "which corpus did this run actually train on" has to
+    #: stay answerable from the job record alone.
+    artefact: str | None = None
 
 
 class StageRecord(BaseModel):

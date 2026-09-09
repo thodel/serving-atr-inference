@@ -91,6 +91,17 @@ against 4,124 for the hand-picked selection). See
 [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) §11 and
 [`docs/TRAINING.md`](docs/TRAINING.md) §8c.
 
+Compiling that corpus takes ~2½ hours and ~41 GB of arrow, and between 24 August and
+5 September it was compiled **eight times** — five of those differing from the run
+before only in a hyperparameter the *train* stage reads. A job's compiled corpus is
+now keyed on what was selected (repo, revision, projects, split, partition, seed,
+granularity — never the training parameters) and reused, so those five are one
+compile. Only kraken: a ketos `.arrow` embeds its line images and can be read from
+anywhere, while the VLM's JSONL samples name paths inside the job directory. An
+artefact built from an unpinned `revision` expires after 7 days, because serving last
+month's pages while reporting a fresh compile would be worse than the waste it
+replaces (#109, [`docs/TRAINING.md`](docs/TRAINING.md) §8b-bis).
+
 **What the first row was.** Every early model, CTC and autoregressive alike, emitted
 *more* characters than the reference contains. Two explanations were possible (#52):
 bad eval material, or a training-design problem. It was the second:
