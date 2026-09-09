@@ -8,13 +8,17 @@ import json
 
 import pytest
 
-from atr_serving.training.contracts import VLM_PIXEL_BUDGET
+from atr_serving.training.contracts import (
+    VLM_MAX_SAMPLE_CHARS,
+    VLM_PIXEL_BUDGET,
+)
 from atr_serving.training.pagexml import line_boxes, parse_points
 from atr_serving.training.textmetrics import cer, score_pairs, wer
 from atr_serving.training.vlm_dataset import (
     Sample,
     VlmDatasetError,
     chat_example,
+    drop_long_samples,
     line_samples,
     page_sample,
     read_jsonl,
@@ -312,3 +316,57 @@ class TestApplyVisualBudget:
     def test_str_is_readable_because_it_is_printed_into_the_job_log(self):
         assert str(apply_visual_budget(qwen3(), 256 * 32 * 32)) == (
             "size.longest_edge=262144 -> ~256 visual tokens (32px cell)")
+
+# ── dropping samples too long to afford (#110) ──────────────────────────────
+def _sample(chars: int, name: str = "p") -> Sample:
+    return Sample(image=f"{name}.jpg", text="x" * chars, source_type="page")
+
+
+def test_a_sample_over_the_cap_is_dropped():
+    result = drop_long_samples([_sample(100), _sample(9000), _sample(200)], 8000)
+    assert result.dropped == 1
+    assert [len(s.text) for s in result.kept] == [100, 200]
+
+
+def test_the_cap_is_inclusive():
+    # 8000 chars is affordable; the cap is the last length that is.
+    assert drop_long_samples([_sample(8000)], 8000).dropped == 0
+    assert drop_long_samples([_sample(8001)], 8000).dropped == 1
+
+
+def test_the_longest_is_measured_before_the_drop():
+    # The outlier is the finding. A record showing only what survived would hide
+    # the 32,477-character page that cost eleven hours.
+    result = drop_long_samples([_sample(100), _sample(32477)], 8000)
+    assert result.max_chars == 32477
+    assert result.dropped == 1
+
+
+def test_the_page_that_killed_the_german_run_would_be_dropped():
+    # 20260908T101611Z-qwen3vl-german-pages-v1: one validation page of 32,477
+    # characters tokenized to 14,411 tokens and asked cross-entropy for 8.16 GiB,
+    # at step 785 of 2355, 11h24m in.
+    corpus = [_sample(383)] * 100 + [_sample(32477)]
+    result = drop_long_samples(corpus, VLM_MAX_SAMPLE_CHARS["page"])
+    assert result.dropped == 1
+    assert all(len(s.text) <= 8000 for s in result.kept)
+
+
+def test_nothing_is_dropped_from_an_ordinary_corpus():
+    # Median 383, p90 ~2,200, p99 ~5,000 — the shape the cap was chosen against.
+    corpus = [_sample(n) for n in (383, 371, 2183, 2275, 4969, 5438)]
+    result = drop_long_samples(corpus, VLM_MAX_SAMPLE_CHARS["page"])
+    assert result.dropped == 0
+    assert result.max_chars == 5438
+
+
+def test_a_mis_segmented_line_is_dropped_at_line_granularity():
+    # A "line" of 1,200 characters is a block the segmenter merged, not a line.
+    result = drop_long_samples([_sample(13), _sample(1200)],
+                               VLM_MAX_SAMPLE_CHARS["line"])
+    assert result.dropped == 1
+
+
+def test_the_filter_says_what_it_did():
+    assert "no sample over the cap" in str(drop_long_samples([_sample(10)], 8000))
+    assert "dropped 1 sample(s)" in str(drop_long_samples([_sample(9000)], 8000))

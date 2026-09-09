@@ -33,7 +33,13 @@ from pathlib import Path
 from loguru import logger
 
 from atr_serving.registry import ModelSpec
-from atr_serving.training.contracts import Metrics, StageRecord, TrainJob, utcnow
+from atr_serving.training.contracts import (
+    VLM_MAX_SAMPLE_CHARS,
+    Metrics,
+    StageRecord,
+    TrainJob,
+    utcnow,
+)
 from atr_serving.training.cropping import write_crops
 from atr_serving.training.manifests import read_manifest
 from atr_serving.training.overlay import upsert_entry
@@ -45,7 +51,11 @@ from atr_serving.training.vlm_cmd import (
     parse_eval_report,
     train_cmd,
 )
-from atr_serving.training.vlm_dataset import samples_for, write_jsonl
+from atr_serving.training.vlm_dataset import (
+    drop_long_samples,
+    samples_for,
+    write_jsonl,
+)
 
 __all__ = ["Pipeline", "main"]
 
@@ -71,8 +81,24 @@ class Pipeline(BasePipeline):
         out: list[Path] = []
         total = 0
 
+        cap = VLM_MAX_SAMPLE_CHARS[params.granularity]
+        dropped_total = longest = 0
+
         for name, manifest in (("train", pages_train), ("val", pages_val)):
             samples = samples_for(read_manifest(manifest), params.granularity, root=paths.root)
+            # Before cropping: a sample too long to afford is dropped whether or
+            # not its image would have cropped cleanly, and cropping it first
+            # would be work thrown away. The *validation* side matters as much as
+            # the training side here — the page that killed
+            # 20260908T101611Z-qwen3vl-german-pages-v1 was in val (#110).
+            filtered = drop_long_samples(samples, cap)
+            samples = filtered.kept
+            dropped_total += filtered.dropped
+            longest = max(longest, filtered.max_chars)
+            if filtered.dropped:
+                logger.warning("{}: {} (cap {} chars at granularity {})",
+                               name, filtered, cap, params.granularity)
+
             if params.granularity == "line":
                 samples = write_crops(samples, paths.root, paths.data / "crops" / name)
             jsonl = paths.data / f"{name}.jsonl"
@@ -88,6 +114,8 @@ class Pipeline(BasePipeline):
             out.append(jsonl)
 
         job.progress.samples_written = total
+        job.progress.long_samples = dropped_total
+        job.progress.max_sample_chars = longest
         self.store.save(job)
         return out[0], out[1]
 

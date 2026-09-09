@@ -271,7 +271,10 @@ def test_checkpoints_go_to_local_scratch_not_the_job_dir(store, settings):
 def test_child_env_pins_the_training_gpu(store, settings):
     runner = FakeRunner()
     run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), runner)
-    assert runner.env == {"CUDA_VISIBLE_DEVICES": "1"}  # GPU 0 (RAG) untouched
+    assert runner.env["CUDA_VISIBLE_DEVICES"] == "1"  # GPU 0 (RAG) untouched
+    # Fragmentation, not the fix for it: 5.72 GiB were reserved-but-unallocated at
+    # the OOM in #110, and the hand-run sweep on the box already set this.
+    assert runner.env["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
 
 
 def test_finetuning_passes_a_local_base_model(store, settings, tmp_path):

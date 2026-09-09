@@ -74,6 +74,28 @@ VLM_MAX_SEQ_LEN: dict[str, int] = {"line": 512, "page": 4096}
 #: characters per token in this orthography, so ~500 tokens; 1536 leaves room for
 #: the long ones without inviting a runaway generation.
 VLM_MAX_NEW_TOKENS: dict[str, int] = {"line": 256, "page": 1536}
+#: Transcription length past which a sample is dropped at compile rather than
+#: trained on (#110). **This is not `VLM_MAX_SEQ_LEN` in other units** — the two
+#: answer different questions, and conflating them is what cost eleven hours.
+#:
+#: `VLM_MAX_SEQ_LEN` is the budget the visual sizing targets; a sample over it is
+#: reported and trained anyway, and samples at 4–8 k tokens trained fine.
+#: This is the point where one sample's loss tensor stops being affordable at
+#: all: cross-entropy upcasts the logits to fp32, so a sequence costs
+#: ``tokens × 151,936 × 4`` bytes in a single allocation.
+#: `20260908T101611Z-qwen3vl-german-pages-v1` died in its eval loop 11 h 24 m in,
+#: at step 785 of 2355, on **one page of 32,477 characters** — 88× the median of
+#: 383 — which tokenized to 14,411 tokens and asked for **8.16 GiB** at once.
+#:
+#: 8,000 was chosen from that corpus's own distribution (13,953 pages: median 383,
+#: p90 ~2,200, p99 ~5,000, max 32,477). It drops **24 samples, 0.17 %**, and caps
+#: the loss allocation at ~3.4 GiB. The next threshold down, 6,000, saves 0.5 GiB
+#: and costs three times as many pages; 12,000 keeps 18 more pages and gives back
+#: a third of the headroom.
+#:
+#: A "line" longer than 1,000 characters is not a line — it is a mis-segmented
+#: block, and it was never going to train usefully.
+VLM_MAX_SAMPLE_CHARS: dict[str, int] = {"line": 1000, "page": 8000}
 
 # A model id doubles as a directory name and a registry id — keep it boring.
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -603,6 +625,12 @@ class Progress(BaseModel):
     #: guard compares against the VGSL spec. Recorded so it can travel with a
     #: cached artefact (#109), whose pages are deleted once it is stored.
     aspect_per_char: float | None = None
+    #: VLM: samples dropped at compile for a transcription past
+    #: ``VLM_MAX_SAMPLE_CHARS``, and the longest one seen *before* the drop (#110).
+    #: Measured before so the record shows what the corpus contained, not what
+    #: survived — the outlier is the finding.
+    long_samples: int | None = None
+    max_sample_chars: int | None = None
     #: The cached artefact (#109) this run's compiled corpus lives in, and
     #: whether this job built it or reused one. Set on both paths, because after
     #: compile the arrows are in the cache rather than in the job directory anyone

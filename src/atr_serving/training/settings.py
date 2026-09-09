@@ -141,14 +141,29 @@ class TrainerSettings(BaseSettings):
     poll_interval_s: int = 10
     #: Lines of a stage log kept on a failed job record.
     log_tail_lines: int = 50
+    #: Passed to every spawned training process. Empty leaves the allocator alone.
+    cuda_alloc_conf: str = "expandable_segments:True"
 
     def min_free_vram_for(self, engine: str) -> int:
         """VRAM a job of this engine must find free before it may start."""
         return self.vlm_min_free_vram_mb if engine == "vllm" else self.min_free_vram_mb
 
     def env_for_child(self) -> dict[str, str]:
-        """Environment overrides for a spawned training process."""
-        return {"CUDA_VISIBLE_DEVICES": str(self.gpu)}
+        """Environment overrides for a spawned training process.
+
+        ``expandable_segments`` because the allocator's fixed-size segments
+        fragment badly under this workload: at the OOM that killed
+        `20260908T101611Z-qwen3vl-german-pages-v1`, **5.72 GiB were reserved by
+        PyTorch but unallocated** — most of the 8.16 GiB the run then could not
+        find. It is not a fix for that failure (one 8 GiB allocation is one
+        allocation however the heap is arranged, which is what #110's compile-time
+        cap addresses), but it is free, and the hand-run sweep on this box had
+        already been setting it.
+        """
+        return {
+            "CUDA_VISIBLE_DEVICES": str(self.gpu),
+            "PYTORCH_CUDA_ALLOC_CONF": self.cuda_alloc_conf,
+        }
 
 
 _settings: TrainerSettings | None = None

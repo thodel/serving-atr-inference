@@ -207,6 +207,55 @@ def samples_for(
     return out
 
 
+@dataclass(frozen=True)
+class LengthFilter:
+    """What :func:`drop_long_samples` kept, and what it found."""
+
+    kept: list["Sample"]
+    dropped: int
+    max_chars: int
+
+    def __str__(self) -> str:
+        if not self.dropped:
+            return f"no sample over the cap (longest {self.max_chars} chars)"
+        return (f"dropped {self.dropped} sample(s) over the cap; the longest was "
+                f"{self.max_chars} chars")
+
+
+def drop_long_samples(samples: Iterable["Sample"], max_chars: int) -> LengthFilter:
+    """Remove samples whose transcription cannot be afforded (#110).
+
+    Cross-entropy upcasts the logits to fp32, so one sample costs
+    ``tokens × vocab × 4`` bytes in a **single** allocation — 8.16 GiB for the
+    14,411-token page that killed `20260908T101611Z-qwen3vl-german-pages-v1` in
+    its eval loop, eleven hours in. There is nothing to be done about it at train
+    time: truncating a multimodal sequence severs the image tokens from the
+    placeholders that index them and produces an invalid sample rather than a
+    shorter one (#86), and a batch of one cannot drop its only member.
+
+    So it is done here, where a page can simply not become a sample, and where the
+    cost is visible before any GPU time is spent. The same shape of fix as
+    ``drop_wide_lines`` (#90), for the same shape of problem: the median is fine
+    and the tail is fatal.
+
+    ``max_chars`` counts characters rather than tokens because tokenizing the
+    corpus would mean loading the processor into the supervising service, which
+    imports no engine on purpose. At roughly 2 characters per token in this
+    orthography the estimate is conservative in the safe direction.
+    """
+    kept: list[Sample] = []
+    dropped = 0
+    longest = 0
+    for sample in samples:
+        length = len(sample.text)
+        longest = max(longest, length)
+        if length > max_chars:
+            dropped += 1
+            continue
+        kept.append(sample)
+    return LengthFilter(kept=kept, dropped=dropped, max_chars=longest)
+
+
 def _relative(path: Path, root: str | Path | None) -> str:
     """Path relative to ``root`` when it is under it, else absolute.
 

@@ -868,6 +868,68 @@ caching, set `HF_DATASETS_CACHE` to local disk, not the share.
 for the create/delete churn of temporary compilation dirs. Move `TMPDIR` to local
 disk and re-submit.
 
+### VLM job OOMs hours in, on one allocation of several GiB (#110)
+
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 8.16 GiB.
+ 33%|███▎      | 785/2355 [11:24:48<22:49:37, 52.34s/it]
+```
+
+**Look for this line in `logs/train.log` before assuming contention:**
+
+```
+warning: a sample tokenized to 14411 tokens, over max_seq_len=4096
+```
+
+Cross-entropy upcasts the logits to fp32, so **one** sample costs
+`tokens × 151,936 × 4` bytes in a single allocation: 8.16 GiB at 14,411 tokens.
+That is what killed `20260908T101611Z-qwen3vl-german-pages-v1` — a single
+validation page of **32,477 characters**, 88× that corpus's median of 383. Batch
+size was already 1; there was nothing to lower.
+
+Same lesson as the kraken OOMs, and it took two goes to learn: **the median is
+fine and the tail is fatal.** Look at the distribution before touching
+`batch_size`.
+
+Compile now drops samples over `VLM_MAX_SAMPLE_CHARS` (8,000 at page
+granularity, 1,000 at line) and the job record carries what it cost:
+
+```bash
+curl -s localhost:8204/jobs/$JOB_ID | python3 -c 'import sys,json
+p=json.load(sys.stdin)["progress"]
+print(p["long_samples"], "dropped; longest was", p["max_sample_chars"], "chars")'
+```
+
+On the German corpus that is 24 of 13,953 pages — **0.17 %** — and it caps the
+loss allocation at ~3.4 GiB. If a run drops more than a per cent or two, the cap
+is wrong for that material rather than the material being wrong; raise it and
+watch the token warnings.
+
+Note that `max_seq_len` is **not** this cap and is not meant to be. It is the
+budget the visual sizing targets; a sample over it is reported and trained
+anyway, and samples at 4–8 k tokens trained fine. Conflating the two is what made
+this look like a contention problem.
+
+### A training run and the serving engines are on the same GPU
+
+All five units pin `CUDA_VISIBLE_DEVICES=1`, and `vllm_gpu` defaults to 1 too, so
+`atr-kraken`, `atr-trocr`, `atr-party`, the gateway's resident vLLM and the
+trainer all target the same card. GPU 0 carries only the `change`-user RAG
+service (~10 GB of 46).
+
+This did not cause the OOM above, but it removed the margin that would have
+absorbed it: `atr-party` started **4 h 50 m into that run** and took 4.49 GiB,
+leaving 7.78 GiB free against an 8.16 GiB request. The VRAM preflight cannot see
+this coming — it runs at job start, which for a corpus-scale run is over two
+hours before `train` touches the GPU.
+
+Check before starting a long run, and consider moving the serving engines to
+GPU 0:
+
+```bash
+nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv
+```
+
 ### VLM job dies at step 2 with `Mismatch in image token count` (#86)
 
 ```

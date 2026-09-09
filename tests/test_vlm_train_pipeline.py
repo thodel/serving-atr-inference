@@ -15,7 +15,12 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from atr_serving.training.contracts import DatasetSpec, TrainRequest, VlmTrainParams
+from atr_serving.training.contracts import (
+    VLM_MAX_SAMPLE_CHARS,
+    DatasetSpec,
+    TrainRequest,
+    VlmTrainParams,
+)
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.overlay import load_overlay
 from atr_serving.training.settings import TrainerSettings
@@ -60,9 +65,13 @@ REPORT = {
 class FakeSource:
     """Yields dataset rows shaped like the real ``Image(decode=False)`` column."""
 
-    def __init__(self, per_role: dict[str, int], empty_every: int | None = None) -> None:
+    def __init__(self, per_role: dict[str, int], empty_every: int | None = None,
+                 long_page_chars: int | None = None) -> None:
         self.per_role = per_role
         self.empty_every = empty_every
+        #: Make the first page of each role carry a transcription this long, to
+        #: stand in for the 32,477-character page that killed the German run.
+        self.long_page_chars = long_page_chars
         self.calls: list[tuple[str, list[str]]] = []
 
     def stream(self, hf_repo, data_files, revision=None):
@@ -70,9 +79,13 @@ class FakeSource:
         role = "eval" if any(THUN_TEST in f for f in data_files) else "train"
         for i in range(self.per_role.get(role, 0)):
             empty = self.empty_every is not None and i % self.empty_every == 0
+            xml = EMPTY_XML if empty else PAGE_XML
+            if self.long_page_chars and i == 0 and not empty:
+                xml = PAGE_XML.replace("Item ontfaen van Janne",
+                                       "w" * self.long_page_chars)
             yield {
                 "image": {"bytes": _jpeg_bytes(), "path": f"{i}.jpg"},
-                "xml_content": EMPTY_XML if empty else PAGE_XML,
+                "xml_content": xml,
                 "filename": f"{role}_{i}.jpg",
                 "project_name": THUN_TRAIN if role == "train" else THUN_TEST,
             }
@@ -287,7 +300,10 @@ def test_checkpoints_go_to_local_scratch_not_the_job_dir(store, settings):
 def test_child_env_pins_the_training_gpu(store, settings):
     runner = FakeRunner()
     run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), runner)
-    assert runner.env == {"CUDA_VISIBLE_DEVICES": "1"}  # GPU 0 (RAG) untouched
+    assert runner.env["CUDA_VISIBLE_DEVICES"] == "1"  # GPU 0 (RAG) untouched
+    # Fragmentation, not the fix for it: 5.72 GiB were reserved-but-unallocated at
+    # the OOM in #110, and the hand-run sweep on the box already set this.
+    assert runner.env["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
 
 
 # ── failure modes: nothing may report success it did not earn ───────────────
@@ -392,3 +408,50 @@ def test_a_failed_job_registers_nothing(store, settings):
                  FakeRunner(fail_on="train"))
     assert load_overlay(settings.overlay_path) == []
     assert not settings.trained_root.joinpath("qwen3vl-thun-v1").exists()
+
+
+# ── samples too long to afford (#110) ───────────────────────────────────────
+def test_an_unaffordable_page_is_dropped_at_compile(store, settings):
+    # One page of 32,477 characters tokenized to 14,411 tokens and asked
+    # cross-entropy for 8.16 GiB in a single allocation, killing
+    # 20260908T101611Z-qwen3vl-german-pages-v1 at step 785 of 2355, 11h24m in.
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, long_page_chars=32477),
+                       FakeRunner(), request)
+
+    assert job.status == "completed", job.error
+    samples = list(read_jsonl(store.paths(job.id).data / "train.jsonl"))
+    assert len(samples) == 3  # the fourth was the long one
+    assert all(len(s.text) <= VLM_MAX_SAMPLE_CHARS["page"] for s in samples)
+
+
+def test_the_validation_side_is_filtered_too(store, settings):
+    # The page that killed the German run was in val, not train — it died in the
+    # eval loop at 927/1396.
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, long_page_chars=32477),
+                       FakeRunner(), request)
+    val = list(read_jsonl(store.paths(job.id).data / "val.jsonl"))
+    assert all(len(s.text) <= VLM_MAX_SAMPLE_CHARS["page"] for s in val)
+
+
+def test_the_drop_and_the_outlier_land_on_the_job_record(store, settings):
+    # Measured before the drop: the record has to show what the corpus contained,
+    # not what survived. The outlier is the finding.
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, long_page_chars=32477),
+                       FakeRunner(), request)
+
+    assert job.progress.long_samples == 2  # one per role
+    assert job.progress.max_sample_chars >= 32477
+
+
+def test_an_ordinary_corpus_loses_nothing(store, settings):
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}),
+                       FakeRunner(), request)
+    assert job.progress.long_samples == 0
+    assert job.progress.max_sample_chars == len("Item ontfaen van Janne\nvan der Straten")
