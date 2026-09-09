@@ -544,3 +544,122 @@ Both are free, and neither needs anything we do not already have.
 7. Is `modules_to_save: ["lm_head"]` worth it here? On a dedicated card it is
    affordable (~620 M extra trainable params) and the medieval character
    repertoire is exactly the case `VLM_TRAINING.md` says it helps.
+
+---
+
+## 9. Proposal, 2026-09-09: what to run on UBELIX next
+
+Written after the corpus-scale runbook (`VLM_TRAINING.md` §5, four failed attempts on
+asterAIx) and after checking what the Qwen3.5/3.8 line would actually require.
+
+### 9.1 The recent tests move the goalposts — my §4 estimates were ~3× optimistic
+
+`VLM_TRAINING.md` §5 measures a **325 K-line** corpus on asterAIx at **0.67 samples/s**
+— three times worse than the 1.94 samples/s of the Thun smoke test that every estimate
+in §4 of this document was extrapolated from. One epoch took **6.4 days**.
+
+The runbook names two candidate causes and states plainly that **they have not been
+separated**:
+
+1. **IO** — `compile` writes 337,623 individual JPEGs to the CIFS share and `train`
+   reads them back one at a time.
+2. **Longer lines** — median aspect 9.9 against Thun's much squarer crops, so more
+   visual tokens per sample at the same budget.
+
+Corrected, this is what the full medieval set costs on 4× H100:
+
+| anchored on | samples/s (4× H100) | one epoch over 8 M lines | 3 epochs |
+|---|---:|---:|---:|
+| Thun smoke test (§4) | ~41 | 2.3 days | **6.8 days** |
+| **corpus-scale run (§5)** | **~14** | **6.6 days** | **20 days** |
+
+**That gap is the whole decision, and one cheap experiment resolves it.**
+
+### 9.2 Experiment A — the NVMe question. Do this first.
+
+The runbook says copying the crops to local disk "is the obvious experiment and has not
+been run". On asterAIx it is awkward; **on UBELIX it is free and native**: every GPU
+node has **1.92 TB of local NVMe at `/scratch/local`**, and §5 of this document already
+specifies staging there.
+
+Same corpus, same model, same seed, two jobs on one RTX 4090 or H100, a few hours each:
+
+| arm | crops live on | measures |
+|---|---|---|
+| A1 | `/scratch/network` (shared, like the CIFS baseline) | the IO-bound hypothesis |
+| A2 | `/scratch/local` (node NVMe, staged in the prologue) | the compute-bound floor |
+
+If A2 ≈ A1, the cost is visual tokens and the answer is to cut the budget or the
+aspect cap. If A2 ≫ A1, the cost is IO and the sharding work in §3.2 is worth far more
+than any hyperparameter. **Either result changes the plan; the run is free; nothing
+else should be started before it.** It is also model-independent, so it is not wasted
+if the base model changes.
+
+### 9.3 Qwen3.5 / Qwen3.8 — possible, but it breaks a pin the repo defends
+
+The Qwen3.5 line **folded vision into the base models**: there is no separate `-VL`
+variant any more, and every checkpoint is `image-text-to-text`. Qwen3.8-27B is the
+newest member and shares the architecture id, so it is the *same* code path.
+
+| model | arch id | safetensors | released | note |
+|---|---|---:|---|---|
+| Qwen3-VL-8B-Instruct | `qwen3_vl` | 17 GB | Oct 2025 | **what we train today** |
+| **Qwen3.5-9B** | `qwen3_5` | 19.3 GB | Feb 2026 | like-for-like successor |
+| Qwen3.5-4B | `qwen3_5` | 9.3 GB | Feb 2026 | cheap, for the A/B |
+| Qwen3.5-27B | `qwen3_5` | 55.6 GB | Feb 2026 | |
+| **Qwen3.8-27B** | `qwen3_5` | 55.6 GB | Aug 2026 | newest, most popular |
+| Qwen3.5-35B-A3B | `qwen3_5_moe` | 71.9 GB | Feb 2026 | 3 B active — cheap to train, **unservable here** |
+
+**The blocker, measured not guessed.** Our container's transformers 4.57.6 raises
+`does not recognize this architecture: qwen3_5`. And **the 4.x line ended at 4.57.6 on
+2026-01-16, before Qwen3.5 shipped** — so `qwen3_5` exists *only* in transformers 5.x.
+That collides head-on with `engines/vlm_train_svc/requirements.txt`, which pins
+`transformers>=4.57,<5` and says the cap is there because the trainer is written
+against the 4.x surface: *"Lift the cap only together with a run that actually trains
+on 5.x."*
+
+Verified on the cluster: **transformers 5.16.1 resolves `qwen3_5`, `qwen3_5_moe` **and**
+still `qwen3_vl`.** One rebuilt container can therefore run the old and new base models,
+which is what makes an honest A/B possible instead of a leap.
+
+The port surface is small and fully enumerated — `AutoModelForImageTextToText`,
+`AutoProcessor`, `Trainer`, `TrainingArguments`, `BitsAndBytesConfig`, `TrainerCallback`,
+`set_seed`. Notably `Trainer(...)` never passes `tokenizer=`, so the rename that breaks
+most 5.x ports does not apply here.
+
+### 9.4 The thinking-mode trap
+
+**Qwen3.8 runs in thinking mode by default**, emitting `<think>…</think>` before the
+answer. For one line of handwriting that is pure cost, and it collides directly with
+#92 — the generation budget that must scale with granularity. It has to be switched off
+at the four `apply_chat_template` call sites (`train_qlora.py` 123/125/150,
+`evaluate_qlora.py` 128) with `enable_thinking: False`, and a smoke run has to **confirm
+no `<think>` token reaches the reference text**. A thinking model that reasons its way
+to a transcription would also make CER incomparable with every number we have.
+
+### 9.5 Recommendation
+
+**Target Qwen3.5-9B, not the 27B.** It is the like-for-like replacement for
+Qwen3-VL-8B, so a CER against the same eval set means something next to 0.466; it fits
+**bf16 on one 96 GB H100**, which drops NF4 and with it the misaligned-bitsandbytes
+penalty documented in the 2026-08-08 run; and it is ~3× cheaper per sample than a 27B.
+At corpus scale that is the difference between a feasible campaign and a 60-day one.
+
+Keep **Qwen3.8-27B for a subsample probe only** — a quality ceiling on ~50 K lines, not
+the corpus run. And note the MoE option honestly: **Qwen3.5-35B-A3B** trains at roughly
+a 3 B dense cost for 35 B of capacity, which is tempting, but nothing we operate can
+serve it (`VLM_TRAINING.md` already records this for the 30B MoE).
+
+### 9.6 Order of work
+
+| # | step | GPU cost | gate |
+|---|---|---|---|
+| A | **NVMe vs share throughput**, current model, current container | ~4 h, free | decides whether the corpus run is 7 or 20 days |
+| B | Rebuild the container on **transformers 5.x**; re-run the Thun smoke on `qwen3_vl` | ~10 min, free | **CER must land at 0.466 again** — proves 5.x changed nothing |
+| C | Same smoke on **Qwen3.5-9B**, thinking disabled, `<think>` asserted absent | ~15 min, free | first honest old-vs-new number |
+| D | Corpus chosen by `scripts/plan_corpus.py`, **not by hand** (§2 of the runbook: 21 hand-picked projects yielded 291 usable pages) | — | a submittable request |
+| E | Subsample run, 4× H100 preemptable, checkpoint-and-requeue proven first | ~90 GPU-h, free | the model we ship |
+
+B is the one people skip. Changing the base model and the library in the same step
+means a worse CER has two possible causes and no way to tell them apart — which is the
+mistake `TRAINING_PLAN.md` §9 exists to prevent.
