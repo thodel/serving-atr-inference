@@ -16,7 +16,6 @@ Invoked as::
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -148,13 +147,15 @@ class Pipeline(BasePipeline):
                 stale.unlink()
         return manifests
 
-    def _cacheable(self, job: TrainJob, train_bin: Path, val_bin: Path) -> Path | None:
-        """Collect this job's arrows into one directory for the cache to take.
+    def _cacheable(self, job: TrainJob, train_bin: Path, val_bin: Path
+                   ) -> list[Path] | None:
+        """The arrows this run compiled, for the cache to collect.
 
-        Hard-linked where the filesystem allows it, copied where it does not —
-        ``/mnt/wbkolleg_dh_1`` is CIFS and refuses links, and this is not the place
-        to discover that. The originals stay in the job directory either way;
-        ``put(move=True)`` then takes this staging directory, not them.
+        The files themselves, not a directory staged next to them: ``jobs_root``
+        is on the CIFS share and the cache is in ``/home``, so gathering them
+        first and moving the result would send 41 GB over SMB twice. The originals
+        are left in place — :meth:`_adopt_cached` removes them once the store has
+        succeeded and this job's manifests point at the cache instead.
         """
         paths = self.store.paths(job.id)
         arrows = sorted(paths.data.glob("train*.arrow"))
@@ -162,17 +163,7 @@ class Pipeline(BasePipeline):
         if not arrows or not val.exists():
             logger.info("artefact cache: no arrows in {} to store", paths.data)
             return None
-
-        staging = paths.data / "_cache_stage"
-        shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True)
-        for source in [*arrows, val]:
-            target = staging / source.name
-            try:
-                os.link(source, target)
-            except OSError:
-                shutil.copy2(source, target)
-        return staging
+        return [*arrows, val]
 
     def _compile_one(self, job: TrainJob, manifest: Path, arrow: Path,
                      record: StageRecord, what: str) -> Path:

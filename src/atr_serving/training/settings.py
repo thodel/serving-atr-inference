@@ -78,8 +78,10 @@ class TrainerSettings(BaseSettings):
     #: take the cache with it.
     artefact_cache_root: Path = Path.home() / "atr-cache" / "artefacts"
     #: Size budget, in GB. 0 disables eviction by size (expired unpinned entries
-    #: are still dropped). Three corpus-scale artefacts is the intent.
-    artefact_cache_max_gb: int = 150
+    #: are still dropped). Two corpus-scale artefacts is the intent: the cache
+    #: sits on the box's system disk (457 GB free), not on the 12 TB share, so
+    #: this is a real constraint rather than a formality.
+    artefact_cache_max_gb: int = 100
 
     # ── executables ───────────────────────────────────────────────────────
     ketos: Path = REPO_ROOT / ".venvs" / "kraken-train" / "bin" / "ketos"

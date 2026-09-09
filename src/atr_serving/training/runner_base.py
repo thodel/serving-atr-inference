@@ -736,7 +736,11 @@ class BasePipeline(ABC):
             source = self._cacheable(job, train_artifact, val_artifact)
             if source is None:
                 return train_artifact, val_artifact
-            entry = cache.put(key, source, job_id=job.id, move=True, payload={
+            # Copied, not moved: the originals stay put until the store has
+            # succeeded, and `_adopt_cached` removes them only once this job's
+            # manifests point at the cache. A failed move would otherwise leave a
+            # job holding manifests for arrows that are no longer anywhere.
+            entry = cache.put(key, source, job_id=job.id, payload={
                 "train_lines": job.progress.train_lines,
                 "lines_written": job.progress.lines_written,
                 "pages_written": job.progress.pages_written,

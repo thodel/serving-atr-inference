@@ -261,3 +261,28 @@ def test_eviction_with_no_budget_only_drops_expired(tmp_path):
     cache.put(key_for(spec(revision="abc"), "kraken"), artefact(tmp_path, size=10**6))
     removed, note = cache.evict()
     assert removed == [] and "no size budget" in note
+
+
+def test_put_can_collect_named_files(tmp_path):
+    # The form the trainer uses: jobs_root is on the CIFS share and the cache is
+    # in /home, so staging the arrows next to the job and moving that afterwards
+    # would send 41 GB over SMB twice.
+    cache = ArtefactCache(tmp_path / "cache")
+    source = artefact(tmp_path)
+    (source / "val.arrow").write_bytes(b"v" * 16)
+    entry = cache.put(key_for(spec(revision="abc"), "kraken"),
+                      [source / "train.arrow", source / "val.arrow"])
+
+    assert sorted(p.name for p in entry.path.glob("*.arrow")) == ["train.arrow", "val.arrow"]
+    assert (source / "train.arrow").exists()  # originals untouched
+    assert entry.bytes_ == 48
+
+
+def test_put_refuses_a_file_list_with_a_gap(tmp_path):
+    cache = ArtefactCache(tmp_path / "cache")
+    source = artefact(tmp_path)
+    with pytest.raises(ArtefactCacheError):
+        cache.put(key_for(spec(), "kraken"),
+                  [source / "train.arrow", source / "missing.arrow"])
+    assert not [p for p in (tmp_path / "cache").iterdir() if p.name.startswith(".incoming")] \
+        if (tmp_path / "cache").is_dir() else True

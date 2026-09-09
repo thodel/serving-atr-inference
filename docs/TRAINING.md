@@ -561,11 +561,20 @@ directory is the wrong home for something meant to outlive the job, and cleaning
 up finished jobs (which is how 221 GB of dead arrows were removed on 2026-09-08)
 must not take the cache with it.
 
-The arrows are **moved**, not copied: after `compile`, even the job that built
-them reads them from the cache, and `jobs/<id>/data/` holds only the two
-`*_bin.lst` manifests pointing there. `job.progress.artefact` records which
-artefact a run used and whether it built or reused it, so "which corpus did this
-run actually train on" stays answerable from the job record alone.
+The arrows **end up there, not in the job**: after `compile`, even the run that
+built them reads them from the cache, and `jobs/<id>/data/` keeps only the two
+`*_bin.lst` manifests pointing at it. They are copied across and the originals
+deleted afterwards, rather than moved — a move that failed partway would leave a
+job holding manifests for arrows that are no longer anywhere.
+
+This is a cross-filesystem copy on asterAIx: `jobs_root` is on the CIFS share and
+the cache is on the system disk. The files are handed to the cache individually
+for exactly that reason — gathering them into a staging directory beside the job
+first would send 41 GB over SMB twice.
+
+`job.progress.artefact` records which artefact a run used and whether it built or
+reused it, so "which corpus did this run actually train on" stays answerable from
+the job record alone.
 
 ### Staleness, and why `revision` matters
 
@@ -578,7 +587,8 @@ which is worse than the waste it replaces.
 
 ### Eviction
 
-Automatic after every store, against `artefact_cache_max_gb` (default 150), least
+Automatic after every store, against `artefact_cache_max_gb` (default 100 — the cache sits on the box's
+system disk, not on the 12 TB share), least
 recently used first. **An entry used in the last 72 hours is never evicted**,
 whatever the budget says: nothing tracks which job holds which artefact, and a
 kraken run reads its arrow for the whole of training — going over budget beats

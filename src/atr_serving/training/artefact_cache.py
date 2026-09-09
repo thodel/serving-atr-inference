@@ -250,26 +250,45 @@ class ArtefactCache:
             pass
 
     # ── writing ─────────────────────────────────────────────────────────────
-    def put(self, key: ArtefactKey, source: str | Path, *,
+    def put(self, key: ArtefactKey, source: str | Path | Sequence[str | Path], *,
             job_id: str | None = None, move: bool = False,
             payload: dict[str, Any] | None = None) -> CacheEntry:
-        """Store ``source`` (a directory) under ``key``.
+        """Store ``source`` under ``key``: a directory, or the files to collect.
 
-        Written to a temporary name and renamed, so a crash mid-copy cannot leave
-        a half-artefact that a later lookup would serve as complete.
+        The **file-list form is the one the trainer uses**, and it exists because
+        of where this box puts things: ``jobs_root`` is on the CIFS share and the
+        cache is in ``/home``. Gathering the arrows into a staging directory next
+        to the job first, and only then moving that to the cache, would send 41 GB
+        over SMB twice. Given the files directly, each one is copied once, to its
+        final filesystem.
+
+        Either way the write goes to a temporary name and is renamed into place,
+        so a crash partway cannot leave a half-artefact that a later lookup would
+        serve as complete: a directory that has a manifest is a whole one.
         """
-        source = Path(source)
-        if not source.is_dir():
-            raise ArtefactCacheError(f"not a directory: {source}")
         self.root.mkdir(parents=True, exist_ok=True)
         final = self._dir(key)
         staging = self.root / f".incoming-{key.digest[:16]}-{os.getpid()}"
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
-        if move:
-            shutil.move(str(source), str(staging))
+
+        if isinstance(source, (str, Path)):
+            source = Path(source)
+            if not source.is_dir():
+                raise ArtefactCacheError(f"not a directory: {source}")
+            if move:
+                shutil.move(str(source), str(staging))
+            else:
+                shutil.copytree(source, staging)
         else:
-            shutil.copytree(source, staging)
+            files = [Path(f) for f in source]
+            missing = [f for f in files if not f.is_file()]
+            if not files or missing:
+                raise ArtefactCacheError(
+                    f"cannot store {len(files)} file(s): {missing or 'none given'}")
+            staging.mkdir(parents=True)
+            for one in files:
+                (shutil.move if move else shutil.copy2)(str(one), str(staging / one.name))
 
         size = sum(f.stat().st_size for f in staging.rglob("*") if f.is_file())
         (staging / self.MANIFEST).write_text(json.dumps({
