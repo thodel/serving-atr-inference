@@ -252,3 +252,58 @@ configuration (~52 GPU-hours) would settle it.
 **For a production model: height 192, LSTM width 200.** And the ordering of the three
 earlier runs is now fully explained — run 3 (h120) beat run 2 and kraken+ (both h64)
 because of the height, not the architecture.
+
+
+## 8. Replication with a second seed (2026-09-07/09) — the §7 finding does not survive
+
+§7 concluded that height beats capacity at matched parameters, from one run per cell.
+Repeating four of those cells with `seed 43`, everything else identical:
+
+| configuration | seed 42 | seed 43 | Δ |
+|---|---:|---:|---:|
+| h128, Lbx200 *(same config twice — the noise floor)* | 0.7355 | 0.7440 | **+0.0085** |
+| h128, Lbx224 | 0.7346 | 0.7352 | +0.0006 |
+| h192, Lbx200 | 0.7494 | **0.7272** | −0.0222 |
+| h256, Lbx200 | 0.7515 | **0.5591** | **−0.1924** |
+
+*(h128/Lbx248 at seed 43 was still running when the box went unreachable.)*
+
+**The matched pair flips sign.** At seed 42, h192 (0.7494) beat its capacity-matched
+partner Lbx224 (0.7346) by 0.0148. At seed 43 the same pair reads h192 0.7272 against
+Lbx224 0.7352 — capacity ahead by 0.0080. One seed, opposite conclusion. §7's headline is
+withdrawn.
+
+**Run-to-run variance is not one number.** It is a property of the configuration, and it
+grows with height:
+
+```
+h128/Lbx224   ±0.0006     h192   ±0.0222
+h128/Lbx200   ±0.0085     h256   ±0.1924
+```
+
+h256 at seed 43 did not merely score lower, it scored 0.5591 — below h64. That is not
+noise around a mean; it is a run that trained differently, most likely a partial collapse.
+**The tall configurations are unstable**, which is itself a finding: a configuration that
+sometimes returns 0.75 and sometimes 0.56 is not a candidate for a production model,
+whatever its best run says.
+
+### What survives
+
+* **The coarse effect.** h48 (0.5528) and h64 (0.6475) are worse than everything at 96 and
+  above by 0.09 or more — far outside any variance observed here. The two heights S10
+  flagged `warn` for leaving under two CTC frames per character are the two worst, and
+  that ordering held at both seeds.
+* **LSTM width remains inert.** 4.1 M → 4.9 M changed nothing at either seed
+  (+0.0009, +0.0006).
+
+### What this means for the method
+
+Rung 0 of the ladder in §1 ranks on a single short run per configuration. On this
+material that resolves differences of ~0.09 and cannot resolve ~0.015. Two consequences
+for #91:
+
+1. **Promotion must not be decided on differences under ~0.03** at rung 0. Either widen
+   the rung to two seeds, or treat the ranking as a filter for the obviously bad rather
+   than a ranking of the good.
+2. **A collapse is not a low score.** h256's 0.5591 should have been flagged as an
+   anomaly, not averaged in. A rung scheduler needs a variance check, not just a maximum.
