@@ -583,7 +583,60 @@ Corrected, this is what the full medieval set costs on 4× H100:
 
 **That gap is the whole decision, and one cheap experiment resolves it.**
 
-### 9.2 Experiment A — the NVMe question. Do this first.
+### 9.2 Experiment A — ANSWERED, 2026-09-09: compute-bound. Do not stage.
+
+Jobs 14443285 + 14455754, one H100 NVL, free preemptable QoS, zero cost.
+Corpus: the medieval set, `all_projects` capped at 400 pages → **8,668 train
+samples, 9,785 crop files, 712 MB**. Three passes, same compiled JSONL, same
+seed, same node, same argv — only `--data-root` differed. Timed by HF Trainer's
+own `train_runtime`.
+
+| pass | crops on | train_runtime | samples/s |
+|---|---|---:|---:|
+| A1-cold | `/scratch/network` (GPFS), first read | 1058.4 s | **8.19** |
+| A2 | `/scratch/local` (node NVMe) | 1042.4 s | **8.32** |
+| A1-warm | `/scratch/network`, page-cached | 1037.0 s | **8.36** |
+
+* page cache (A1-cold − A1-warm): **+2.0 %**
+* NVMe vs GPFS, both warm (A1-warm − A2): **−0.5 %**
+
+**All three are within 2 % of each other. This workload is compute-bound on
+UBELIX, and local staging is not the lever.** The control did its job: the
+page-cache effect is 2 %, so the A2/A1 comparison is not an artefact of caching.
+
+**Staging is worse than neutral — it costs.** Copying 9,785 crops to node NVMe
+took **43 s and 136 s** on the two runs. Scaled to 8 M crops that is **10–31
+hours of pure copying** per job, to buy a measured −0.5 %. The §5 pipeline's
+"stage to `/scratch/local` in the prologue" step should be **dropped**.
+
+**What this does and does not settle.** It rules out *shared vs local disk* as
+the mechanism, because on UBELIX all three storage arms are indistinguishable.
+It does not prove the asterAIx 0.67 samples/s was the CIFS mount rather than
+that corpus's longer lines — the corpora differ (medieval here, German there),
+so those two remain unseparated. What is certain is that **the 3× corpus-scale
+penalty asterAIx saw does not reproduce here**: 8.2 samples/s on a corpus-scale
+selection against 1.94 on asterAIx's 52-page smoke test, on a card roughly 4×
+faster.
+
+### 9.2-bis The schedule, re-anchored on measurement
+
+8.2 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~28 samples/s**:
+
+| anchored on | 4× H100 | one epoch, 8 M lines | 3 epochs |
+|---|---:|---:|---:|
+| Thun smoke test (§4) | ~41 | 2.3 days | 6.8 days |
+| corpus-scale asterAIx (§9.1) | ~14 | 6.6 days | 20 days |
+| **measured on UBELIX** | **~28** | **3.3 days** | **~10 days** |
+
+Ten days of free preemptable time for three epochs over the whole medieval set.
+That is a real campaign, not a hopeful one.
+
+One lever is still unspent: this ran **4-bit NF4**, inherited from a box that
+shares its card. A 96 GB H100 has no such constraint, and bf16 removes the
+misaligned-bitsandbytes path the 2026-08-08 run documented. That is the next
+cheap measurement, and it is a `--no-load-in-4bit` flag.
+
+### 9.2-ter (superseded) The original NVMe proposal
 
 The runbook says copying the crops to local disk "is the obvious experiment and has not
 been run". On asterAIx it is awkward; **on UBELIX it is free and native**: every GPU
