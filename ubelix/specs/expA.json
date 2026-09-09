@@ -1,6 +1,6 @@
 {
   "engine": "vllm",
-  "model_id": "expA-io-probe",
+  "model_id": "expa-io-probe",
   "datasets": [
     {
       "hf_repo": "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",

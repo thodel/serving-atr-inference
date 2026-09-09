@@ -34,7 +34,13 @@ The `.sif` belongs in `$HOME` — 1 TB private quota, snapshotted. Not the share
 
 ## Run
 
+Use `submit.sh`, not `sbatch` — it validates the spec on the login node first.
+`submit_job.py` does validate, but it runs *inside* the batch job, so a bad spec
+costs a queue wait and a GPU allocation before anything says so (job 14431367
+died 13 s in over a capital letter in a `model_id`).
+
 ```bash
+./submit.sh ~/ubelix/experiment_a.sbatch
 sbatch ~/ubelix/smoke.sbatch
 squeue -u $USER
 tail -f ~/ubelix/logs/vlm-smoke-<jobid>.out
