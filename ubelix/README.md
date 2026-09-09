@@ -51,6 +51,9 @@ tail -f ~/ubelix/logs/vlm-smoke-<jobid>.out
 Read-only, and it goes through the `ubelix` ssh alias (ProxyJump via asterAIx), so it
 needs no VPN.
 
+If asterAIx is down, that route dies with it. On the UniBE VPN, `submit02` is reachable
+directly — use the `ubelix-direct` alias, or `UBELIX_HOST=ubelix-direct ./ubelix/status.sh`.
+
 ## Paying for GPUs — short version: don't, for H100s
 
 Checked 2026-08-27 against the internal price page and `sacctmgr show qos`:
