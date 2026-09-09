@@ -636,6 +636,72 @@ shares its card. A 96 GB H100 has no such constraint, and bf16 removes the
 misaligned-bitsandbytes path the 2026-08-08 run documented. That is the next
 cheap measurement, and it is a `--no-load-in-4bit` flag.
 
+### 9.3-A Experiment B — bf16 beats 4-bit by 23 %, 2026-09-09
+
+Job 14478418, one H100 NVL (100 GB), same compiled corpus, same argv, one
+variable. B1 re-measured 4-bit inside the job rather than trusting experiment A's
+number across nodes.
+
+| pass | train_runtime | samples/s | peak VRAM |
+|---|---:|---:|---:|
+| B1 — NF4 4-bit | 1035.2 s | 8.37 | **21.6 GB** |
+| B2 — **bf16** | **798.6 s** | **10.85** | **39.7 GB** |
+
+**bf16 is 22.9 % faster and uses 40 GB of a 94 GB card.** The 4-bit default is
+inherited from a box that shares its A40 with the serving engines; on a card we
+own outright it buys nothing and costs a quarter of the throughput — the
+misaligned-bitsandbytes kernel the 2026-08-08 run logged, paid for a memory
+saving nobody needs. **`--no-load-in-4bit` is the UBELIX default from here.**
+
+*(Instrumentation caveat: the summary table this job printed shows 39.7 GB for
+both rows. The `kill` of the first pass's `nvidia-smi` sampler did not take — it
+captured the wrapper's PID — so it kept writing into B1's file during B2. The
+per-pass figures above are the inline readings taken at the end of each pass,
+which are correct; the end-of-job table's VRAM column was not.)*
+
+### 9.3-B Experiment C — 4B matches 8B; size is not the lever, 2026-09-09
+
+Job 14479259, three full runner pipelines, same corpus, same val split, same
+scorer, 200 eval samples. All three at 4-bit.
+
+| model | train_runtime | samples/s | CER | WER |
+|---|---:|---:|---:|---:|
+| Qwen3-VL-2B | 808.0 s | 10.73 | 0.4386 | 0.7528 |
+| **Qwen3-VL-4B** | 1019.4 s | 8.50 | **0.3344** | **0.6553** |
+| Qwen3-VL-8B | 1036.1 s | 8.37 | 0.3411 | 0.6605 |
+
+Two findings, and the second is the more important one.
+
+**4B matches 8B — actually edges it** (0.3344 vs 0.3411, a difference too small to
+call). Half the parameters, no measurable cost in quality on this corpus. **2B is
+a real drop**: 31 % worse CER than 4B for 26 % more speed, which is a bad trade.
+
+**But shrinking the model barely buys throughput: 4B is 1.5 % faster than 8B.**
+Halving the language model changed almost nothing, so the language model is not
+what the time is going into — the **vision tower and the visual tokens are**. That
+is the same conclusion experiment A reached from the opposite direction, and the
+two now agree: this workload is bound by image processing, not by weights and not
+by storage.
+
+**So the remaining lever is `max_pixels` and the aspect cap**, not model size and
+not hardware. That is the next experiment, and it is a one-flag sweep.
+
+### 9.3-C The schedule, re-anchored again
+
+bf16 at 10.85 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~37 samples/s**:
+
+| anchored on | 3 epochs, 8 M lines |
+|---|---:|
+| Thun smoke test (§4) | 6.8 days |
+| corpus-scale asterAIx (§9.1) | 20 days |
+| measured, 4-bit (§9.2-bis) | ~10 days |
+| **measured, bf16** | **~7.5 days** |
+
+The production configuration these three experiments point at: **Qwen3-VL-4B,
+bf16, crops read straight off GPFS, 4× H100 preemptable.** Untested as a
+combination — B and C each moved one variable, and 4B+bf16 together is the
+obvious confirmation run before committing ten days of anything.
+
 ### 9.2-ter (superseded) The original NVMe proposal
 
 The runbook says copying the crops to local disk "is the obvious experiment and has not
