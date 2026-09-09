@@ -98,6 +98,14 @@ All four are environment, not code: nothing in the repo had to change.
 | **`job_gpu_preemptable`** | **24 h** | **h100=4**, rtx3090=18, rtx4090=4, **gpu=29** |
 | `job_debug` | 20 min | h100=1, rtx4090=1 |
 
+**`job_gratis` also carries `MaxTRESRunMinsPU cpu=11520`** — the F1 free tier's
+"8 cores for 24 h", enforced as CPUs × minutes. At the 16 CPUs an H100 allocation
+wants, that is a **12-hour ceiling**, and a longer job is rejected at submit with
+`MaxCpuRunMinsPerUser`, not queued. **`job_gpu_preemptable` has no such limit** —
+only the GPU ceilings and the 24 h wall. So the preemptable QoS is not merely the
+bigger one, it is the only one that can run a long job at full CPU width, which
+matters whenever dataloader workers are part of what is being measured.
+
 `sacctmgr` shows only the **`gratis`** and **`teaching`** accounts, and `swckeys`
 returns `noop` — **there is no PAYGO project**, so nothing can be billed yet even if
 we wanted to. That makes the preemptable path the *primary* plan, not the fallback.

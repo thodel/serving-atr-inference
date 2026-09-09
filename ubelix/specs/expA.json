@@ -4,9 +4,9 @@
   "datasets": [
     {
       "hf_repo": "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",
-      "train_projects": ["GT_Thun-Training_(TEST-DEMO)"],
-      "eval_projects": ["GT_Thun-Test_(DEMO_TEST)"],
-      "max_pages": 700
+      "all_projects": true,
+      "max_pages": 400,
+      "partition": 0.9
     }
   ],
   "params": {
