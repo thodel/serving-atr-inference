@@ -694,6 +694,62 @@ by storage.
 **So the remaining lever is `max_pixels` and the aspect cap**, not model size and
 not hardware. That is the next experiment, and it is a one-flag sweep.
 
+### 9.3-D Experiment D — the visual-token sweep, and the hypothesis it kills
+
+Job 14566642, Qwen3-VL-4B at bf16, four arms, one compiled corpus (8,668/1,117
+in every arm — the startup budget line was captured per arm, so the knob is
+proven applied, not assumed).
+
+| visual tokens | train_runtime | samples/s | CER | WER |
+|---:|---:|---:|---:|---:|
+| 64 | 764.5 s | 11.34 | 0.4883 | 0.8168 |
+| **128** | 767.7 s | 11.29 | **0.3480** | 0.6705 |
+| **256** (default) | 802.7 s | 10.80 | **0.3449** | 0.6832 |
+| 512 | 785.7 s | 11.03 | 0.3845 | 0.7169 |
+
+**On quality:** 128 and 256 are a tie (0.3480 vs 0.3449 — under 1 %). 64 is badly
+worse (+42 %). And **512 is worse than 256** (+11 %): more pixels do not buy
+reading, they cost it. Keep 256; 128 is free if memory ever matters.
+
+**On throughput: nothing happened.** An **8× range of visual tokens moved
+throughput by 5 %** (10.80–11.34 samples/s). §9.3-B predicted `max_pixels` was
+"the remaining lever". **It is not, and this experiment says so plainly.**
+
+### 9.3-E What A, C and D together actually show
+
+Line up everything measured on this corpus:
+
+| change | expected | **measured** |
+|---|---|---|
+| GPFS → node NVMe (A) | large if IO-bound | **−0.5 %** |
+| 8B → 4B language model (C) | ~2× | **+1.5 %** |
+| 8B → 4B **at bf16** (C vs D) | ~2× | **10.85 → 10.80 = 0 %** |
+| 512 → 64 visual tokens (D) | large if vision-bound | **+5 %** |
+| bf16 → 4-bit NF4 (B) | — | **−23 %** |
+
+Every change that *removes* GPU work buys nothing. The one change that *adds* GPU
+work — 4-bit's dequantization — costs 23 %. **That is the signature of a GPU that
+is not the bottleneck: it is waiting, and only when you make it slower than the
+thing feeding it does the time move.**
+
+Everything lands at **10.8–11.3 samples/s regardless of model size, precision,
+visual-token budget or filesystem.** That ceiling is the finding.
+
+**The prime suspect is the input pipeline.** `--workers 4` is passed on an
+allocation that holds **16 CPUs**, and each worker decodes a JPEG and runs the
+image processor per sample. Four workers producing ~11 samples/s is ~2.8
+samples/s each, which is a plausible rate for PIL decode plus preprocessing —
+and it would explain all five rows above at once.
+
+**Experiment E, and it is cheap:** sweep `--workers` (4 → 8 → 16) and record GPU
+utilization with `nvidia-smi dmon` alongside. If utilization is well under 100 %
+at `workers 4`, the ceiling is confirmed as starvation and the lever has been
+found. If utilization is already pinned, the ceiling is something else and this
+document should stop guessing and profile.
+
+Until that resolves, **every schedule below is a lower bound on speed** — the
+10.4 M-crop campaign may be considerably cheaper than 9.8 days.
+
 ### 9.3-C The schedule, re-anchored again
 
 bf16 at 10.85 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~37 samples/s**:
