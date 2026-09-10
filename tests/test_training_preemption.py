@@ -242,3 +242,45 @@ def test_checkpoints_are_ordered_numerically_not_lexically(tmp_path):
     _checkpoint(tmp_path, 680)
     newest = _checkpoint(tmp_path, 1080)
     assert last_complete_checkpoint(tmp_path) == str(newest)
+
+
+# ── splitting the pipeline across machines ──────────────────────────────────
+def test_stop_after_compile_leaves_the_job_resumable(store, settings):
+    """prepare+compile on a CPU host, train on the GPU host, one job record.
+
+    The corpus stages are CPU, network and disk; running them inside a scarce GPU
+    allocation wastes the scarce half. Stopping after compile leaves the job in
+    exactly the state a preemption leaves it, so the GPU host takes the same
+    resume path and no second contract is needed.
+    """
+    job = store.create(request_with(model_id="qwen3vl-split"))
+    source = FakeSource({"train": 4, "eval": 2})
+    runner = FakeRunner()
+
+    out = Pipeline(store, settings, runner=runner, source=source).execute(
+        job.id, stop_after="compile")
+
+    assert out.status == "training"
+    assert source.calls, "prepare should have run"
+    assert not runner.commands, "the trainer must not have been invoked"
+    data = store.paths(job.id).data
+    assert (data / "train.jsonl").is_file()
+    assert (data / "val.jsonl").is_file()
+
+
+def test_the_gpu_host_then_finishes_that_same_job(store, settings):
+    job = store.create(request_with(model_id="qwen3vl-split-then-train"))
+    Pipeline(store, settings, runner=FakeRunner(),
+             source=FakeSource({"train": 4, "eval": 2})).execute(
+        job.id, stop_after="compile")
+
+    # A different machine, a fresh process, the same job id — and crucially a
+    # source that would raise if anything tried to stream the corpus again.
+    second_source = FakeSource({"train": 4, "eval": 2})
+    runner = FakeRunner()
+    done = Pipeline(store, settings, runner=runner,
+                    source=second_source).execute(job.id)
+
+    assert done.status == "completed"
+    assert second_source.calls == [], "the GPU host re-prepared the corpus"
+    assert runner.command("train")

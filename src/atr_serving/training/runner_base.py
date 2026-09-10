@@ -809,7 +809,22 @@ class BasePipeline(ABC):
         logger.info("stage {} skipped — reused artefact {}", name, why)
 
     # ── entry point ─────────────────────────────────────────────────────────
-    def execute(self, job_id: str) -> TrainJob:
+    def execute(self, job_id: str, stop_after: str | None = None) -> TrainJob:
+        """Run the job. ``stop_after="compile"`` stops once the corpus exists.
+
+        Splitting the pipeline across machines is the point. ``prepare`` and
+        ``compile`` are CPU, network and disk — 1 h 40 and 1 h 27 on the German
+        corpus — and doing them inside a scarce GPU allocation wastes the scarce
+        half. A box that already mounts the share can do them while the GPU job
+        is still queued, and the GPU job then does only what needs a GPU.
+
+        The job is left in ``training``, which is exactly the state a preempted
+        job is left in, so the machine that picks it up takes the **same** resume
+        path (:meth:`_resume_artifacts`) and needs no new contract. The one thing
+        that must hold is that both machines see the same job directory: the
+        compiled JSONL names its crops *relative* to the job root, so the tree is
+        relocatable as long as it moves whole.
+        """
         job = self.store.load(job_id)
         job.pid = os.getpid()
         job.queued_reason = None
@@ -865,6 +880,15 @@ class BasePipeline(ABC):
 
                 train_artifact, val_artifact = self._store_artefact(
                     job, train_artifact, val_artifact)
+
+            if stop_after == "compile":
+                # Not "finished" and not failed: the corpus is built and training
+                # is the next thing that has to happen, somewhere else.
+                self.store.advance(job, "training")
+                logger.info("job {} stopped after compile — the corpus is ready "
+                            "at {}; a GPU host can now resume it", job.id,
+                            self.store.paths(job.id).data)
+                return self.store.load(job.id)
 
             return self._finish(job, train_artifact, val_artifact)
 
@@ -992,6 +1016,9 @@ def run_job(pipeline_cls: type[BasePipeline], description: str,
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--root", required=True, help="jobs root directory")
     parser.add_argument("--job-id", required=True)
+    parser.add_argument("--stop-after", choices=["compile"], default=None,
+                        help="build the corpus and stop, leaving the job "
+                             "resumable by a GPU host (see BasePipeline.execute)")
     args = parser.parse_args(argv)
 
     settings = TrainerSettings()
@@ -1004,7 +1031,7 @@ def run_job(pipeline_cls: type[BasePipeline], description: str,
     install_cancel_handler(preemptable=preemptable)
 
     try:
-        job = pipeline_cls(store, settings).execute(args.job_id)
+        job = pipeline_cls(store, settings).execute(args.job_id, stop_after=args.stop_after)
     except Preempted:
         # 75 is EX_TEMPFAIL: "try again later", and the batch script requeues on
         # it. A plain 1 would be indistinguishable from a genuine failure, and
@@ -1013,4 +1040,6 @@ def run_job(pipeline_cls: type[BasePipeline], description: str,
         return 75
 
     logger.info("job {} finished: {}", job.id, job.status)
+    if args.stop_after:
+        return 0 if job.status == "training" else 1
     return 0 if job.status == "completed" else 1
