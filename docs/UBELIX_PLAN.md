@@ -1217,3 +1217,76 @@ to add H200 to the QoS is free and would plausibly beat anything on this page:
 experiment F showed **batch size is the whole bottleneck**, and at `bs: 16` we are
 already at 86 GB of the H100's 94. A 141 GB card is the one piece of hardware here
 that could take the next step up.
+
+---
+
+## 12. The German medieval run (`qwen3vl-medieval-german-v1`)
+
+Started 2026-09-10, job **14709381**, spec `ubelix/specs/german-medieval.json`.
+
+### The corpus is not the one this document has been measuring
+
+`scripts/plan_corpus.py` was given `--period 1300 1600` and it **excluded
+`image-text_medieval-scripts_xiv-xv-xvi` outright**:
+
+```
+image-text_medieval-scripts_xiv-xv-xvi   no target language in ('flemish',)
+```
+
+That is the dataset every experiment A–F ran on, and it is **Flemish**. Its German
+content is ~291 usable pages. The German 14th–16th-century material lives in
+other dh-unibe repos, and the planner selected four:
+
+| repo | train projects | pages |
+|---|---:|---:|
+| `image-text_rats-und-richtebuecher_xv-xvi` | 35 | 9,885 |
+| `image-text_bullinger-autoren` | 256 | 8,022 |
+| `image-text_koenigsfelden-charters-post-1500` | 1,185 | 3,222 |
+| `image-text_aaeb-xiv-xvii` | 349 | 2,566 |
+| **total** | **1,825** | **~23,700** |
+
+Held out for evaluation, on both `--eval-project` and `--exclude-project` as
+`TRAINING.md` requires: `escript_test`, `escript_test_2`.
+
+**So the schedule in §9.3-H does not apply to this run.** ~23,700 pages at the
+measured 19 lines/page is **~450 K crops**, not 10.4 M — **23× smaller**. One
+epoch is roughly **7 hours on a single H100**, which fits inside one preemptable
+allocation.
+
+### Configuration — every value measured, not chosen
+
+| setting | value | why |
+|---|---|---|
+| `base_model` | Qwen3-VL-4B | §9.3-B: matches 8B at half the size |
+| `load_in_4bit` | **false** | §9.3-A: bf16 is +23 % on a card we own |
+| `batch_size` | **16** | §9.3-G: the whole bottleneck; 51 % → 86 % utilization |
+| `max_pixels` | 262144 (256 tokens) | §9.3-D: 128 ties, 512 is *worse* |
+| `workers` | 8 | §9.3-F: 4/8/16 indistinguishable |
+| `optim` | `paged_adamw_8bit` | costs 2 %, insurance at 86 GB of 94 |
+| `save_steps` | 200 | ~11 min of redone work if preempted |
+| `epochs` | 1 | the runbook's rule at corpus scale |
+
+### A correction this run forces: there is no multi-GPU
+
+`train_qlora.py` pins `device_map={"": 0}` and the runner launches a plain
+`python -m`, not `torchrun`. **DDP is not implemented.** Every measurement in
+§9 is single-GPU, and so is this run.
+
+Earlier sections quoted "4× H100 → 6 days" by dividing single-GPU throughput by
+four. **That was arithmetic, not a measurement, and the code cannot do it today.**
+The honest figures for the full Flemish set are the single-GPU ones: ~488
+GPU-hours, i.e. ~20 days, not 6. Multi-GPU is a real piece of work — the trainer
+would have to be launched under `torchrun` and the `device_map` pin removed — and
+it is worth doing before anything at 10 M-crop scale, but it is not done.
+
+For **this** run it does not matter: 450 K crops on one GPU is hours.
+
+### Known risks going in
+
+* **`429` during prepare.** `datasets` makes one hub tree call per project glob,
+  and `koenigsfelden-charters-post-1500` contributes **1,185** of them — the exact
+  number the runbook names as still costing 1,185 requests against a quota of
+  1,000 per five minutes (#89). This is the most likely way the run fails, and it
+  fails in `prepare`, cheaply.
+* **These corpora are not cached on the share**, unlike the Flemish set, so
+  prepare must fetch rather than read locally.
