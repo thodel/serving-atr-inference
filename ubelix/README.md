@@ -32,6 +32,59 @@ Build on a **login node**: compute nodes may lack internet, login nodes have it.
 The `.sif` belongs in `$HOME` — 1 TB private quota, snapshotted. Not the share
 (group quota, 88 % full), not scratch (30-day purge).
 
+## Standard procedure: two stages
+
+**Always split the run.** `prepare` and `compile` are network, CPU and disk —
+streaming pages, parsing PageXML, cutting crops, writing JSONL — and on a real
+corpus that is hours. None of it touches a GPU. Doing it inside a GPU allocation
+wastes the scarce half of the machine, and on UBELIX doubly so: the GPU job may
+wait two days to start and would then spend its first three hours not using the
+GPU it waited for.
+
+```bash
+# 1. plan the corpus — never hand-pick projects (VLM_TRAINING.md §2)
+apptainer exec --bind /storage/research --bind /scratch --bind /rs_scratch \
+  --env HF_HOME=$HF_HOME --env PYTHONPATH=$REPO/src:$REPO/engines \
+  ~/ubelix/vlm-train.sif python scripts/plan_corpus.py \
+    --org dh-unibe --period 1300 1600 --max-share 0.45 \
+    --eval-repo <repo> --eval-project <p> --exclude-project <p> \
+    --json ~/ubelix/specs/<name>.json --engine vllm --model-id <id>
+
+# 2. add the measured training params to that spec (see the table below)
+
+# 3. STAGE 1 — build the corpus on a free CPU node, no GPU
+sbatch --export=ALL,SPEC=$HOME/ubelix/specs/<name>.json ubelix/prepare.sbatch
+
+# 4. STAGE 2 — train it, resumable, on a GPU
+sbatch --export=ALL,JOB_ID=<id from stage 1> ubelix/train.sbatch
+```
+
+Stage 1 leaves the job in `training` — **the same state a preemption leaves it
+in** — so stage 2 takes the ordinary resume path and there is no second contract
+to keep correct. Nothing is re-streamed, so the seeded split stays the one the
+corpus was built with; re-preparing would rebuild it and quietly invalidate the
+CER.
+
+Compute nodes have internet (verified: `huggingface.co → 200` from `bnode009`),
+so corpora need not be pre-cached on the share.
+
+### The measured configuration
+
+Every value comes from an experiment in `docs/UBELIX_PLAN.md` §9, not from taste:
+
+| param | value | why |
+|---|---|---|
+| `base_model` | `Qwen/Qwen3-VL-4B-Instruct` | 4B matches 8B at half the size (§9.3-B) |
+| `load_in_4bit` | `false` | bf16 is +23 % on a card we own (§9.3-A) |
+| `batch_size` | `16` | **the** bottleneck: 51 % → 86 % GPU utilization (§9.3-G) |
+| `max_pixels` | `262144` | 256 visual tokens; 128 ties, 512 is worse (§9.3-D) |
+| `workers` | `8` | 4/8/16 indistinguishable (§9.3-F) |
+| `save_steps` | `200` | bounds the work a preemption costs |
+| `epochs` | `1` | the runbook's rule at corpus scale |
+
+**Do not stage crops to `/scratch/local`.** It is measurably neutral (−0.5 %) and
+costs 10–31 h of copying at full scale (§9.2).
+
 ## Run
 
 Use `submit.sh`, not `sbatch` — it validates the spec on the login node first.
