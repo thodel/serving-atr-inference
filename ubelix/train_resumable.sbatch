@@ -82,8 +82,18 @@ trap 'echo "== SIGTERM received, forwarding to $PID"; kill -TERM "$PID" 2>/dev/n
 
 run python -m vlm_train_svc.runner --root "$ATR_TRAIN_JOBS_ROOT" --job-id "$JOB_ID" &
 PID=$!
-wait "$PID"
-CODE=$?
+
+# `wait` returns as soon as a TRAPPED signal arrives, with 128+signum — it does
+# NOT wait for the child. Taking that as the child's status reports 143 for a
+# runner that is still shutting down, skips the exit-75 branch below, and then
+# kills the runner mid-shutdown by exiting. The second `wait` collects what the
+# runner actually exited with. Found by the first real preemption test: the job
+# resumed, but only because a hard kill happens to leave the record in
+# `training` — the graceful path had never run.
+wait "$PID"; CODE=$?
+while [ "$CODE" -gt 128 ]; do
+  wait "$PID"; CODE=$?
+done
 
 if [ "$CODE" = 75 ]; then
   # EX_TEMPFAIL from run_job: preempted, record left in `training`. Slurm
