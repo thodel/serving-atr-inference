@@ -1100,3 +1100,66 @@ serve it (`VLM_TRAINING.md` already records this for the 30B MoE).
 B is the one people skip. Changing the base model and the library in the same step
 means a worse CER has two possible causes and no way to tell them apart — which is the
 mistake `TRAINING_PLAN.md` §9 exists to prevent.
+
+---
+
+## 11. With CHF 1000/year free: what money can and cannot buy
+
+The F2 free tier refunds up to **CHF 1000 per cost centre per year**, and
+activating a PAYGO project is straightforward. So what does that change?
+
+**First, a naming correction.** UBELIX's *Investment Model* — CAPEX over 12–60
+months for a pseudo-exclusive allocation — is **closed for GPUs until the 2026
+datacenter expansion** (§4.3). It is not an option for this campaign whatever the
+budget. What CHF 1000 activates is **PAYGO**, billed per minute against the
+refund.
+
+### The arithmetic
+
+The measured campaign — 3 epochs over ~10.4 M crops at 17.76 samples/s — is
+**488 H100-GPU-hours**.
+
+| route | GPUs | wall clock | cost |
+|---|---:|---:|---:|
+| **free `job_gpu_preemptable`** | **4** | **6.0 days** | **0** |
+| free `job_gratis` | 1 | 20.3 days | 0 |
+| PAYGO `job_gpu` | 1 | 20.3 days | **CHF 293** |
+
+* CHF 1000 buys **1,667 H100-hours/year**.
+* The entire campaign is **488 h — 29 % of the allowance**, leaving ~1,179 hours:
+  roughly **two and a half more full campaigns**, or the Qwen3.5 comparison, or
+  re-runs after a mistake.
+
+### The conclusion is counter-intuitive and worth stating plainly
+
+**Money cannot make this faster.** PAYGO's `job_gpu` QoS caps at **h100=1**,
+against the free preemptable QoS's **h100=4** (§4.3). Paying moves the campaign
+from 6 days to 20. The CHF 293 buys *reliability* — no preemption — at 3.4× the
+calendar time.
+
+So the budget is not the constraint, and never was. **The constraints are the QoS
+GPU ceiling and queue depth**, neither of which responds to money.
+
+### What to do anyway
+
+1. **Activate the PAYGO project.** It costs nothing: preemptable and debug jobs
+   are free *even under a project*, so the primary path is unaffected. What it
+   buys is optionality — a billed, non-preemptable fallback becomes a four-line
+   header change instead of a procurement.
+2. **Keep the free 4× H100 preemptable path as primary.** 6 days, and now
+   genuinely safe to interrupt (§9.4).
+3. **Use the paid path as a reliability fallback**, not a speed one: when
+   preemption is thrashing a run, or a deadline makes 20 predictable days better
+   than 6 unpredictable ones.
+4. **Spend the headroom on questions, not on the same run.** ~1,179 hours is
+   enough to answer whether Qwen3.5-9B beats Qwen3-VL-4B on real material, which
+   is worth more than finishing this campaign three days sooner.
+
+### The cheaper win is not money
+
+`gnode36` is **8× H200, 141 GB each, and was sitting completely idle** while all
+40 H100s were allocated — and our QoS has `h200=0` (§9.3-I). One support request
+to add H200 to the QoS is free and would plausibly beat anything on this page:
+experiment F showed **batch size is the whole bottleneck**, and at `bs: 16` we are
+already at 86 GB of the H100's 94. A 141 GB card is the one piece of hardware here
+that could take the next step up.
