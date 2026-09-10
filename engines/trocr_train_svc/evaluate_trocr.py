@@ -31,6 +31,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--val-manifest", required=True)
+    p.add_argument("--data-root", required=True,
+                   help="what the relative image paths resolve against; the job "
+                        "root, not the manifest's directory (#117)")
     p.add_argument("--report", required=True)
     p.add_argument("--base-model", required=True)
     p.add_argument("--seed", type=int, default=42)
@@ -71,7 +74,10 @@ def main(argv: list[str] | None = None) -> int:
     from transformers import AutoProcessor, VisionEncoderDecoderModel, set_seed
 
     set_seed(args.seed)
-    root = Path(args.val_manifest).parent
+    # Given, never inferred — the same defect the trainer had (#117). Fixing only
+    # the trainer would have moved the failure from the first batch of `train` to
+    # the first sample of `test`.
+    root = Path(args.data_root)
     samples = list(read_jsonl(args.val_manifest))[: args.max_samples]
     if not samples:
         raise SystemExit(f"{args.val_manifest} has no samples to evaluate")

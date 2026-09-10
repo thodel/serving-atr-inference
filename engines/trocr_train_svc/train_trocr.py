@@ -11,7 +11,8 @@ the runner that has to write *why* onto the job record must survive it.
 
 The recipe uses ``transformers.Seq2seqTrainer`` with TrOCR's built-in processor
 (microsoft/trocr-*) or a compatible variant. The JSONL manifest lists
-``{image, text}`` pairs resolved relative to the manifest's parent directory.
+``{image, text}`` pairs whose ``image`` resolves against ``--data-root`` (#117 —
+it used to be inferred from the manifest's location, one level too deep).
 """
 
 from __future__ import annotations
@@ -31,6 +32,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--base-model", required=True)
     p.add_argument("--train-manifest", required=True)
     p.add_argument("--val-manifest", required=True)
+    p.add_argument("--data-root", required=True,
+                   help="what the relative image paths in the manifests resolve "
+                        "against; the job root, not the manifest's directory (#117)")
     p.add_argument("--output-dir", required=True)
     # Shared with evaluate_cmd
     p.add_argument("--seed", type=int, default=42)
@@ -66,8 +70,12 @@ class JsonlDataset:
     thousands of crops, and holding them decoded is far more memory than the model.
     """
 
-    def __init__(self, manifest_path: str | Path) -> None:
-        self.root = Path(manifest_path).parent
+    def __init__(self, manifest_path: str | Path, root: str | Path) -> None:
+        # Given, never inferred. Inferring it from the manifest's directory is
+        # what made `train` fail on its first batch with 2,087 crops on disk
+        # (#117): compile writes the paths relative to the job root, and the
+        # manifest lives a level below it in `data/`.
+        self.root = Path(root)
         self.samples = list(read_jsonl(manifest_path))
         if not self.samples:
             raise SystemExit(f"{manifest_path} has no samples")
@@ -136,8 +144,8 @@ def main(argv: list[str] | None = None) -> int:
     if processor.tokenizer.pad_token_id is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
-    train_ds = JsonlDataset(args.train_manifest)
-    val_ds = JsonlDataset(args.val_manifest)
+    train_ds = JsonlDataset(args.train_manifest, args.data_root)
+    val_ds = JsonlDataset(args.val_manifest, args.data_root)
     print(
         f"train={len(train_ds)} val={len(val_ds)} "
         f"base_model={args.base_model}",

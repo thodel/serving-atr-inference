@@ -64,18 +64,24 @@ def train_cmd(
     base_model: str,
     train_manifest: str | Path,
     val_manifest: str | Path,
+    data_root: str | Path,
     output_dir: str | Path,
     module: str = TRAIN_MODULE,
 ) -> list[str]:
-    """Fine-tune a TrOCR base on compiled ALTO/PageXML samples.
+    """Fine-tune a TrOCR base on compiled samples.
 
-    ``train_manifest`` and ``val_manifest`` are whitespace-separated lists of
-    image/text pairs (one pair per line). The paths in the manifest are relative
-    to the parent directory of the manifest, so keeping the manifest next to the
-    data makes the set portable without an explicit ``--data-root``.
+    ``train_manifest`` and ``val_manifest`` are JSONL, one ``{image, text}`` per
+    line. ``data_root`` is what the relative ``image`` paths resolve against, and
+    it is an explicit argument rather than something the trainer infers (#117).
 
-    The report is written as JSON at the end of training; see
-    :func:`parse_eval_report`.
+    This used to read "relative to the parent directory of the manifest, so
+    keeping the manifest next to the data makes the set portable without an
+    explicit --data-root". That was a real design, and nothing held the two ends
+    of it together: ``compile`` writes paths relative to the **job root** while
+    the manifest sits in ``<job>/data/``, so the trainer resolved every sample
+    one level too deep and `20260908T104421Z-trocr-thun-smoke-v1` failed on its
+    first batch having compiled 2,087 crops it could not open. A relationship
+    three files have to remember is one that gets forgotten; an argument does not.
     """
     if not base_model:
         raise TrocrCommandError(
@@ -85,6 +91,7 @@ def train_cmd(
         str(python), "-m", module,
         "--train-manifest", str(train_manifest),
         "--val-manifest", str(val_manifest),
+        "--data-root", str(data_root),
         "--output-dir", str(output_dir),
         *_base_args(params, base_model),
         "--epochs", str(params.epochs),
@@ -111,10 +118,15 @@ def evaluate_cmd(
     base_model: str,
     checkpoint: str | Path,
     val_manifest: str | Path,
+    data_root: str | Path,
     report: str | Path,
     module: str = EVAL_MODULE,
 ) -> list[str]:
     """Score a fine-tuned checkpoint on the validation set.
+
+    ``data_root`` for the same reason as in :func:`train_cmd` — the eval side had
+    the identical defect, so fixing only the trainer would have moved the failure
+    from the first batch of ``train`` to the first sample of ``test`` (#117).
 
     The report is written as JSON to ``report`` rather than scraped from stdout:
     generation logs are noisy and progress bars redraw in place, and a metric we
@@ -124,6 +136,7 @@ def evaluate_cmd(
         str(python), "-m", module,
         "--checkpoint", str(checkpoint),
         "--val-manifest", str(val_manifest),
+        "--data-root", str(data_root),
         "--report", str(report),
         *_base_args(params, base_model),
         "--max-samples", str(params.eval_samples),

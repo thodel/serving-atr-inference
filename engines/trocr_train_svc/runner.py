@@ -97,6 +97,7 @@ class Pipeline(BasePipeline):
     def _train(self, job: TrainJob, train_jsonl: Path, val_jsonl: Path,
                record: StageRecord) -> Path:
         params = job.request.params
+        paths = self.store.paths(job.id)
         # Local scratch, not the share: the trainer saves a checkpoint per epoch
         # via temp-file + rename, which is cross-device on CIFS — the same reason
         # the kraken pipeline keeps checkpoints off the share.
@@ -112,6 +113,7 @@ class Pipeline(BasePipeline):
                             base_model=job.request.base_model,
                             train_manifest=train_jsonl,
                             val_manifest=val_jsonl,
+                            data_root=paths.root,
                             output_dir=out_dir),
                   record)
 
@@ -136,6 +138,7 @@ class Pipeline(BasePipeline):
                                base_model=job.request.base_model,
                                checkpoint=checkpoint,
                                val_manifest=val_jsonl,
+                               data_root=paths.root,
                                report=report),
                   record)
         if not report.exists():
