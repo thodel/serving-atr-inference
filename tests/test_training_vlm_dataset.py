@@ -423,3 +423,21 @@ def test_budget_still_refuses_when_there_is_no_knob():
     ip = _ImageProcessor(None)
     with pytest.raises(VisualBudgetError):
         apply_visual_budget(_Processor(ip), 262144)
+
+
+def test_warmup_ratio_is_converted_for_transformers_5x():
+    """5.x dropped warmup_ratio and kept warmup_steps; the schedule must not move."""
+    from vlm_train_svc.train_qlora import warmup_kwarg
+
+    # Injected rather than probed, so this runs in the gateway venv, which has
+    # no transformers at all.
+    assert warmup_kwarg(0.05, 1000, supports_ratio=True) == {"warmup_ratio": 0.05}
+    assert warmup_kwarg(0.05, 1000, supports_ratio=False) == {"warmup_steps": 50}
+    # A ratio too small to reach a whole step still warms up for one.
+    assert warmup_kwarg(0.0001, 100, supports_ratio=False) == {"warmup_steps": 1}
+
+
+def test_no_warmup_asks_for_neither():
+    from vlm_train_svc.train_qlora import warmup_kwarg
+
+    assert warmup_kwarg(0.0, 1000, supports_ratio=False) == {}

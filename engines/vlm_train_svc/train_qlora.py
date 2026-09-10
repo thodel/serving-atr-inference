@@ -392,6 +392,33 @@ def last_complete_checkpoint(out_dir: Path) -> str | None:
     return None
 
 
+def warmup_kwarg(warmup_ratio: float, total_steps: int,
+                 supports_ratio: bool | None = None) -> dict:
+    """``warmup_ratio`` on transformers 4.x, ``warmup_steps`` on 5.x.
+
+    5.x dropped ``warmup_ratio`` from ``TrainingArguments`` and kept only
+    ``warmup_steps``. It is the *only* one of the 27 arguments this trainer
+    passes that 5.x removed — checked against the signature rather than
+    discovered one exception at a time — so converting it here is the whole
+    port, and the schedule stays identical either way.
+
+    The conversion needs the total step count, which is why this takes it: a
+    ratio of the run is only a number of steps once you know how long the run is.
+    """
+    if warmup_ratio <= 0:
+        return {}
+    if supports_ratio is None:
+        import inspect
+
+        from transformers import TrainingArguments
+
+        supports_ratio = "warmup_ratio" in inspect.signature(
+            TrainingArguments.__init__).parameters
+    if supports_ratio:
+        return {"warmup_ratio": warmup_ratio}
+    return {"warmup_steps": max(1, round(warmup_ratio * total_steps))}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     from transformers import AutoProcessor, Trainer, TrainingArguments, set_seed
@@ -414,6 +441,11 @@ def main(argv: list[str] | None = None) -> int:
     model = build_model(args, processor)
     collator = HTRCollator(processor, args.prompt, args.max_seq_len)
 
+    ceiling_epochs = max(args.epochs, args.max_epochs or args.epochs)
+    steps_per_epoch = max(1, math.ceil(
+        len(train_ds) / (args.batch_size * args.accumulate_grad_batches)))
+    warmup = warmup_kwarg(args.warmup_ratio, steps_per_epoch * ceiling_epochs)
+
     trainer = Trainer(
         model=model,
         args=TrainingArguments(
@@ -426,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
             gradient_accumulation_steps=args.accumulate_grad_batches,
             learning_rate=args.lrate,
             lr_scheduler_type=args.lr_scheduler,
-            warmup_ratio=args.warmup_ratio,
+            **warmup,
             weight_decay=args.weight_decay,
             max_grad_norm=args.max_grad_norm,
             optim=args.optim,
