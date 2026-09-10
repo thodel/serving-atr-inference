@@ -126,15 +126,23 @@ H200 node fully `idle` (but our QoS has `h200=0`), plus an undocumented
 | schema | `image` (full page scan), `xml_content` (PageXML), `filename`, `project_name` |
 | Parquet export | **1,064.6 GB** across 694 files |
 | card's stated total | ~6.6 TB |
-| **line crops** | **~8 M** [estimate] |
+| **line crops** | **~10.4 M** [measured-derived] |
 
 The line count is the number that drives everything, and it is not published.
-Our own measurement is the only anchor: the Thun run turned **52 pages into 783
-line crops** [measured], i.e. ~15 lines/page. Protocol registers run denser, so
-the honest range is **7–12 M line crops**, and this document uses **8 M**.
+**Measured on this corpus, 2026-09-09** (experiment C's prepare stage): 515 pages
+materialized → 115 skipped for having no usable transcription → **400 pages
+yielding 9,785 transcribed lines**. That is **19.0 lines per materialized page**,
+and a **22 % page-attrition rate** worth budgeting for.
+
+548,322 × 19.0 ≈ **10.4 M line crops**.
+
+This supersedes the earlier ~8 M, which came from the 52-page Thun demo at ~15
+lines/page — a demo project, not the target corpus. Every schedule below scales
+linearly with it, so the correction is ~30 % more work than this document
+originally assumed.
 
 For scale: `thun-kurrent-v2`, our best kraken model, was trained on **1,898
-lines**. The full medieval set is roughly **4,000× that**.
+lines**. The full medieval set is roughly **5,500× that**.
 
 ## 2. What UBELIX gives us
 
@@ -695,7 +703,8 @@ bf16 at 10.85 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~37 sample
 | Thun smoke test (§4) | 6.8 days |
 | corpus-scale asterAIx (§9.1) | 20 days |
 | measured, 4-bit (§9.2-bis) | ~10 days |
-| **measured, bf16** | **~7.5 days** |
+| **measured, bf16** (8 M) | ~7.5 days |
+| **measured bf16, at the measured 10.4 M line count** | **~9.8 days** |
 
 The production configuration these three experiments point at: **Qwen3-VL-4B,
 bf16, crops read straight off GPFS, 4× H100 preemptable.** Untested as a

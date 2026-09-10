@@ -1,0 +1,23 @@
+{
+  "engine": "vllm",
+  "model_id": "expd-px512",
+  "base_model": "Qwen/Qwen3-VL-4B-Instruct",
+  "datasets": [
+    {
+      "hf_repo": "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",
+      "all_projects": true,
+      "max_pages": 400,
+      "partition": 0.9
+    }
+  ],
+  "params": {
+    "granularity": "line",
+    "epochs": 1,
+    "batch_size": 4,
+    "accumulate_grad_batches": 4,
+    "eval_samples": 200,
+    "load_in_4bit": false,
+    "max_pixels": 524288,
+    "max_seq_len": 1024
+  }
+}
