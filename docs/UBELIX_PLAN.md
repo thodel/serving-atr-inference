@@ -881,66 +881,119 @@ Two consequences:
 * Queue depth should be checked *before* choosing a QoS for a long run, not
   assumed. `squeue -p gpu-invest -h -t PENDING -o "%b" | grep -c h100`.
 
-### 9.4 Preemption-resume — implemented (#111), GPU verification pending
+### 9.4 Preemption-resume — implemented and proven on GPU (#111)
 
-Phase 3's gate. Before this, **nothing here survived a preemption**: SIGTERM meant
-`cancelled`, `cancelled` is terminal, and the trainer checkpointed once per epoch
-— so a job preempted at hour 23 of a two-day epoch resumed from nothing, and a
-six-day run would never have finished.
+Phase 3's gate, and the thing that had to work before any multi-day run. Before
+this, **nothing here survived an interruption**: SIGTERM meant `cancelled`,
+`cancelled` is terminal, and the trainer checkpointed once per epoch — so a job
+stopped at hour 23 of a two-day epoch resumed from nothing.
 
-**Four pieces**, all on `main` (`80d7a68`, `0e724cc`):
+#### What was built
 
 | piece | what it does |
 |---|---|
-| `Preempted` ≠ `Cancelled` | a cancellation is a decision, a preemption an interruption. SIGINT still cancels either way. |
-| exit **75** (`EX_TEMPFAIL`) | a requeue is distinguishable from a real failure; requeueing genuine failures forever is how a broken job burns a week |
-| `training` self-edge | the only loosened transition; `completed`/`failed`/`cancelled` stay terminal |
-| `save_steps` | step checkpointing, because an epoch at corpus scale is days |
-| `_resume_artifacts` | a **different question** from `_reuse_artefact`, which answers None for this backend by design |
+| `Preempted` ≠ `Cancelled` | a cancellation is a decision, a preemption an interruption. SIGINT still cancels either way — a person pressing Ctrl-C means stop. |
+| exit **75** (`EX_TEMPFAIL`) | a requeue is distinguishable from a real failure. Requeueing genuine failures forever is how a broken job burns a week of GPU. |
+| `training` self-edge in `TRANSITIONS` | the only loosened edge. `completed`/`failed`/`cancelled` stay terminal. |
+| `VlmTrainParams.save_steps` | step checkpointing, because an epoch at corpus scale is days |
+| `_resume_artifacts` | a **different question** from `_reuse_artefact` |
+| `ubelix/train_resumable.sbatch` | `--requeue`, a stable job id keyed on `SLURM_JOB_ID`, SIGTERM forwarded, exit 75 handled |
 
-`ubelix/train_resumable.sbatch` is the production template: `--requeue`, a stable
-training job id keyed on `SLURM_JOB_ID` across attempts, SIGTERM forwarded, and
-exit 75 handled as "requeue".
+#### Two traps the codebase had already documented
 
-**Two traps, both already documented in the code, both nearly walked into:**
-
-1. Moving `eval_strategy` to steps alongside `save_strategy` is the obvious fix
-   and is wrong — `make_recovery_callback` explains why: the continuation
+1. **Moving `eval_strategy` to steps alongside `save_strategy`** is the obvious
+   fix and is wrong. `make_recovery_callback` explains why: the continuation
    callback (#88) counts one evaluation as one epoch, so a steps-based eval ends
-   a `max_epochs: 3` run after three evaluations. **Only saving moves.**
-2. The VLM backend is deliberately outside the artefact cache (its JSONL names
-   image paths inside its own job directory). So `_reuse_artefact` always returns
-   None here — and that same property is what makes resuming trivial: the files
-   are still in this job's directory.
+   a `max_epochs: 3` run after three evaluations, a few hundred steps in. **Only
+   saving moves.** `load_best_model_at_end` goes with it, which is a trade rather
+   than a loss in the single-epoch corpus runs this mode exists for.
+2. **`_reuse_artefact` is the wrong hook.** It asks whether *another* job's
+   corpus can be adopted, and answers None for this backend by design — the VLM
+   JSONL names image paths inside its own job directory, so it is not
+   relocatable. That same property is what makes resuming trivial: the files are
+   still in *this* job's directory, and a requeue does not delete it.
 
-**What the first GPU test actually proved, and did not.** Job 14681323 resumed
-and completed — and the mechanism was still broken. The runner exited **143**
-(killed by SIGTERM), so the handler never ran and the record survived in
-`training` only because a hard kill leaves it there. **The graceful path had never
-executed once.**
+#### Two interruption modes, and they are not the same
 
-The bug was in the batch script: **bash's `wait` returns as soon as a *trapped*
-signal arrives, with 128+signum, without waiting for the child.** The script read
-143 as the runner's status, skipped the exit-75 branch, and killed the runner
-mid-shutdown by exiting. Fixed by re-waiting; verified in isolation (first wait
-143, second 75). It matters beyond tidiness: a hard kill gives the trainer no
-chance to flush a checkpoint, and the trainer is spawned **detached**, so killing
-the runner does not necessarily stop it — the #118 zombie, now holding a GPU.
+This is the part that took two GPU tests to get right.
 
-**Status.**
+| | **preemption / requeue** | **walltime expiry** |
+|---|---|---|
+| what Slurm does | signals, then **kills the step promptly** | `--signal=B:TERM@120` signals **120 s early** |
+| is there time to shut down? | **no** | yes |
+| what keeps the job resumable | nothing writes a terminal status, and `JobStore.save` is tmp-then-`os.replace`, so a hard kill cannot corrupt the record | the `Preempted` handler, exit 75, the batch script's requeue branch |
+
+**The graceful path is a walltime mechanism, not a preemption one.** An earlier
+version of this section claimed otherwise.
+
+#### What the tests actually proved
+
+**Job 14681323 — a false pass.** It resumed and completed, which looked like
+success. The runner had exited **143**, killed by SIGTERM: the handler never ran
+and the record survived only because a hard kill leaves it alone. The bug was in
+the batch script — **bash's `wait` returns as soon as a *trapped* signal arrives,
+with 128+signum, without waiting for the child**, so the script read 143 as the
+runner's status, skipped the exit-75 branch, and killed the runner mid-shutdown
+by exiting. Fixed by re-waiting (`0e724cc`); verified in isolation, where the
+first `wait` returns 143 and the second returns the child's 75.
+
+**Job 14687032 — the real pass.** Same job id across a genuine `scontrol
+requeue`:
+
+```
+attempt 1 …  train.log: "no checkpoint found; starting from scratch"
+== SIGTERM received, forwarding to 490117
+attempt 2 …  train.log: "resuming from …/checkpoint-160"
+             runner.log: "re-entered while `training` — resuming after preemption"
+== runner exited 0 · status: completed
+```
+
+Attempt 2 picked up at step 160 and ran the epoch out to 1101 steps. **No
+orphaned trainer, no held GPU, record coherent throughout.** Attempt 1's runner
+log ends at the trainer invocation — no `Preempted`, no exit 75 — which is how
+the preemption column above was established rather than assumed.
+
+#### Status
 
 | | |
 |---|---|
 | implementation | **done**, on `main` |
-| unit coverage | **1017 tests pass**, 14 new; verified on a clean checkout of HEAD, not just the working tree |
-| lint | clean |
-| resume-after-hard-kill | **proven on GPU** (14681323) |
-| **graceful SIGTERM → exit 75 → requeue** | **NOT yet proven on GPU** — job 14687032 was mid-test when the VPN dropped |
+| unit coverage | **1017 tests**, 14 new; verified on a clean checkout of HEAD |
+| resume across **`scontrol requeue`** | **proven on GPU** (14687032) |
+| resume after a **hard kill** | **proven on GPU** (14681323) |
+| graceful **walltime** shutdown → exit 75 | under test (14697771: 8 min wall, `--signal=B:TERM@120`) |
 
-The last row is the one that matters and it is not green yet. Three lines confirm
-it when the run completes: `preempted; leaving it in training` (runner log),
-`runner exited 75` (batch log), `resuming from …/checkpoint-N` (trainer log).
-Until they are all seen, treat resume as proven only for a hard kill.
+The last row is belt-and-braces: the campaign is already safe without it, because
+the preemption path does not depend on it.
+
+---
+
+## 10. What the campaign established, in one table
+
+Every row measured on the same 400-page medieval selection (8,668 train / 1,117
+val crops), Qwen3-VL unless stated.
+
+| # | question | answer |
+|---|---|---|
+| A | is it IO-bound? | **no** — GPFS, node NVMe and page cache within 2 %. Staging *costs*: 10–31 h of copying at full scale for −0.5 %. |
+| B | is 4-bit worth it? | **no** — bf16 is **+23 %** and uses 40 GB of a 94 GB card. 4-bit is an asterAIx inheritance. |
+| C | does a smaller model do? | **4B matches 8B** (CER 0.334 vs 0.341) at half the size. 2B is 31 % worse. |
+| D | are visual tokens the lever? | **no** — an 8× range moved throughput 5 %. 128 and 256 tie on CER; 512 is *worse*. |
+| E | is the GPU starved? | **yes — idle 46 % of wall clock.** But not by the dataloader: 4→16 workers changed 1 %. |
+| F | what was it waiting for? | **the micro-batch.** bs 4→16 is **+58 %**, utilization 51 %→86 %. The optimizer was innocent (1.02×). |
+
+**Production configuration:** Qwen3-VL-4B · bf16 · 256 visual tokens ·
+`batch_size` 16 · `workers` 8 · straight off GPFS · `save_steps` set ·
+4× H100 preemptable.
+
+**Cost:** ~6 days of GPU time for 3 epochs over the measured ~10.4 M crops, free.
+Calendar time is demand-dependent and can be far longer — see §9.3-I.
+
+**The through-line.** A, C, D and E each varied something the GPU was not waiting
+on, which is exactly why they all returned the same ~11 samples/s. Two defaults
+inherited from a box that *shares* its A40 with the serving engines —
+`load_in_4bit` and `batch_size: 4` — were together costing a factor of ~2 on
+hardware we own outright. Neither was a bug; both were right where they came from.
 
 ### 9.3-C The schedule, re-anchored again
 
