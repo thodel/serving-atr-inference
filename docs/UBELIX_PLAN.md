@@ -962,7 +962,35 @@ the preemption column above was established rather than assumed.
 | resume across **`scontrol requeue`** | **proven on GPU** (14687032) |
 | resume after a **hard kill** | **proven on GPU** (14681323) |
 | graceful **walltime** shutdown → exit 75 | **does not fire** — see below |
-| walltime chunking without a human | fixed by requeueing from the trap; under test (14701151) |
+| walltime chunking without a human | **proven** (14701151): three attempts, `no checkpoint` → `checkpoint-280` → `checkpoint-680`, requeued automatically |
+| resuming from a **half-written** checkpoint | **was fatal**; fixed (`last_complete_checkpoint`) |
+
+#### The bug that mattered: a kill during a save ended the run
+
+Job 14701151 chunked correctly through three attempts and then died:
+
+```
+FileNotFoundError: …/checkpoint-680/trainer_state.json
+StageFailed in train  →  status: failed
+```
+
+`transformers.trainer_utils.get_last_checkpoint` returns the highest-numbered
+`checkpoint-N` directory that **exists**. On a preemptable queue that is not the
+same as one that can be **resumed from**: the directory is populated
+progressively, so a job killed mid-save leaves a partial one,
+`get_last_checkpoint` hands it back, and the resume dies — which the runner
+records as a failed stage. **`failed` is terminal**, so a kill that happened to
+land during a save turned a resumable six-day run into a dead one.
+
+`last_complete_checkpoint` walks the checkpoints newest-first and takes the first
+with a `trainer_state.json` — the file the Trainer writes **last**, so its
+presence means the rest of the directory is already there. Falling back one
+checkpoint costs at most `save_steps` of redone work, which is exactly what that
+setting exists to bound.
+
+**This is the failure only a real preemption could have found.** Every unit test
+passed before it, both earlier GPU tests passed, and the design was wrong in a way
+that would have surfaced days into the production run.
 
 #### The graceful path does not fire, and nothing depends on it
 

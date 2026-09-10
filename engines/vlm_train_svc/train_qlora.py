@@ -347,6 +347,51 @@ def build_model(args, processor):
     return model
 
 
+def last_complete_checkpoint(out_dir: Path) -> str | None:
+    """The newest checkpoint that is actually **finished being written**.
+
+    ``transformers.trainer_utils.get_last_checkpoint`` returns the
+    highest-numbered ``checkpoint-N`` directory that exists. On a preemptable
+    queue that is not the same as one that can be resumed from: a checkpoint
+    directory is populated progressively, so a job killed mid-save leaves a
+    partial one, ``get_last_checkpoint`` hands it back, and the resume dies with
+
+        FileNotFoundError: …/checkpoint-680/trainer_state.json
+
+    which the runner records as a **failed** stage. `failed` is terminal, so a
+    kill that happened to land during a save turns a resumable multi-day run into
+    a dead one. Seen for real on job 14701151, on the third attempt of a
+    walltime-chunked run.
+
+    ``trainer_state.json`` is the right marker because the Trainer writes it last
+    — if it is there, the rest of the directory already is. Falling back to the
+    previous checkpoint costs at most ``save_steps`` of extra work, which is what
+    that setting exists to bound. ``save_total_limit`` keeps more than one, so
+    there is normally something to fall back to.
+    """
+    if not out_dir.is_dir():
+        return None
+
+    def step(path: Path) -> int:
+        try:
+            return int(path.name.split("-")[-1])
+        except ValueError:
+            return -1
+
+    candidates = sorted((d for d in out_dir.glob("checkpoint-*") if d.is_dir()),
+                        key=step, reverse=True)
+    for candidate in candidates:
+        if (candidate / "trainer_state.json").is_file():
+            if candidate is not (candidates[0] if candidates else None):
+                print(f"skipped {candidates[0].name}: incomplete, resuming from "
+                      f"{candidate.name} instead", flush=True)
+            return str(candidate)
+    if candidates:
+        print(f"found {len(candidates)} checkpoint(s), none complete; "
+              "starting from scratch", flush=True)
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     from transformers import AutoProcessor, Trainer, TrainingArguments, set_seed
@@ -445,13 +490,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"recovery: off, an epoch is only {steps_per_epoch} steps", flush=True)
 
-    # Resume if this output directory already holds a checkpoint. Passing
-    # resume_from_checkpoint=True instead would raise when there is none, and
-    # "no checkpoint yet" is the normal state of a first attempt — the same run
-    # has to work both ways for a requeue to be transparent.
-    from transformers.trainer_utils import get_last_checkpoint
-
-    resume_from = get_last_checkpoint(str(out_dir)) if out_dir.is_dir() else None
+    # Resume if this output directory already holds a *usable* checkpoint.
+    # ``resume_from_checkpoint=True`` would raise when there is none, and "no
+    # checkpoint yet" is the normal state of a first attempt — the same run has
+    # to work both ways for a requeue to be transparent.
+    resume_from = last_complete_checkpoint(out_dir)
     if resume_from:
         print(f"resuming from {resume_from}", flush=True)
     else:

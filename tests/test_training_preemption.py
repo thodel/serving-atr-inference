@@ -21,6 +21,7 @@ from atr_serving.training.runner_base import (
 from atr_serving.training.vlm_cmd import train_cmd
 
 from vlm_train_svc.runner import Pipeline
+from vlm_train_svc.train_qlora import last_complete_checkpoint
 
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.settings import TrainerSettings
@@ -193,3 +194,51 @@ def test_save_steps_is_passed_to_the_trainer():
     )
     assert "--save-steps" in cmd
     assert cmd[cmd.index("--save-steps") + 1] == "250"
+
+
+# ── resuming from a half-written checkpoint ─────────────────────────────────
+def _checkpoint(root, step, *, complete=True):
+    d = root / f"checkpoint-{step}"
+    d.mkdir(parents=True)
+    (d / "adapter_model.safetensors").write_bytes(b"W")
+    if complete:                       # the Trainer writes this one LAST
+        (d / "trainer_state.json").write_text("{}", encoding="utf-8")
+    return d
+
+
+def test_the_newest_complete_checkpoint_is_chosen(tmp_path):
+    _checkpoint(tmp_path, 40)
+    newest = _checkpoint(tmp_path, 680)
+    assert last_complete_checkpoint(tmp_path) == str(newest)
+
+
+def test_a_half_written_checkpoint_is_skipped(tmp_path):
+    """The failure that killed job 14701151 on its third attempt.
+
+    A checkpoint directory is populated progressively, so a job killed mid-save
+    leaves one that exists but cannot be resumed from. transformers'
+    get_last_checkpoint hands it back regardless, the resume dies on the missing
+    trainer_state.json, and the runner records a FAILED stage — which is
+    terminal. A kill that lands during a save must not be able to end a
+    multi-day run.
+    """
+    good = _checkpoint(tmp_path, 640)
+    _checkpoint(tmp_path, 680, complete=False)
+    assert last_complete_checkpoint(tmp_path) == str(good)
+
+
+def test_no_complete_checkpoint_starts_from_scratch(tmp_path):
+    _checkpoint(tmp_path, 680, complete=False)
+    assert last_complete_checkpoint(tmp_path) is None
+
+
+def test_an_empty_output_dir_starts_from_scratch(tmp_path):
+    assert last_complete_checkpoint(tmp_path) is None
+    assert last_complete_checkpoint(tmp_path / "nope") is None
+
+
+def test_checkpoints_are_ordered_numerically_not_lexically(tmp_path):
+    """checkpoint-1080 is newer than checkpoint-680, and sorts before it."""
+    _checkpoint(tmp_path, 680)
+    newest = _checkpoint(tmp_path, 1080)
+    assert last_complete_checkpoint(tmp_path) == str(newest)
