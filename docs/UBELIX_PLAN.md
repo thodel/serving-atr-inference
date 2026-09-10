@@ -750,6 +750,56 @@ document should stop guessing and profile.
 Until that resolves, **every schedule below is a lower bound on speed** — the
 10.4 M-crop campaign may be considerably cheaper than 9.8 days.
 
+### 9.3-F Experiment E — the GPU *is* starved, and workers are not why
+
+Job 14584141, Qwen3-VL-4B bf16, 256 visual tokens, three worker counts, GPU
+utilization sampled every 5 s throughout each arm.
+
+| workers | samples/s | CER | GPU util (median) | p90 | max |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 11.07 | 0.3449 | **54 %** | 75 % | 87 % |
+| 8 | 11.10 | 0.3449 | **54 %** | 77 % | 85 % |
+| 16 | 10.97 | 0.3449 | **52 %** | 75 % | 87 % |
+
+Identical CER across all three is a useful side-check: the runs are
+deterministic, so these arms differ only in what was intended.
+
+**Half of the answer is confirmed and half of it is refuted.**
+
+**Confirmed: the GPU is idle about half the time.** And this is worth reading
+precisely — `utilization.gpu` is the fraction of time *any kernel was
+executing*, not how efficiently it ran. 54 % does not mean "poor occupancy"; it
+means the card had **literally nothing to run for 46 % of the wall clock**. That
+is a stall, and it explains the 10.8–11.3 ceiling that A, B, C and D all ran
+into from different directions.
+
+**Refuted: it is not the dataloader.** Quadrupling workers from 4 to 16, on an
+allocation with 16 CPUs, changed throughput by 1 % and utilization by 2 %. §9.3-E
+named `--workers 4` as the prime suspect. It is not guilty.
+
+**Two hypotheses have now died this way** — `max_pixels` in D, workers in E — and
+the honest reading is that guessing the mechanism from throughput numbers has
+stopped being productive. What E adds is that the *shape* of the problem is now
+known (a stall, not slow work), which is much narrower than what D left.
+
+**What can stall a training loop while the dataloader has spare capacity:**
+
+* **`paged_adamw_8bit`.** This is bitsandbytes' *paged* optimizer — designed to
+  page state between GPU and CPU when VRAM is tight. We have **54 GB free**, so
+  it is paying for a service nobody needs, and every optimizer step (one per 4
+  micro-batches, with `accumulate_grad_batches: 4`) is a synchronous host
+  transfer during which the GPU has nothing to do.
+* **`batch_size: 4` with `accumulate_grad_batches: 4`.** Small steps mean more
+  optimizer steps per sample, multiplying whatever the per-step overhead is.
+
+Both are testable as a **2×2** — optimizer (`paged_adamw_8bit` / `adamw_torch`)
+× batch size (4 / 16) — which discriminates between them instead of confounding
+them, and costs about 90 minutes. If the 2×2 also comes back flat, the next step
+is `torch.profiler` on one arm, **not** a seventh sweep.
+
+Note this changes nothing about quality: CER 0.3449 throughout, and the schedule
+in §9.3-C stands as a lower bound until the stall is understood.
+
 ### 9.3-C The schedule, re-anchored again
 
 bf16 at 10.85 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~37 samples/s**:
