@@ -856,6 +856,31 @@ fewer parameters, fewer visual tokens nor more dataloader workers changes that.
 read straight off GPFS · 4× H100 preemptable. Six days, free, for three epochs
 over the whole medieval set.
 
+### 9.3-I Queue time is not free, and it may dominate
+
+Measured 2026-09-10: a 1× H100 job on `job_gpu_preemptable` was given an
+estimated start of **the following morning — a ~14 hour wait**, with **26 other
+pending H100 requests** on that queue.
+
+This matters more than it looks. Every schedule in this document counts *compute*
+time. The preemptable path runs in 24 h chunks, and if each chunk waits hours to
+start, a **6-day compute campaign is a calendar campaign of unknown length**. The
+correct way to read §9.3-H is now:
+
+* **~6 days of GPU time** — measured, reliable.
+* **calendar time — unknown, and demand-dependent.** It is bounded below by 6
+  days and could be two or three times that when the queue looks like this.
+
+Two consequences:
+
+* A run should hold its allocation rather than release it. Requeueing after every
+  24 h chunk means re-entering a queue that may be a day deep, so **fewer, longer
+  chunks are worth more than the QoS ceiling suggests** — which is an argument for
+  the 96 h `job_gratis` QoS (1× H100, no preemption) over 4× H100 preemptable
+  whenever the queue is congested, despite the 4× fewer GPUs.
+* Queue depth should be checked *before* choosing a QoS for a long run, not
+  assumed. `squeue -p gpu-invest -h -t PENDING -o "%b" | grep -c h100`.
+
 ### 9.3-C The schedule, re-anchored again
 
 bf16 at 10.85 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~37 samples/s**:
