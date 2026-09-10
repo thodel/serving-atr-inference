@@ -881,6 +881,67 @@ Two consequences:
 * Queue depth should be checked *before* choosing a QoS for a long run, not
   assumed. `squeue -p gpu-invest -h -t PENDING -o "%b" | grep -c h100`.
 
+### 9.4 Preemption-resume — implemented (#111), GPU verification pending
+
+Phase 3's gate. Before this, **nothing here survived a preemption**: SIGTERM meant
+`cancelled`, `cancelled` is terminal, and the trainer checkpointed once per epoch
+— so a job preempted at hour 23 of a two-day epoch resumed from nothing, and a
+six-day run would never have finished.
+
+**Four pieces**, all on `main` (`80d7a68`, `0e724cc`):
+
+| piece | what it does |
+|---|---|
+| `Preempted` ≠ `Cancelled` | a cancellation is a decision, a preemption an interruption. SIGINT still cancels either way. |
+| exit **75** (`EX_TEMPFAIL`) | a requeue is distinguishable from a real failure; requeueing genuine failures forever is how a broken job burns a week |
+| `training` self-edge | the only loosened transition; `completed`/`failed`/`cancelled` stay terminal |
+| `save_steps` | step checkpointing, because an epoch at corpus scale is days |
+| `_resume_artifacts` | a **different question** from `_reuse_artefact`, which answers None for this backend by design |
+
+`ubelix/train_resumable.sbatch` is the production template: `--requeue`, a stable
+training job id keyed on `SLURM_JOB_ID` across attempts, SIGTERM forwarded, and
+exit 75 handled as "requeue".
+
+**Two traps, both already documented in the code, both nearly walked into:**
+
+1. Moving `eval_strategy` to steps alongside `save_strategy` is the obvious fix
+   and is wrong — `make_recovery_callback` explains why: the continuation
+   callback (#88) counts one evaluation as one epoch, so a steps-based eval ends
+   a `max_epochs: 3` run after three evaluations. **Only saving moves.**
+2. The VLM backend is deliberately outside the artefact cache (its JSONL names
+   image paths inside its own job directory). So `_reuse_artefact` always returns
+   None here — and that same property is what makes resuming trivial: the files
+   are still in this job's directory.
+
+**What the first GPU test actually proved, and did not.** Job 14681323 resumed
+and completed — and the mechanism was still broken. The runner exited **143**
+(killed by SIGTERM), so the handler never ran and the record survived in
+`training` only because a hard kill leaves it there. **The graceful path had never
+executed once.**
+
+The bug was in the batch script: **bash's `wait` returns as soon as a *trapped*
+signal arrives, with 128+signum, without waiting for the child.** The script read
+143 as the runner's status, skipped the exit-75 branch, and killed the runner
+mid-shutdown by exiting. Fixed by re-waiting; verified in isolation (first wait
+143, second 75). It matters beyond tidiness: a hard kill gives the trainer no
+chance to flush a checkpoint, and the trainer is spawned **detached**, so killing
+the runner does not necessarily stop it — the #118 zombie, now holding a GPU.
+
+**Status.**
+
+| | |
+|---|---|
+| implementation | **done**, on `main` |
+| unit coverage | **1017 tests pass**, 14 new; verified on a clean checkout of HEAD, not just the working tree |
+| lint | clean |
+| resume-after-hard-kill | **proven on GPU** (14681323) |
+| **graceful SIGTERM → exit 75 → requeue** | **NOT yet proven on GPU** — job 14687032 was mid-test when the VPN dropped |
+
+The last row is the one that matters and it is not green yet. Three lines confirm
+it when the run completes: `preempted; leaving it in training` (runner log),
+`runner exited 75` (batch log), `resuming from …/checkpoint-N` (trainer log).
+Until they are all seen, treat resume as proven only for a hard kill.
+
 ### 9.3-C The schedule, re-anchored again
 
 bf16 at 10.85 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~37 samples/s**:
