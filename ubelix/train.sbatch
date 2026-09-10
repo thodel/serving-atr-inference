@@ -31,11 +31,28 @@ set -uo pipefail
 
 S=/scratch/network/users/$USER
 REPO=$HOME/serving-atr-inference
-SIF=$HOME/ubelix/vlm-train.sif
+# Overridable so the same job can run under the transformers 5.x image:
+#   sbatch --export=ALL,SIF=$HOME/ubelix/vlm-train-tf5.sif …
+SIF=${SIF:-$HOME/ubelix/vlm-train.sif}
 JOB_ID=${JOB_ID:-$(cat "$S/runs/last-prepared.jobid" 2>/dev/null)}
 [ -n "${JOB_ID:-}" ] || { echo "set JOB_ID=<id> from a prepare run" >&2; exit 2; }
 
 export HF_HOME=/storage/research/wbkolleg_dh_1/Textrecognition_Training/hf_hub
+
+# HF token, if one is present. Read from a PRIVATE file in $HOME, never from
+# $HF_HOME/token: HF_HOME points at the group-readable research share, so the
+# default location would expose the token to everyone in wbkolleg_dh_1.
+#
+# Without it, prepare is rate-limited as an anonymous IP and a corpus with many
+# project directories dies mid-stream:
+#   429 … We had to rate limit your IP … make sure you pass a HF_TOKEN
+# (job 14710443, koenigsfelden-charters-post-1500, 1,185 project globs.)
+if [ -r "$HOME/.hf_token" ]; then
+  HF_TOKEN=$(cat "$HOME/.hf_token"); export HF_TOKEN
+  echo "== HF token: present"
+else
+  echo "== HF token: ABSENT — prepare will use anonymous rate limits"
+fi
 export ATR_TRAIN_JOBS_ROOT=$S/runs/jobs
 export ATR_TRAIN_CHECKPOINT_ROOT=$S/runs/checkpoints
 export ATR_TRAIN_TRAINED_ROOT=$S/runs/trained
@@ -49,7 +66,7 @@ run() {
   apptainer exec --nv \
     --bind /storage/research:/storage/research \
     --bind /scratch:/scratch --bind /rs_scratch:/rs_scratch \
-    --env HF_HOME="$HF_HOME" \
+    --env HF_HOME="$HF_HOME" --env HF_TOKEN="${HF_TOKEN:-}" \
     --env ATR_TRAIN_JOBS_ROOT="$ATR_TRAIN_JOBS_ROOT" \
     --env ATR_TRAIN_CHECKPOINT_ROOT="$ATR_TRAIN_CHECKPOINT_ROOT" \
     --env ATR_TRAIN_TRAINED_ROOT="$ATR_TRAIN_TRAINED_ROOT" \

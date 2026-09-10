@@ -68,6 +68,36 @@ CER.
 Compute nodes have internet (verified: `huggingface.co → 200` from `bnode009`),
 so corpora need not be pre-cached on the share.
 
+### The HF token (do this once)
+
+Without one, `prepare` is rate-limited as an anonymous IP and dies mid-stream on
+any corpus with many project directories:
+
+```
+429 … We had to rate limit your IP (130.92.232.126) … make sure you pass a HF_TOKEN
+```
+
+The `hf` CLI is inside the container, not on the login node. But **do not run
+`hf auth login`**: it writes to `$HF_HOME/token`, and `HF_HOME` here points at the
+**group-readable research share**, so the token would be exposed to everyone in
+`wbkolleg_dh_1`. Put it in a private file in `$HOME` instead — the jobs read it
+from there:
+
+```bash
+umask 077
+read -rs -p 'HF token: ' T && printf '%s' "$T" > ~/.hf_token && unset T && echo
+chmod 600 ~/.hf_token
+```
+
+Every sbatch here picks it up automatically and reports `HF token: present` or
+`ABSENT` in its log.
+
+*Partial mitigation without a token:* a selection that covers **every** project in
+a repo collapses to one glob (`collapse_complete_selection`, #89), so
+`all_projects: true` avoids the per-project calls. It only helps when taking the
+whole repo is what you want — `plan_corpus` deduplicates, which makes selections
+incomplete and re-exposes the problem.
+
 ### The measured configuration
 
 Every value comes from an experiment in `docs/UBELIX_PLAN.md` §9, not from taste:
