@@ -84,6 +84,32 @@ Space". See [`docs/UBELIX_PLAN.md`](../docs/UBELIX_PLAN.md) §4.3.
 #SBATCH --gres=gpu:h100:4
 ```
 
+## Long runs: preemption and resume
+
+`train_resumable.sbatch` is the template for anything that will not finish inside
+one allocation. Three things have to line up, and all three are in the script:
+
+* `--requeue`, so Slurm puts the job back rather than ending it;
+* a **stable training job id** across attempts, written once and read back from
+  `$SCRATCH/runs/slurm-$SLURM_JOB_ID.jobid` — without it each attempt creates a
+  new job, compiles a new corpus with a **new seeded split**, and starts at zero;
+* `ATR_TRAIN_PREEMPTABLE=1`, so the runner treats SIGTERM as "resume later"
+  rather than "cancelled" and leaves the record in `training`.
+
+Set `save_steps` in the spec. The default (0) checkpoints once per epoch, which
+is right when an epoch is minutes and useless when it is days.
+
+**Two interruption modes, and they behave differently.** On preemption or
+`scontrol requeue`, Slurm kills the step promptly — there is no time to shut
+down, and what keeps the job resumable is that nothing writes a terminal status
+(`JobStore.save` is tmp-then-`os.replace`, so a hard kill cannot corrupt the
+record). At **walltime**, `--signal=B:TERM@120` gives 120 seconds and the
+graceful path runs. Both end in the same place; only the second logs about it.
+
+Verify a resume by three lines: `resuming from …/checkpoint-N` (trainer log),
+`re-entered while \`training\`` (runner log), and the same job id on both
+attempts (batch log).
+
 ## Four things that differ from asterAIx
 
 All of them are set in `smoke.sbatch`; copy that header for any new job.
