@@ -961,10 +961,36 @@ the preemption column above was established rather than assumed.
 | unit coverage | **1017 tests**, 14 new; verified on a clean checkout of HEAD |
 | resume across **`scontrol requeue`** | **proven on GPU** (14687032) |
 | resume after a **hard kill** | **proven on GPU** (14681323) |
-| graceful **walltime** shutdown → exit 75 | under test (14697771: 8 min wall, `--signal=B:TERM@120`) |
+| graceful **walltime** shutdown → exit 75 | **does not fire** — see below |
+| walltime chunking without a human | fixed by requeueing from the trap; under test (14701151) |
 
-The last row is belt-and-braces: the campaign is already safe without it, because
-the preemption path does not depend on it.
+#### The graceful path does not fire, and nothing depends on it
+
+Job 14697771, an 8-minute wall with `--signal=B:TERM@120`: Slurm signalled twice,
+the trap forwarded twice, and **the runner did not act** — no `Preempted`, no
+exit 75, nothing in `runner.log`. The job ran to `TIMEOUT`. In an isolated test
+the same signal through the same container *does* reach Python and exits 75, so
+the handler is correct in principle and something about the real runner — most
+likely being blocked waiting on the detached trainer — swallows it.
+
+**This does not endanger a long run, and it is worth being clear why.** What keeps
+a job resumable is not the handler:
+
+* a killed runner **writes no terminal status**, so the record stays `training`;
+* `JobStore.save` is **tmp-file-then-`os.replace`**, so even a kill mid-write
+  cannot corrupt it;
+* the trainer checkpoints every `save_steps`, so at most that much work is lost.
+
+All three were confirmed on GPU. The record in 14697771 was `training` after the
+timeout, exactly as required.
+
+#### But a walltime expiry does not requeue itself
+
+That *was* a real gap. A preemption requeues via `--requeue`; a **TIMEOUT simply
+ends the job**, leaving it resumable but waiting for a human. A six-day run in
+24 h chunks would stall at every wall. Fixed by calling `scontrol requeue` **from
+the trap**, 120 s before the wall — which does not depend on the runner handling
+the signal at all.
 
 ---
 

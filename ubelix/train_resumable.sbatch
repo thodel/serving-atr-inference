@@ -76,9 +76,25 @@ else
 fi
 echo "== node $(hostname) $(date -Is)"
 
-# Forward SIGTERM to the runner so it can leave the record resumable. Slurm
-# sends it 120 s before the wall (--signal above) and on preemption.
-trap 'echo "== SIGTERM received, forwarding to $PID"; kill -TERM "$PID" 2>/dev/null' TERM
+# Slurm sends SIGTERM 120 s before the wall (--signal above) and on preemption.
+#
+# The requeue here is the load-bearing part, NOT the forwarded signal. A
+# preemption requeues on its own (--requeue), but a WALLTIME expiry does not: the
+# job ends as TIMEOUT with the record still in `training`, and a six-day run in
+# 24 h chunks would stop at every wall waiting for a human. Requeueing from the
+# trap makes the chunking automatic.
+#
+# Measured (job 14697771, an 8 min wall): the runner does NOT act on the
+# forwarded SIGTERM — no Preempted, no exit 75, nothing in runner.log. The signal
+# is still forwarded because it costs nothing and gives the trainer a chance to
+# stop cleanly, but nothing depends on it. What makes the job resumable is that a
+# killed runner writes no terminal status, and `JobStore.save` is
+# tmp-file-then-os.replace, so even a kill mid-write cannot corrupt the record.
+trap '
+  echo "== SIGTERM at $(date -Is) — requeueing $SLURM_JOB_ID"
+  kill -TERM "$PID" 2>/dev/null
+  scontrol requeue "$SLURM_JOB_ID" 2>/dev/null || echo "   (requeue refused; job will end)"
+' TERM
 
 run python -m vlm_train_svc.runner --root "$ATR_TRAIN_JOBS_ROOT" --job-id "$JOB_ID" &
 PID=$!
