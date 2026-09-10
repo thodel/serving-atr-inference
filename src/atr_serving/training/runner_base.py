@@ -670,6 +670,21 @@ class BasePipeline(ABC):
         return ArtefactCache(self.settings.artefact_cache_root,
                              max_bytes=int(budget * 1e9) if budget > 0 else None)
 
+    def _resume_artifacts(self, job: TrainJob) -> tuple[Any, Any] | None:
+        """The artefacts a requeued job should carry on training against.
+
+        **Not the same question as ``_reuse_artefact``.** That one asks whether
+        some *other* job's compiled corpus can be adopted, and answers None for
+        any backend whose output is not relocatable — the VLM backend's JSONL
+        names image paths inside its own job directory, so it deliberately stays
+        out of the cache. But that is exactly the property that makes a resume
+        easy: the files are in this job's directory and the requeue did not
+        delete it. A backend that cannot answer returns None and the job is
+        refused rather than silently restarted.
+        """
+        reused = self._reuse_artefact(job)
+        return reused
+
     def _cache_key(self, job: TrainJob):
         """The content key for this job's compiled corpus, or None to not cache.
 
@@ -812,14 +827,14 @@ class BasePipeline(ABC):
                 logger.warning(
                     "job {} re-entered while `training` — resuming after preemption",
                     job.id)
-                reused = self._reuse_artefact(job)
-                if reused is None:
+                resumed = self._resume_artifacts(job)
+                if resumed is None:
                     raise StageFailed(
-                        "cannot resume: the compiled corpus this job trained on is "
-                        "no longer in the artefact cache. Resubmit as a new job — "
-                        "resuming against a corpus recompiled from scratch would "
-                        "silently change the seeded split.")
-                train_artifact, val_artifact = reused
+                        "cannot resume: the corpus this job compiled is no longer on "
+                        "disk. Resubmit as a new job — resuming against a corpus "
+                        "recompiled from scratch would silently change the seeded "
+                        "split, and the run would no longer be the one that started.")
+                train_artifact, val_artifact = resumed
                 return self._finish(job, train_artifact, val_artifact)
 
             # #109: an identical selection compiled before is handed straight to

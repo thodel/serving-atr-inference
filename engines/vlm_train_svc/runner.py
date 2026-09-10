@@ -66,6 +66,22 @@ class Pipeline(BasePipeline):
     engine = "vllm"
 
     # ── compile: pages → JSONL sample sets ──────────────────────────────────
+    def _resume_artifacts(self, job: TrainJob) -> tuple[Path, Path] | None:
+        """This backend resumes from its own job directory.
+
+        ``_compile`` writes ``data/train.jsonl`` and ``data/val.jsonl`` next to
+        the crops they reference, and a Slurm requeue does not touch the job
+        directory — so a preempted run finds its corpus exactly where it left
+        it, with the same seeded split. Both files must be present: half a
+        corpus is not a corpus, and training on it would report a CER against a
+        validation set that no longer matches the one the run started with.
+        """
+        data = self.store.paths(job.id).data
+        train, val = data / "train.jsonl", data / "val.jsonl"
+        if train.is_file() and val.is_file():
+            return train, val
+        return None
+
     def _compile(self, job: TrainJob, pages_train: Path, pages_val: Path,
                  record: StageRecord) -> tuple[Path, Path]:
         """Turn the materialized pages into the trainer's JSONL sample sets.
