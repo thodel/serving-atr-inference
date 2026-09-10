@@ -95,6 +95,7 @@ def train_cmd(
            "--weight-decay", str(params.weight_decay),
            "--max-grad-norm", str(params.max_grad_norm),
            "--optim", params.optim,
+           "--save-steps", str(params.save_steps),
            "--lora-r", str(params.lora_r),
            "--lora-alpha", str(params.lora_alpha),
            "--lora-dropout", str(params.lora_dropout),

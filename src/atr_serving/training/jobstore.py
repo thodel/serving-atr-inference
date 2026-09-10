@@ -45,11 +45,20 @@ class IllegalTransition(JobStoreError):
 
 
 #: The lifecycle. Terminal statuses have no outgoing edges.
+#:
+#: ``training`` has a **self-edge**, and it is the only one. A job on a
+#: preemptable queue can lose its node mid-training and be requeued by the
+#: scheduler; when the runner starts again on the same job it is not beginning a
+#: new attempt, it is continuing this one from the last checkpoint. Marking that
+#: ``cancelled`` and starting over would throw away hours of GPU time and, on a
+#: multi-day run, would never finish at all. Every other status stays exactly as
+#: strict: a completed or failed job is still terminal, and a cancellation is
+#: still a cancellation.
 TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"preparing", "cancelled", "failed"}),
     "preparing": frozenset({"compiling", "cancelled", "failed"}),
     "compiling": frozenset({"training", "cancelled", "failed"}),
-    "training": frozenset({"testing", "cancelled", "failed"}),
+    "training": frozenset({"testing", "cancelled", "failed", "training"}),
     "testing": frozenset({"registering", "cancelled", "failed"}),
     "registering": frozenset({"completed", "cancelled", "failed"}),
     "completed": frozenset(),

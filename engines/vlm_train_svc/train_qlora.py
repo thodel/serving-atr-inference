@@ -59,6 +59,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
     p.add_argument("--optim", default="paged_adamw_8bit")
+    p.add_argument("--save-steps", type=int, default=0,
+                   help="checkpoint every N optimizer steps; 0 = once per epoch")
     p.add_argument("--lora-r", type=int, default=64)
     p.add_argument("--lora-alpha", type=int, default=128)
     p.add_argument("--lora-dropout", type=float, default=0.05)
@@ -385,10 +387,24 @@ def main(argv: list[str] | None = None) -> int:
             optim=args.optim,
             bf16=True,
             logging_steps=25,
+            # `eval_strategy` stays on EPOCHS in both modes, and that is the
+            # point. `make_recovery_callback` above documents why moving eval to
+            # steps is a trap: the continuation callback (#88) counts one
+            # evaluation as one epoch, so a steps-based eval would end a
+            # `max_epochs: 3` run after three evaluations, a few hundred steps
+            # in. Only *saving* moves.
+            #
+            # `load_best_model_at_end` then has to go, because it requires the
+            # two strategies to match. That is a trade, not a loss: this mode
+            # exists for corpus-scale single-epoch runs on a preemptable queue,
+            # where there is exactly one evaluation and so no best model to
+            # select — and where being unable to resume costs days.
             eval_strategy="epoch",
-            save_strategy="epoch",
+            **(dict(save_strategy="steps", save_steps=args.save_steps,
+                    load_best_model_at_end=False)
+               if args.save_steps else
+               dict(save_strategy="epoch", load_best_model_at_end=True)),
             save_total_limit=2,
-            load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             gradient_checkpointing=args.gradient_checkpointing,
@@ -429,7 +445,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"recovery: off, an epoch is only {steps_per_epoch} steps", flush=True)
 
-    trainer.train()
+    # Resume if this output directory already holds a checkpoint. Passing
+    # resume_from_checkpoint=True instead would raise when there is none, and
+    # "no checkpoint yet" is the normal state of a first attempt — the same run
+    # has to work both ways for a requeue to be transparent.
+    from transformers.trainer_utils import get_last_checkpoint
+
+    resume_from = get_last_checkpoint(str(out_dir)) if out_dir.is_dir() else None
+    if resume_from:
+        print(f"resuming from {resume_from}", flush=True)
+    else:
+        print("no checkpoint found; starting from scratch", flush=True)
+    trainer.train(resume_from_checkpoint=resume_from)
 
     # Save the adapter at the top of output_dir: find_adapter() looks there first,
     # and falls back to checkpoint-* only when a run did not get this far.

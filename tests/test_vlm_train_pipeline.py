@@ -466,9 +466,21 @@ def test_an_ordinary_corpus_loses_nothing(store, settings):
 from vlm_train_svc.train_qlora import recovery_interval  # noqa: E402
 
 
-def test_a_corpus_run_gets_a_snapshot_every_couple_of_hours():
-    # 2,352 steps at ~52 s/step is 33 hours; every 117 steps is roughly every 2.
+def test_the_german_corpus_run_lands_on_the_floor():
+    """The real numbers, measured on `…-german-pages-v3`: 12,538 train samples at
+    batch 1 x accumulate 16 is **784 steps per epoch** — not the 2,352 on the
+    progress bar, which is the three-epoch ceiling from `max_epochs`. 784 // 20 is
+    39, below the floor, so for this corpus the floor decides and a snapshot lands
+    every 50 steps, about every 45 minutes.
+
+    The fraction earns its keep on a longer epoch, not this one."""
+    assert recovery_interval(784) == 50
+    assert 784 // 20 < 50          # the fraction is not what is binding here
+
+
+def test_the_fraction_binds_once_an_epoch_is_long_enough():
     assert recovery_interval(2352) == 117
+    assert recovery_interval(4000) == 200
 
 
 def test_a_short_epoch_gets_none():

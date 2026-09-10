@@ -348,6 +348,12 @@ class VlmTrainParams(BaseModel):
 
     # ── budgets ──────────────────────────────────────────────────────────────
     #: None = the granularity's entry in VLM_PIXEL_BUDGET / VLM_MAX_SEQ_LEN.
+    #: Checkpoint every N optimizer steps. 0 keeps the per-epoch strategy, which
+    #: is right when an epoch is minutes. It is useless on a preemptable queue at
+    #: corpus scale: one epoch over 10 M line crops is days, the walltime is 24 h,
+    #: and a job preempted at hour 23 with epoch-only checkpoints resumes from
+    #: nothing. Set it to something that costs a few minutes of redone work.
+    save_steps: int = Field(default=0, ge=0)
     max_pixels: int | None = Field(default=None, ge=32 * 32)
     max_seq_len: int | None = Field(default=None, ge=32)
 

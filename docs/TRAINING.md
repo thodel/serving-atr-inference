@@ -887,9 +887,14 @@ nothing.
 A **recovery snapshot** is now written alongside, every ~5 % of an epoch:
 
 ```
-recovery: a snapshot every 117 of 2352 steps per epoch -> …/checkpoints/<job>/recovery
-recovery snapshot at step 117 -> …/recovery
+recovery: a snapshot every 50 of 784 steps per epoch -> …/checkpoints/<job>/recovery
+recovery snapshot at step 50 -> …/recovery
 ```
+
+Note **784**, not the 2,352 on the progress bar: that is the three-epoch ceiling
+from `max_epochs`, while the interval is derived per epoch. 784 // 20 is below the
+50-step floor, so for this corpus the floor is what binds — a snapshot every ~45
+minutes rather than every two hours.
 
 It is one directory, overwritten in place, holding the adapter and a
 `recovery.json` with `global_step` and `epoch`. Worst case is now the interval,

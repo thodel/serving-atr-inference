@@ -73,6 +73,7 @@ __all__ = [
     "tail",
     "install_cancel_handler",
     "run_job",
+    "Preempted",
 ]
 
 
@@ -81,6 +82,21 @@ class Cancelled(BaseException):
 
     Inherits BaseException so an ``except Exception`` in a stage cannot swallow a
     cancellation and report it as a training failure.
+    """
+
+
+class Preempted(BaseException):
+    """Raised when the scheduler takes the node back mid-training.
+
+    Deliberately NOT :class:`Cancelled`. A cancellation is a decision — the job
+    is over and its record says so. A preemption is an interruption: the work so
+    far is still valid, the last checkpoint is still on disk, and the job is
+    expected to run again. Recording the second as the first would mark days of
+    GPU time as abandoned and start the next attempt from zero, which on a
+    multi-day run means it never finishes at all.
+
+    BaseException for the same reason as ``Cancelled``: an ``except Exception``
+    inside a stage must not be able to swallow it.
     """
 
 
@@ -784,7 +800,28 @@ class BasePipeline(ABC):
         job.queued_reason = None
         self.store.save(job)
 
+        # A job found already in `training` was interrupted, not started: the
+        # scheduler requeued it and this is the same attempt continuing. Its
+        # pages and crops are still on disk and its checkpoint is still in the
+        # checkpoint root, so the only honest thing to do is skip straight to
+        # train and let the trainer pick the checkpoint up.
+        resuming = job.status == "training"
+
         try:
+            if resuming:
+                logger.warning(
+                    "job {} re-entered while `training` — resuming after preemption",
+                    job.id)
+                reused = self._reuse_artefact(job)
+                if reused is None:
+                    raise StageFailed(
+                        "cannot resume: the compiled corpus this job trained on is "
+                        "no longer in the artefact cache. Resubmit as a new job — "
+                        "resuming against a corpus recompiled from scratch would "
+                        "silently change the seeded split.")
+                train_artifact, val_artifact = reused
+                return self._finish(job, train_artifact, val_artifact)
+
             # #109: an identical selection compiled before is handed straight to
             # train. Both stages are skipped together — reusing the arrow while
             # still downloading the pages that produced it would save the ~20
@@ -814,42 +851,14 @@ class BasePipeline(ABC):
                 train_artifact, val_artifact = self._store_artefact(
                     job, train_artifact, val_artifact)
 
-            self.store.advance(job, "training")
-            with self._stage(job, "train") as rec:
-                model = self._train(job, train_artifact, val_artifact, rec)
+            return self._finish(job, train_artifact, val_artifact)
 
-            self.store.advance(job, "testing")
-            with self._stage(job, "test") as rec:
-                job.metrics = self._test(job, model, val_artifact, rec)
-            self.store.save(job)
-
-            self.store.advance(job, "registering")
-            with self._stage(job, "register"):
-                model_path = self._register(job, model, job.metrics)
-
-            # Outside the stage: a model that will not serve is not a failed run,
-            # so this may not take the job down with it (see training/promote.py).
-            try:
-                verdict = self._promote(job, model_path)
-            except BaseException as exc:  # noqa: BLE001 - never let the gate fail a run
-                verdict = PromotionResult(False, f"{type(exc).__name__}: {exc}")
-            job.promoted = verdict.promoted
-            job.promotion_reason = verdict.reason
-            logger.info("promotion gate: {} — {}",
-                        "PASSED" if verdict.promoted else "not promoted", verdict.reason)
-
-            # Same rule as the gate above, for the same reason: a model that was
-            # trained and scored is not a failed run because an upload did not
-            # happen. Never inside the stage, never raising (#88).
-            try:
-                job.published = self._maybe_publish(job, model_path)
-            except BaseException as exc:  # noqa: BLE001
-                job.published = f"not published: {type(exc).__name__}: {exc}"
-                logger.warning("auto-publish failed: {}", exc)
-            self.store.save(job)
-
-            return self.store.advance(job, "completed")
-
+        except Preempted:
+            # Leave the status exactly where it is — `training` — so the next
+            # attempt is recognised as a continuation. Nothing is written that
+            # would make this look finished.
+            logger.warning("job {} preempted; leaving it in `training` to resume", job.id)
+            raise
         except Cancelled:
             logger.warning("job {} cancelled", job.id)
             job.error = "cancelled on request"
@@ -861,6 +870,55 @@ class BasePipeline(ABC):
                 job, f"{type(exc).__name__} in {stage}: {exc}",
                 log_tail=tail(self._failure_log(job, stage), self.settings.log_tail_lines),
             )
+
+
+    def _finish(self, job: TrainJob, train_artifact: Any, val_artifact: Any) -> TrainJob:
+        """Train, score, register, promote, publish — the half that can resume.
+
+        Split out of :meth:`execute` so the normal path and the
+        resume-after-preemption path run **the same code**. A resumed job that
+        took a different route through registration or the promotion gate would
+        be a different job wearing the same id.
+
+        ``advance(job, "training")`` is a no-op edge on a resumed job and a real
+        one otherwise; the self-edge in TRANSITIONS exists for exactly this.
+        """
+        self.store.advance(job, "training")
+        with self._stage(job, "train") as rec:
+            model = self._train(job, train_artifact, val_artifact, rec)
+
+        self.store.advance(job, "testing")
+        with self._stage(job, "test") as rec:
+            job.metrics = self._test(job, model, val_artifact, rec)
+        self.store.save(job)
+
+        self.store.advance(job, "registering")
+        with self._stage(job, "register"):
+            model_path = self._register(job, model, job.metrics)
+
+        # Outside the stage: a model that will not serve is not a failed run,
+        # so this may not take the job down with it (see training/promote.py).
+        try:
+            verdict = self._promote(job, model_path)
+        except BaseException as exc:  # noqa: BLE001 - never let the gate fail a run
+            verdict = PromotionResult(False, f"{type(exc).__name__}: {exc}")
+        job.promoted = verdict.promoted
+        job.promotion_reason = verdict.reason
+        logger.info("promotion gate: {} — {}",
+                    "PASSED" if verdict.promoted else "not promoted", verdict.reason)
+
+        # Same rule as the gate above, for the same reason: a model that was
+        # trained and scored is not a failed run because an upload did not
+        # happen. Never inside the stage, never raising (#88).
+        try:
+            job.published = self._maybe_publish(job, model_path)
+        except BaseException as exc:  # noqa: BLE001
+            job.published = f"not published: {type(exc).__name__}: {exc}"
+            logger.warning("auto-publish failed: {}", exc)
+        self.store.save(job)
+
+        return self.store.advance(job, "completed")
+
 
     def _failure_log(self, job: TrainJob, stage: str) -> Path:
         """The log most likely to explain a failure in ``stage``.
@@ -887,14 +945,28 @@ class BasePipeline(ABC):
         return paths.logs / "runner.log"
 
 
-def install_cancel_handler() -> None:
-    """Turn SIGTERM/SIGINT into :class:`Cancelled` inside the runner."""
+def install_cancel_handler(preemptable: bool = False) -> None:
+    """Turn SIGTERM/SIGINT into :class:`Cancelled` inside the runner.
 
-    def _handler(signum, frame):  # noqa: ARG001
+    With ``preemptable`` set, **SIGTERM** raises :class:`Preempted` instead —
+    the scheduler is taking the node back and the job should resume, not end.
+    SIGINT keeps meaning cancel either way: a person pressing Ctrl-C means stop,
+    whatever queue the job happens to be on.
+
+    Slurm sends SIGTERM before it kills a preempted or requeued job, which is
+    the signal this exists to catch; on the ``job_gpu_preemptable`` QoS a
+    multi-day run will see it repeatedly, and every one of those has to be a
+    continuation rather than a cancellation.
+    """
+
+    def _cancel(signum, frame):  # noqa: ARG001
         raise Cancelled()
 
-    signal.signal(signal.SIGTERM, _handler)
-    signal.signal(signal.SIGINT, _handler)
+    def _preempt(signum, frame):  # noqa: ARG001
+        raise Preempted()
+
+    signal.signal(signal.SIGTERM, _preempt if preemptable else _cancel)
+    signal.signal(signal.SIGINT, _cancel)
 
 
 def run_job(pipeline_cls: type[BasePipeline], description: str,
@@ -910,8 +982,20 @@ def run_job(pipeline_cls: type[BasePipeline], description: str,
     settings = TrainerSettings()
     store = JobStore(args.root)
     logger.add(store.paths(args.job_id).logs / "runner.log", level="INFO")
-    install_cancel_handler()
 
-    job = pipeline_cls(store, settings).execute(args.job_id)
+    # Set by the batch script on a preemptable queue. Off by default, so the
+    # asterAIx service keeps treating SIGTERM as "stop this job".
+    preemptable = os.environ.get("ATR_TRAIN_PREEMPTABLE", "") not in ("", "0", "false")
+    install_cancel_handler(preemptable=preemptable)
+
+    try:
+        job = pipeline_cls(store, settings).execute(args.job_id)
+    except Preempted:
+        # 75 is EX_TEMPFAIL: "try again later", and the batch script requeues on
+        # it. A plain 1 would be indistinguishable from a genuine failure, and
+        # requeueing those forever is how a broken job burns a week of GPU.
+        logger.warning("job {} preempted — exiting {} for requeue", args.job_id, 75)
+        return 75
+
     logger.info("job {} finished: {}", job.id, job.status)
     return 0 if job.status == "completed" else 1
