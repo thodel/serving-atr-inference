@@ -455,3 +455,35 @@ def test_an_ordinary_corpus_loses_nothing(store, settings):
                        FakeRunner(), request)
     assert job.progress.long_samples == 0
     assert job.progress.max_sample_chars == len("Item ontfaen van Janne\nvan der Straten")
+
+
+# ── recovery snapshots (#119) ───────────────────────────────────────────────
+#
+# `20260909T190659Z-qwen3vl-german-pages-v2` trained 8 h 50 m, reached step 628 of
+# 2352, died in a network outage, and left an empty checkpoint directory:
+# `save_strategy="epoch"` with `epochs: 1` is one write, after the last step.
+
+from vlm_train_svc.train_qlora import recovery_interval  # noqa: E402
+
+
+def test_a_corpus_run_gets_a_snapshot_every_couple_of_hours():
+    # 2,352 steps at ~52 s/step is 33 hours; every 117 steps is roughly every 2.
+    assert recovery_interval(2352) == 117
+
+
+def test_a_short_epoch_gets_none():
+    """A snapshot at step 50 of 52 is written work that saves nothing — the
+    Trainer's own epoch-end save is a few steps away."""
+    assert recovery_interval(52) == 0
+    assert recovery_interval(99) == 0
+
+
+def test_the_interval_is_bounded_at_both_ends():
+    assert recovery_interval(100) == 50           # floor, not 100//20 == 5
+    assert recovery_interval(1_000_000) == 500    # ceiling
+
+
+def test_it_scales_with_the_epoch_rather_than_being_a_constant():
+    """The whole defect: a constant that suits a 52-step smoke run is worthless on
+    a 2,352-step corpus run."""
+    assert recovery_interval(4000) > recovery_interval(2000) > recovery_interval(1000)

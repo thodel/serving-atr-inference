@@ -831,8 +831,17 @@ policy completes its full cycle before the scheduler stops improving.
 
 ### Job stuck in `training` with a dead PID
 
-After a service restart, the trainer reconciles running jobs against the process
-table. A job whose PID is gone is marked `failed` automatically. If it was
+The scheduler reconciles every job against the process table on **every tick**
+(`poll_interval_s`, 10 s by default) — not only on restart, as this section used
+to say. A job whose runner is gone is marked `failed` within seconds.
+
+"Gone" includes **defunct**. A detached runner stays a zombie until something
+waits on it, keeping its pid and its `/proc` entry, so `os.kill(pid, 0)` succeeds
+and the old check read it as alive. That is how
+`20260909T190659Z-qwen3vl-german-pages-v2` sat at `training` for over an hour
+after dying in a network outage — and with `max_concurrent: 1`, no other job
+could start on two idle GPUs. Liveness is now read from `/proc/<pid>/stat` and a
+`Z` counts as dead (#118). If it was
 actually still running (killed by OOM or a hardware fault), the record shows:
 
 ```
@@ -867,6 +876,37 @@ caching, set `HF_DATASETS_CACHE` to local disk, not the share.
 `TMPDIR` is on the CIFS share. SMB does not release directory entries fast enough
 for the create/delete churn of temporary compilation dirs. Move `TMPDIR` to local
 disk and re-submit.
+
+### A long run died and left nothing behind (#119)
+
+The Trainer saves at epoch boundaries, so a corpus run configured `epochs: 1` has
+exactly one save — after the last step, 33 hours in. `…-german-pages-v2` died at
+step 628 of 2352 and left an empty checkpoint directory: 8 h 50 m of A40 time for
+nothing.
+
+A **recovery snapshot** is now written alongside, every ~5 % of an epoch:
+
+```
+recovery: a snapshot every 117 of 2352 steps per epoch -> …/checkpoints/<job>/recovery
+recovery snapshot at step 117 -> …/recovery
+```
+
+It is one directory, overwritten in place, holding the adapter and a
+`recovery.json` with `global_step` and `epoch`. Worst case is now the interval,
+about two hours, rather than the whole run.
+
+It is deliberately **not** `save_strategy="steps"`, which looks like the obvious
+fix and is a trap on three counts: `load_best_model_at_end` requires
+`eval_strategy` to match, the epoch eval over the full validation set costs ~26
+minutes here, and the continuation callback (#88) counts one evaluation as one
+epoch — so a steps-based eval would make a `max_epochs: 3` run stop after three
+evaluations, a few hundred steps in. Recovery and best-model selection are
+different needs and now have different mechanisms.
+
+Note that nothing yet *resumes* from a snapshot: `--resume-from-checkpoint` is not
+wired, and a resumed job would also need its compiled JSONL still on disk. What
+this buys today is a trained adapter to evaluate or publish by hand instead of a
+total loss.
 
 ### VLM job OOMs hours in, on one allocation of several GiB (#110)
 

@@ -52,7 +52,7 @@ from atr_serving.training.hf_source import (
     VerificationUnavailable,
     verify_dataset_spec,
 )
-from atr_serving.training.jobstore import JobStore, JobStoreError
+from atr_serving.training.jobstore import JobStore, JobStoreError, reap_children
 
 from atr_serving.training.preflight import (
     PreflightError,
@@ -137,6 +137,14 @@ def schedule_once(
     written to ``queued_reason`` — a queued job is not a failed job, and the
     caller deserves to know whether it is waiting on the GPU or on another run.
     """
+    # Before judging liveness: a finished runner stays defunct until someone waits
+    # on it, and a defunct pid used to read as alive (#118). `_pid_alive` no longer
+    # believes a zombie, so this is hygiene rather than correctness — but a process
+    # table that fills with dead runners is its own problem.
+    reaped = reap_children()
+    if reaped:
+        logger.debug("reaped {} finished runner(s)", reaped)
+
     jobs = [store.reconcile(j) for j in store.list()]
     # A job stays "queued" from the moment it is spawned until its detached runner
     # writes the first status — a window that a second submit lands in easily,

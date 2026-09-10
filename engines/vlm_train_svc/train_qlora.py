@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import time
 from pathlib import Path
 
 from atr_serving.training.continuation import ContinuationPolicy, should_stop
@@ -193,6 +195,82 @@ class HTRCollator:
         return inputs
 
 
+#: One recovery snapshot per this fraction of an epoch. 1/20 puts a resumable
+#: adapter on disk roughly every 2 hours of a 33-hour corpus run, at ~350 MB
+#: written each time and overwritten in place.
+RECOVERY_FRACTION = 20
+RECOVERY_MIN_STEPS = 50
+RECOVERY_MAX_STEPS = 500
+
+
+def recovery_interval(steps_per_epoch: int) -> int:
+    """How often to write a recovery snapshot, in optimizer steps.
+
+    Derived rather than configured: the right interval depends on how long an
+    epoch is, and a constant that suits a 52-step smoke run is worthless on a
+    2,352-step corpus run — which is exactly how
+    `20260909T190659Z-qwen3vl-german-pages-v2` came to lose 8 h 50 m and 628 steps
+    to a network outage with an empty checkpoint directory (#119).
+
+    Returns 0 for a short epoch: a snapshot at step 50 of 52 is written work that
+    saves nothing, because the Trainer's own epoch-end save is a few steps away.
+    """
+    if steps_per_epoch < 2 * RECOVERY_MIN_STEPS:
+        return 0
+    return max(RECOVERY_MIN_STEPS,
+               min(RECOVERY_MAX_STEPS, steps_per_epoch // RECOVERY_FRACTION))
+
+
+def make_recovery_callback(out_dir, every: int):
+    """Keep one resumable adapter on disk, refreshed every ``every`` steps.
+
+    **Deliberately separate from the Trainer's own checkpointing**, which stays on
+    ``save_strategy="epoch"``. Moving that to steps looks like the obvious fix and
+    is a trap: ``load_best_model_at_end`` requires ``eval_strategy`` to match, the
+    epoch eval over the full validation set costs ~26 minutes here, and — worse —
+    the continuation callback (#88) counts one eval as one epoch, so a steps-based
+    eval would make a `max_epochs: 3` run stop after three evaluations, a few
+    hundred steps in. Recovery and best-model selection are different needs; this
+    serves the first without touching the second.
+
+    Written to a temporary directory and renamed over the old one, so a crash
+    during the write cannot leave a snapshot that is neither the old nor the new.
+    """
+    import shutil
+
+    from transformers import TrainerCallback
+
+    dest = Path(out_dir) / "recovery"
+    staging = Path(out_dir) / ".recovery-writing"
+
+    class SaveRecoverySnapshot(TrainerCallback):
+        def on_step_end(self, args, state, control, model=None, **kwargs):
+            if every <= 0 or not state.global_step or state.global_step % every:
+                return control
+            if model is None:
+                return control
+            try:
+                shutil.rmtree(staging, ignore_errors=True)
+                model.save_pretrained(staging)
+                (staging / "recovery.json").write_text(json.dumps({
+                    "global_step": state.global_step,
+                    "epoch": state.epoch,
+                    "written_at": time.time(),
+                }, indent=2), encoding="utf-8")
+                shutil.rmtree(dest, ignore_errors=True)
+                staging.rename(dest)
+                print(f"recovery snapshot at step {state.global_step} -> {dest}",
+                      flush=True)
+            except OSError as exc:
+                # Never fail a run over its safety net — that would be worse than
+                # the loss it exists to prevent.
+                print(f"recovery snapshot failed at step {state.global_step}: {exc}",
+                      flush=True)
+            return control
+
+    return SaveRecoverySnapshot()
+
+
 def make_continuation_callback(policy: ContinuationPolicy):
     """Stop when ``should_stop`` says so — the arithmetic lives in `continuation`.
 
@@ -338,6 +416,19 @@ def main(argv: list[str] | None = None) -> int:
               f"{args.patience}, min_delta {args.min_delta}", flush=True)
     else:
         print(f"continuation: off, training exactly {args.epochs} epoch(s)", flush=True)
+
+    # The Trainer saves at epoch boundaries, which for a one-epoch corpus run is a
+    # single write at the very end (#119). This is the thing in between.
+    steps_per_epoch = max(1, math.ceil(
+        len(train_ds) / max(1, args.batch_size * args.accumulate_grad_batches)))
+    every = recovery_interval(steps_per_epoch)
+    if every:
+        trainer.add_callback(make_recovery_callback(out_dir, every))
+        print(f"recovery: a snapshot every {every} of {steps_per_epoch} steps "
+              f"per epoch -> {out_dir / 'recovery'}", flush=True)
+    else:
+        print(f"recovery: off, an epoch is only {steps_per_epoch} steps", flush=True)
+
     trainer.train()
 
     # Save the adapter at the top of output_dir: find_adapter() looks there first,
