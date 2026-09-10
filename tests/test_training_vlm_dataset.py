@@ -370,3 +370,56 @@ def test_a_mis_segmented_line_is_dropped_at_line_granularity():
 def test_the_filter_says_what_it_did():
     assert "no sample over the cap" in str(drop_long_samples([_sample(10)], 8000))
     assert "dropped 1 sample(s)" in str(drop_long_samples([_sample(9000)], 8000))
+
+
+# ── the visual budget across transformers versions (#86, 5.x) ───────────────
+class _SizeDict:
+    """transformers 5.x's `SizeDict`: attributes, not mapping access."""
+
+    def __init__(self, longest_edge, shortest_edge):
+        self.longest_edge = longest_edge
+        self.shortest_edge = shortest_edge
+
+
+class _Processor:
+    def __init__(self, image_processor):
+        self.image_processor = image_processor
+
+
+class _ImageProcessor:
+    def __init__(self, size):
+        self.size = size
+        self.patch_size = 16
+        self.merge_size = 2
+
+
+def test_budget_applies_to_a_4x_dict_size():
+    from atr_serving.training.vlm_dataset import apply_visual_budget
+
+    ip = _ImageProcessor({"longest_edge": 16777216, "shortest_edge": 65536})
+    applied = apply_visual_budget(_Processor(ip), 262144)
+    assert ip.size["longest_edge"] == 262144
+    assert applied.visual_tokens == 262144 // (16 * 2) ** 2
+
+
+def test_budget_applies_to_a_5x_sizedict():
+    """transformers 5.17 made `size` an object; the knob is still longest_edge.
+
+    Before this, the guard fell through both branches and refused outright —
+    correctly, since the alternative was training at 16,384 visual tokens an
+    image against an intended 256 (#86). Caught on job 14717192.
+    """
+    from atr_serving.training.vlm_dataset import apply_visual_budget
+
+    ip = _ImageProcessor(_SizeDict(longest_edge=16777216, shortest_edge=65536))
+    applied = apply_visual_budget(_Processor(ip), 262144)
+    assert ip.size.longest_edge == 262144
+    assert applied.visual_tokens == 262144 // (16 * 2) ** 2
+
+
+def test_budget_still_refuses_when_there_is_no_knob():
+    from atr_serving.training.vlm_dataset import VisualBudgetError, apply_visual_budget
+
+    ip = _ImageProcessor(None)
+    with pytest.raises(VisualBudgetError):
+        apply_visual_budget(_Processor(ip), 262144)

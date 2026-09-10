@@ -376,6 +376,17 @@ def apply_visual_budget(processor, max_pixels: int) -> AppliedBudget:
         size["longest_edge"] = max_pixels
         image_processor.size = size
         knob, read_back = "size.longest_edge", image_processor.size.get("longest_edge")
+    elif size is not None and hasattr(size, "longest_edge"):
+        # transformers 5.x. ``size`` stopped being a plain dict and became a
+        # ``SizeDict`` object that does not answer to mapping access, so the
+        # branch above stops matching even though the knob is still there and
+        # still called longest_edge. The guard caught it rather than training at
+        # the default — 16,384 tokens an image against an intended 256 — which is
+        # the whole reason this function refuses instead of proceeding (#86).
+        size.longest_edge = max_pixels
+        image_processor.size = size
+        knob = "size.longest_edge"
+        read_back = getattr(getattr(image_processor, "size", None), "longest_edge", None)
     elif getattr(image_processor, "max_pixels", None) is not None:
         image_processor.max_pixels = max_pixels
         knob, read_back = "max_pixels", image_processor.max_pixels
