@@ -800,6 +800,62 @@ is `torch.profiler` on one arm, **not** a seventh sweep.
 Note this changes nothing about quality: CER 0.3449 throughout, and the schedule
 in §9.3-C stands as a lower bound until the stall is understood.
 
+### 9.3-G Experiment F — found it: the micro-batch was starving the card
+
+Job 14613930, Qwen3-VL-4B bf16, 2×2, **effective batch 16 in every arm** so the
+number of optimizer steps is constant and only the two factors move.
+
+| arm | optim | bs | runtime | samples/s | CER | util (med) | peak VRAM |
+|---|---|---:|---:|---:|---:|---:|---:|
+| paged-b4 | `paged_adamw_8bit` | 4 | 785.9 s | 11.03 | 0.3449 | 51 % | 31.0 GB |
+| torch-b4 | `adamw_torch` | 4 | 773.7 s | 11.20 | 0.3486 | 51 % | 31.4 GB |
+| paged-b16 | `paged_adamw_8bit` | 16 | 499.8 s | 17.34 | 0.3386 | 65 % | 86.1 GB |
+| **torch-b16** | **`adamw_torch`** | **16** | **488.1 s** | **17.76** | **0.3209** | **86 %** | 86.6 GB |
+
+| main effect | |
+|---|---:|
+| optimizer, paged → torch | **1.02×** |
+| **micro-batch, 4 → 16** | **1.58×** |
+
+**The micro-batch was the answer, and the paged optimizer was innocent.** `bs: 4`
+is a default inherited from a box that shares its A40 with the serving engines —
+the same provenance as `load_in_4bit`, and wrong here for the same reason. On a
+dedicated 94 GB H100 it left the card idle half the time. At `bs: 16`,
+utilization goes **51 % → 86 %** and throughput **1.58×**.
+
+This closes the arc A→F. Every earlier experiment was varying something the GPU
+was not waiting on, which is why they all returned the same 11 samples/s: the
+card was blocked on having too little work per step, and neither faster storage,
+fewer parameters, fewer visual tokens nor more dataloader workers changes that.
+
+**Two caveats before this becomes the production config.**
+
+1. **86.6 GB of 94 GB is a thin margin.** Batches pad to their widest member and
+   this corpus has a worst aspect of 61:1, so a single wide line can spike. For a
+   multi-day run, either drop to `bs: 12` or keep `paged_adamw_8bit` — it costs
+   2 % and its entire purpose is surviving exactly this. An OOM at hour 40 of a
+   six-day run is far more expensive than 2 %.
+2. **The CER spread (0.3209–0.3486) is suggestive, not established.** Effective
+   batch was held constant, so these should be near-identical optimizations; the
+   spread is more likely padding numerics and single-epoch variance than a real
+   quality gain. Do not claim `bs: 16` improves CER on this evidence.
+
+### 9.3-H The schedule, with the stall removed
+
+17.76 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~60 samples/s**:
+
+| anchored on | 3 epochs over 10.4 M crops |
+|---|---:|
+| corpus-scale asterAIx (§9.1) | 26 days |
+| measured, 4-bit, bs 4 | ~13 days |
+| measured, bf16, bs 4 | ~9.8 days |
+| **measured, bf16, bs 16** | **~6 days** |
+
+**The production configuration, now fully measured:** Qwen3-VL-4B · bf16 ·
+`max_pixels` 262144 (256 visual tokens) · `batch_size` 16 · `workers` 8 · crops
+read straight off GPFS · 4× H100 preemptable. Six days, free, for three epochs
+over the whole medieval set.
+
 ### 9.3-C The schedule, re-anchored again
 
 bf16 at 10.85 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~37 samples/s**:
