@@ -284,3 +284,66 @@ def test_the_gpu_host_then_finishes_that_same_job(store, settings):
     assert done.status == "completed"
     assert second_source.calls == [], "the GPU host re-prepared the corpus"
     assert runner.command("train")
+
+
+# ── fanning one corpus out to several base models ───────────────────────────
+def _fanout():
+    import importlib.util
+    from pathlib import Path as _P
+
+    path = _P(__file__).resolve().parent.parent / "ubelix" / "fanout.py"
+    spec = importlib.util.spec_from_file_location("fanout", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_fanout_shares_the_corpus_but_not_the_report(store, settings):
+    """Four arms on one corpus must still write four separate eval reports.
+
+    Symlinking a clone's whole data/ would be the obvious shortcut and is wrong:
+    the test stage writes data/eval_report.json, and every arm would read back
+    whichever CER landed last.
+    """
+    prepared = store.create(request_with(model_id="qwen3vl-corpus"))
+    Pipeline(store, settings, runner=FakeRunner(),
+             source=FakeSource({"train": 4, "eval": 2})).execute(
+        prepared.id, stop_after="compile")
+
+    a, b = _fanout().fan_out(str(settings.jobs_root), prepared.id, [
+        ("qwen35-2b-arm", "Qwen/Qwen3.5-2B"), ("qwen35-0.8b-arm", "Qwen/Qwen3.5-0.8B")])
+
+    for jid, base in ((a, "Qwen/Qwen3.5-2B"), (b, "Qwen/Qwen3.5-0.8B")):
+        job = store.load(jid)
+        assert job.status == "training"
+        assert job.request.base_model == base
+        data = store.paths(jid).data
+        assert data.is_dir() and not data.is_symlink(), "data/ must be the clone's own"
+        assert (data / "train.jsonl").is_symlink()
+
+    (store.paths(a).data / "eval_report.json").write_text("{}", encoding="utf-8")
+    assert not (store.paths(b).data / "eval_report.json").exists()
+    assert not (store.paths(prepared.id).data / "eval_report.json").exists()
+
+
+def test_a_fanned_out_arm_trains_without_re_preparing(store, settings):
+    prepared = store.create(request_with(model_id="qwen3vl-corpus-2"))
+    Pipeline(store, settings, runner=FakeRunner(),
+             source=FakeSource({"train": 4, "eval": 2})).execute(
+        prepared.id, stop_after="compile")
+    (arm,) = _fanout().fan_out(str(settings.jobs_root), prepared.id,
+                               [("qwen35-4b-arm", "Qwen/Qwen3.5-4B")])
+
+    source, runner = FakeSource({"train": 4, "eval": 2}), FakeRunner()
+    done = Pipeline(store, settings, runner=runner, source=source).execute(arm)
+
+    assert done.status == "completed"
+    assert source.calls == [], "the arm re-streamed the corpus"
+    cmd = runner.command("train")
+    assert cmd[cmd.index("--base-model") + 1] == "Qwen/Qwen3.5-4B"
+
+
+def test_fanout_refuses_a_job_that_is_not_a_finished_corpus(store, settings):
+    job = store.create(request_with(model_id="qwen3vl-not-prepared"))
+    with pytest.raises(SystemExit):
+        _fanout().fan_out(str(settings.jobs_root), job.id, [("x", "Qwen/Qwen3.5-2B")])
