@@ -1383,3 +1383,63 @@ budget, the resume path through a fan-out clone, 25.6 M trainable of 878.5 M
 parameters, and **~18 samples/s** — the same as Qwen3-VL-4B on an H100 despite
 being five times smaller, the same "the language model is not the bottleneck"
 signature experiment C found.
+
+### Results (three of four arms)
+
+Same corpus, same seeded split, same val set, same library (transformers 5.x).
+All CERs over 200 validation samples.
+
+| model | params | **CER** | WER | length_ratio | first score |
+|---|---:|---:|---:|---:|---:|
+| **Qwen3-VL-4B** (anchor) | 4 B | **0.532** | — | 0.528 | — |
+| Qwen3.5-2B | 2 B | 0.588 | 0.681 | 0.485 | ~~6.158~~ |
+| Qwen3.5-0.8B | 0.8 B | 0.698 | 0.775 | 0.371 | ~~6.984~~ |
+| Qwen3.5-4B | 4 B | *training* | | | |
+
+**Within Qwen3.5 the trend is clean and monotonic**: smaller is worse, and — more
+interesting — smaller **under-transcribes more** (`length_ratio` 0.485 → 0.371).
+The smaller models end the turn early on lines they cannot finish.
+
+**Qwen3.5-2B does not match Qwen3-VL-4B** on this corpus: 0.588 vs 0.532, a gap of
+0.056 against the ~0.01 the library alone can move a number. Whether that is the
+generation or the halving of parameters is what the Qwen3.5-4B arm will separate.
+
+### The third Qwen3.5 trap: no stop token
+
+Both Qwen3.5 arms first scored CER **6.16** and **6.98** — not bad models, broken
+scoring. The predictions showed it:
+
+```
+REF 'Judicatum est'   →  HYP 'Judicatum est\n\n\n\nJudicatum est\n\n\nJudicatum est …'
+```
+
+Qwen3-VL ships a `generation_config.json` with `eos_token_id = [151645, 151643]`,
+so `generate()` stopped at `<|im_end|>` without being told. **Qwen3.5 ships no
+generation config at all**, and `evaluate_qlora` passed no stop token — so every
+line ran to the 256-token cap even though the model had learned to end its turn
+(the blank lines are the special tokens stripped on decode). The report's own
+length-controlled metric had already said so: `truncated_cer` 0.48 against
+`length_ratio` 6.75.
+
+Fixed by looking the end-of-turn tokens up **by name** in each model's tokenizer —
+the families share no ids (`<|im_end|>` is 151645 in Qwen3-VL, 248046 in Qwen3.5) —
+and passing them to `generate()` explicitly. **The adapters were fine**, so
+`ubelix/rescore.sbatch` re-scored them in ~2 minutes each rather than retraining
+for hours, writing `eval_report_v2.json` beside the original so the broken
+numbers stay on disk.
+
+Three Qwen3.5-specific traps in a row — the `SizeDict` budget, the inverted
+thinking default, the missing stop token — none of which Qwen3-VL has. The gate
+caught the first; the other two surfaced only with a Qwen3.5 model in the loop.
+
+### Two cautions before quoting any of this
+
+* **`length_ratio` ≈ 0.5 for every arm, anchor included.** The models transcribe
+  about half the reference characters on this corpus, so these CERs are dominated
+  by missing text. Because the anchor does it too, it is not caused by the
+  stop-token fix or by Qwen3.5, and the *comparison* is fair — but the absolute
+  numbers need that explanation, and its cause (long lines cut short? crops whose
+  reference exceeds what is visible?) has not been established.
+* **Mostly in-domain.** Only 594 of 19,069 validation lines are the held-out
+  `escript_test` projects; the rest share hands with training. The held-out subset
+  still needs scoring on its own.
