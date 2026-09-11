@@ -1511,3 +1511,63 @@ one-off.
 | `parlamentsdienste-protokolle` | 138 | |
 | `nr-sr-vereinigte-bundesversammlung-xix` | 52 | |
 | **total** | **39,998** | ~940 K lines *estimated* — the medieval estimate ran ~30 % high |
+
+---
+
+## 15. Moving trained models to asterAIx
+
+**Transfer is trivial; serving is not.** UBELIX `/storage/research/wbkolleg_dh_1` and
+asterAIx `/mnt/wbkolleg_dh_1` are the same storage, and asterAIx's convention is to
+leave adapters on the share and point `local_path` at them. So the adapters went to
+`Textrecognition_Training/trained-ubelix/`, with a `README.md` beside them.
+
+| model | CER | on asterAIx |
+|---|---:|---|
+| `qwen3vl-medieval-german-v1` | 0.532 | registered, **merged (8.3 GB), verified in vLLM**, disabled pending the gate |
+| `qwen3.5-2b-medieval-german-v1` | 0.588 | stored; **not servable** (vLLM 0.11 / transformers 4.57 has no `qwen3_5`) |
+| `qwen3.5-0.8b-medieval-german-v1` | 0.698 | stored; not servable |
+
+The Qwen3.5 adapters are deliberately **not** in the overlay: `merge_loras.py` with
+no `--only` merges every vLLM LoRA it finds, and a `qwen3_5` entry would make it
+fail for everyone.
+
+### Four obstacles, in the order they appeared
+
+1. **The merge failed halfway.** All four medieval arms ran under the transformers
+   5.x image, so their adapter directories carry 5.x processor files, which
+   asterAIx's 4.57 cannot parse (`'list' object has no attribute 'keys'`). The
+   weights had merged; the base model's processor was saved instead — valid only
+   because the adapter has no `modules_to_save` and adds no tokens, which was
+   checked (vocab 151,936 ≥ tokenizer 151,669) rather than assumed.
+2. **The gate used the wrong endpoint.** `/ocr` serves only kraken and TrOCR
+   (`400: use /recognize for 'vllm'`). `training/promote.py`'s gate also posts to
+   `/ocr`, so it can never pass for a VLM.
+3. **The gateway could not load it.** Every serving unit pins
+   `CUDA_VISIBLE_DEVICES=1`; the always-on engines hold ~14 GB there and the
+   asterAIx run `qwen3vl-german-pages-v3` holds ~30 GB, so vLLM started with
+   **0.59 GB free** and died. This blocks *every* gateway VLM while that training
+   runs, not just this one. Verified the model independently on GPU 0 instead:
+
+   ```
+   REF 'hoc, nunc illud imparatus agere cogar. Ad eam relationem'
+   HYP 'hoc, nunc illud impareatur, agere cogor. Ad eum relationem'
+   REF 'mains, dans laquelle peu auparavant elle avoit tenu de son'
+   HYP 'mais,'
+   ```
+
+   The second pair is the corpus-wide `length_ratio ≈ 0.5` caught in vLLM itself —
+   the model genuinely ends its turn early; it is not an evaluator artefact.
+4. **agentic_historian cannot use gateway VLMs as written.** `orchestrator.py`
+   sends `engine == "vlm"` to GPUStack and everything else to `/ocr`. The client
+   already has `recognize()` — added when `party` hit the same 400 — so routing
+   gateway-vLLM picks through it is the whole fix.
+
+Every enable/restart was reversed on failure; production ended each time at its
+original 50 models with the gateway healthy.
+
+### HF (private)
+
+Three private repos under `dh-unibe` are planned and their cards verified — the
+Qwen3.5 cards carry the corrected CER, the re-score explanation and the in-domain
+caveat. **Blocked**: `~/.hf_token` on UBELIX held zero bytes, so no job had ever
+been authenticated despite logging "present" (fixed in `cbb7858`).
