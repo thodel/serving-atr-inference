@@ -23,6 +23,7 @@ from pathlib import Path
 
 from atr_serving.training.textmetrics import score_pairs
 from atr_serving.training.vlm_dataset import (
+    CHAT_TEMPLATE_KWARGS,
     apply_visual_budget,
     chat_example,
     read_jsonl,
@@ -126,7 +127,8 @@ def transcribe(model, processor, image_path: Path, prompt: str, max_new_tokens: 
     with Image.open(image_path) as raw:
         image = raw.convert("RGB")
         text = processor.apply_chat_template(
-            chat_example(prompt), tokenize=False, add_generation_prompt=True)
+            chat_example(prompt), tokenize=False, add_generation_prompt=True,
+            **CHAT_TEMPLATE_KWARGS)
         inputs = processor(text=[text], images=[image], return_tensors="pt")
     inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
     with torch.no_grad():

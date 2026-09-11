@@ -297,6 +297,22 @@ def read_jsonl(path: str | Path) -> Iterator[Sample]:
             yield Sample.from_dict(raw)
 
 
+#: Passed to every ``apply_chat_template`` call, in training and in evaluation.
+#:
+#: The Qwen3.5 templates read ``enable_thinking``, and **they disagree about the
+#: default**: 0.8B and 2B treat an unset variable as *off* (an empty
+#: ``<think></think>`` block), while 4B treats it as *on* and opens ``<think>`` so
+#: the model reasons before answering. Left unset, the 4B would generate a
+#: reasoning trace in front of every line transcription — which is not a slightly
+#: worse CER, it is a meaningless one — while the smaller two were correct only
+#: by accident of their default. One transcription of one line needs no
+#: reasoning, so it is pinned off everywhere.
+#:
+#: Harmless for Qwen3-VL, whose template never reads the variable; Jinja ignores
+#: an extra name.
+CHAT_TEMPLATE_KWARGS: dict = {"enable_thinking": False}
+
+
 def chat_example(prompt: str, text: str | None = None) -> list[dict]:
     """The chat turns for one sample, in the shape ``apply_chat_template`` wants.
 

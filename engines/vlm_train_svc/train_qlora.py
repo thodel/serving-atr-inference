@@ -24,6 +24,7 @@ from pathlib import Path
 
 from atr_serving.training.continuation import ContinuationPolicy, should_stop
 from atr_serving.training.vlm_dataset import (
+    CHAT_TEMPLATE_KWARGS,
     apply_visual_budget,
     chat_example,
     read_jsonl,
@@ -125,9 +126,11 @@ class HTRCollator:
         # template rather than hardcoded, by diffing the same conversation with and
         # without a generation prompt. Everything up to and including it is prompt.
         without = processor.apply_chat_template(
-            chat_example(prompt), tokenize=False, add_generation_prompt=False)
+            chat_example(prompt), tokenize=False, add_generation_prompt=False,
+            **CHAT_TEMPLATE_KWARGS)
         with_gen = processor.apply_chat_template(
-            chat_example(prompt), tokenize=False, add_generation_prompt=True)
+            chat_example(prompt), tokenize=False, add_generation_prompt=True,
+            **CHAT_TEMPLATE_KWARGS)
         header = with_gen[len(without):] if with_gen.startswith(without) else with_gen
         self.header_ids = processor.tokenizer(header, add_special_tokens=False).input_ids
         if not self.header_ids:
@@ -153,7 +156,7 @@ class HTRCollator:
             images.append(Image.open(sample["image"]).convert("RGB"))
             texts.append(self.processor.apply_chat_template(
                 chat_example(self.prompt, sample["text"]), tokenize=False,
-                add_generation_prompt=False,
+                add_generation_prompt=False, **CHAT_TEMPLATE_KWARGS,
             ))
 
         # No ``truncation``/``max_length``. On a text-only sequence truncation
