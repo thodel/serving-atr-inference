@@ -839,9 +839,14 @@ class BasePipeline(ABC):
 
         try:
             if resuming:
+                # Two routes lead here and both are ordinary: a preemption or
+                # walltime requeue, or a job built off the GPU by
+                # `--stop-after compile` (and any fan-out clone of one). The
+                # message used to say "after preemption", which was true only of
+                # the first and misleading in every log from the second.
                 logger.warning(
-                    "job {} re-entered while `training` — resuming after preemption",
-                    job.id)
+                    "job {} re-entered while `training` — resuming (after a "
+                    "preemption, or from a corpus built off the GPU)", job.id)
                 resumed = self._resume_artifacts(job)
                 if resumed is None:
                     raise StageFailed(

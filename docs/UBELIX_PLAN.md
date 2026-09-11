@@ -1290,3 +1290,96 @@ For **this** run it does not matter: 450 K crops on one GPU is hours.
   fails in `prepare`, cheaply.
 * **These corpora are not cached on the share**, unlike the Flemish set, so
   prepare must fetch rather than read locally.
+
+### What actually happened
+
+**Prepare, attempt 1 (14710443): the predicted 429.** It died 28 minutes in on
+`koenigsfelden-charters-post-1500` — rate-limited as an anonymous IP. Fixed two
+ways: an **HF token** read from a private `~/.hf_token` (not `$HF_HOME/token`,
+which is the group-readable share), and **`all_projects: true`** on that repo,
+which makes the selection repo-complete so `collapse_complete_selection` emits one
+glob instead of 1,185. The planner had deduplicated against three other
+Königsfelden repos — all of which it then dropped from the corpus — so taking the
+whole repo adds no duplicates here.
+
+**Prepare, attempt 3 (14715226): completed**, 2 h 07 on a free CPU node, **zero
+429s**, left in `training` by `--stop-after compile`.
+
+| repo | pages | lines | note |
+|---|---:|---:|---|
+| `rats-und-richtebuecher_xv-xvi` | 3,902 | 139,114 | 35.7 lines/page |
+| `bullinger-autoren` | 3,638 | 73,502 | 1,128 pages had no transcription |
+| `koenigsfelden-charters-post-1500` | 2,679 | 50,024 | **3,057 over-wide lines dropped (6.1 %)** |
+| `aaeb-xiv-xvii` | 2,068 | 62,534 | |
+| **compiled** | | **306,582 train / 19,069 val** | 325,651 crops, 28 GB |
+
+So the corpus is **~326 K crops**, below the ~450 K first estimated — the
+estimate did not allow for pages without transcriptions or the geometry guard.
+One epoch at the measured throughput is **~4.8 h** on one H100.
+
+**Read the validation set carefully.** Only **594** of the 19,069 val lines come
+from the held-out `escript_test`/`escript_test_2`. The rest are the 10 %
+`partition` split of the three training repos: disjoint *pages*, but the *same
+projects and hands* the model trains on. A CER from this job is therefore
+**mostly an in-domain number**, as `VLM_TRAINING.md` §8 warns, and must not be
+reported as a held-out result. The honest held-out figure needs the 594-line
+subset scored on its own.
+
+## 13. The Qwen3.5 comparison — four arms in parallel
+
+### The transformers 5.x gate
+
+Before any Qwen3.5 run, the **old** model under the **new** library, on the Thun
+pair that has reproduced CER 0.466 twice. It took three attempts, and the two
+failures are the reason the step exists:
+
+| attempt | result | cause |
+|---|---|---|
+| 14717192 | **refused** | `size` became a `SizeDict` object in 5.x; the #86 budget guard found no dict and **refused rather than train at 16,384 visual tokens**. Fixed with an attribute-style branch. |
+| 14718208 | failed | `TrainingArguments` no longer accepts `warmup_ratio`. Checked all 27 kwargs against the 5.17 signature: it is the **only** one removed. Converted to `warmup_steps`. |
+| **14719049** | **CER 0.4720** | vs 0.4662 under 4.57.6 — **passes** the ±0.02 gate set in advance |
+
+The pass is not bit-identity: 5.x moves this model by **+0.006** on 25 samples.
+So a Qwen3.5-vs-Qwen3-VL difference smaller than ~0.01 should not be claimed as a
+model effect. Either break, met with a new model in the frame, would have been
+attributed to that model — and the first would not have crashed at all, only
+trained the wrong thing.
+
+### The thinking-mode trap
+
+The Qwen3.5 templates **disagree about their default**. 0.8B and 2B treat an unset
+`enable_thinking` as *off*; **4B inverts the test and treats it as on**, opening
+`<think>` before every answer. Left alone, the 4B arm would have produced a
+reasoning trace in front of each line transcription — not a worse CER but a
+meaningless one, and the kind that reads as "4B is worse". `CHAT_TEMPLATE_KWARGS
+= {"enable_thinking": False}` now goes to all four `apply_chat_template` calls.
+
+Verified empirically for all four base models through the trainer's own code
+path: no open `<think>` at generation, the assistant header is found inside the
+training text so the loss mask starts at the answer, and the masked target is
+exactly the transcription.
+
+### The arms
+
+`ubelix/fanout.py` cloned the prepared job once per base model. Each clone's
+`data/` is its **own** directory of symlinks to the shared inputs — not a symlink
+to the whole `data/`, because the test stage writes `data/eval_report.json` and
+four arms would read back whichever CER landed last. **One corpus, one seeded
+split, one library, four models.**
+
+| job | base | params | GPU |
+|---|---|---:|---|
+| 14764645 | Qwen3-VL-4B (anchor) | 4 B | H100 |
+| 14764646 | Qwen3.5-4B | 4 B | H100 |
+| 14764647 | Qwen3.5-2B | 2 B | H100 |
+| 14764648 | Qwen3.5-0.8B | 0.8 B | **A100** |
+
+The 0.8B went to the A100 because all 40 H100s were allocated with 20 requests
+queued, and it is the only arm that fits 80 GB at `bs: 16`. Its CER is comparable
+to the others; its throughput is not.
+
+**The 0.8B confirmed the whole stack on real hardware** within minutes: the 5.x
+budget, the resume path through a fan-out clone, 25.6 M trainable of 878.5 M
+parameters, and **~18 samples/s** — the same as Qwen3-VL-4B on an H100 despite
+being five times smaller, the same "the language model is not the bottleneck"
+signature experiment C found.
