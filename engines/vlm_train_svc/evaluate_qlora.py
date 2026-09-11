@@ -120,6 +120,40 @@ def _looks_truncated(text: str, processor, cap: int) -> bool:
     return n >= cap - 2
 
 
+#: The tokens that end an assistant turn in the Qwen chat format. Looked up by
+#: NAME in each model's own tokenizer, never by id: the two families disagree
+#: completely (`<|im_end|>` is 151645 in Qwen3-VL and 248046 in Qwen3.5).
+STOP_TOKENS = ("<|im_end|>", "<|endoftext|>")
+
+
+def stop_token_ids(tokenizer) -> list[int]:
+    """The ids ``generate`` must stop on, from this model's tokenizer.
+
+    Qwen3-VL ships a ``generation_config.json`` with ``eos_token_id = [151645,
+    151643]``, so ``generate`` stopped at the end of the turn without being told
+    to. **Qwen3.5 ships no generation config at all.** Its fine-tuned adapters
+    learned to end the turn — the output showed the transcription, then the
+    special token stripped to blank lines, then the transcription again — but
+    ``generate`` had nothing to stop on and ran every line to the
+    ``max_new_tokens`` cap. The 2B arm scored CER 6.16 with a length-controlled
+    CER of 0.48: a model that reads well, scored as if it could not.
+
+    Passing the ids explicitly makes the stop condition a property of this code
+    rather than of whichever checkpoint happens to ship a config file.
+    """
+    unk = getattr(tokenizer, "unk_token_id", None)
+    ids = []
+    for name in STOP_TOKENS:
+        tid = tokenizer.convert_tokens_to_ids(name)
+        if isinstance(tid, int) and tid >= 0 and tid != unk and tid not in ids:
+            ids.append(tid)
+    if not ids:
+        raise RuntimeError(
+            f"none of {STOP_TOKENS} exist in this tokenizer — generation would have "
+            "no stop condition and every prediction would run to max_new_tokens")
+    return ids
+
+
 def transcribe(model, processor, image_path: Path, prompt: str, max_new_tokens: int) -> str:
     import torch
     from PIL import Image
@@ -132,7 +166,9 @@ def transcribe(model, processor, image_path: Path, prompt: str, max_new_tokens: 
         inputs = processor(text=[text], images=[image], return_tensors="pt")
     inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
     with torch.no_grad():
-        generated = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        stops = stop_token_ids(processor.tokenizer)
+        generated = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                                   eos_token_id=stops, pad_token_id=stops[0])
     # Strip the prompt: decoding the whole sequence would score the instruction
     # as if the model had produced it.
     prompt_len = inputs["input_ids"].shape[1]

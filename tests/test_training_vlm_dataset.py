@@ -441,3 +441,30 @@ def test_no_warmup_asks_for_neither():
     from vlm_train_svc.train_qlora import warmup_kwarg
 
     assert warmup_kwarg(0.0, 1000, supports_ratio=False) == {}
+
+
+# ── generation must stop at the end of the turn (Qwen3.5 ships no gen config) ─
+class _Tok:
+    def __init__(self, vocab, unk=0):
+        self.vocab, self.unk_token_id = vocab, unk
+
+    def convert_tokens_to_ids(self, name):
+        return self.vocab.get(name, self.unk_token_id)
+
+
+def test_stop_ids_come_from_each_models_own_tokenizer():
+    """Looked up by name: the two families disagree on every id."""
+    from vlm_train_svc.evaluate_qlora import stop_token_ids
+
+    qwen3vl = _Tok({"<|im_end|>": 151645, "<|endoftext|>": 151643})
+    qwen35 = _Tok({"<|im_end|>": 248046, "<|endoftext|>": 248044})
+    assert stop_token_ids(qwen3vl) == [151645, 151643]
+    assert stop_token_ids(qwen35) == [248046, 248044]
+
+
+def test_a_tokenizer_without_stop_tokens_is_refused():
+    """Better to fail than to let every prediction run to max_new_tokens."""
+    from vlm_train_svc.evaluate_qlora import stop_token_ids
+
+    with pytest.raises(RuntimeError):
+        stop_token_ids(_Tok({}))

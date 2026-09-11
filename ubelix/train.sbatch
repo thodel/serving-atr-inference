@@ -76,7 +76,18 @@ run() {
     "$SIF" "$@"
 }
 
-echo "== attempt $((${SLURM_RESTART_COUNT:-0} + 1)) — job $JOB_ID on $(hostname) $(date -Is)"
+# A requeue must never re-run a job that already finished. Seen for real: the
+# Qwen3.5-2B arm (14764647) completed, and Slurm then showed it PENDING again.
+# Re-entering a `completed` record is an illegal transition, and the failure path
+# would try to write over a finished result. Checked before anything is loaded.
+STATUS=$(python3 -c "import json;print(json.load(open('$ATR_TRAIN_JOBS_ROOT/$JOB_ID/job.json'))['status'])" 2>/dev/null)
+case "$STATUS" in
+  completed|failed|cancelled)
+    echo "== job $JOB_ID is already $STATUS — nothing to do, not re-running"
+    exit 0 ;;
+esac
+
+echo "== attempt $((${SLURM_RESTART_COUNT:-0} + 1)) — job $JOB_ID ($STATUS) on $(hostname) $(date -Is)"
 
 trap '
   echo "== SIGTERM at $(date -Is) — requeueing $SLURM_JOB_ID"
