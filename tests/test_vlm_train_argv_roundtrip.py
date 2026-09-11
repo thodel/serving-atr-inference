@@ -105,3 +105,34 @@ def test_neither_adapter_nor_baseline_is_refused():
 def test_both_at_once_is_refused():
     with pytest.raises(SystemExit):
         parse_eval_args([*_eval_argv(VlmTrainParams()), "--no-adapter"])
+
+
+# ── CHURRO zero-shot (docs/CHURRO_PLAN.md, Phase 0.4) ───────────────────────
+
+def _churro_argv(**extra) -> list[str]:
+    argv = ["--no-adapter", "--val-jsonl", "/j/val.jsonl", "--report", "/j/r.json",
+            "--base-model", "stanford-oval/churro-3B", "--data-root", "/j",
+            "--granularity", "page", "--max-pixels", "0", "--max-seq-len", "8192",
+            "--template", "churro-xml", "--no-load-in-4bit", "--max-new-tokens", "4096"]
+    for k, v in extra.items():
+        argv += [f"--{k.replace('_', '-')}", str(v)]
+    return argv
+
+
+def test_the_churro_template_needs_no_user_prompt():
+    """CHURRO's user turn is the image and nothing else."""
+    args = parse_eval_args(_churro_argv())
+    assert args.template == "churro-xml" and args.prompt == ""
+
+
+def test_max_pixels_zero_means_the_processor_default():
+    """The only fair setting for a zero-shot comparison with CHURRO, whose own
+    inference applies no image preprocessing."""
+    assert parse_eval_args(_churro_argv()).max_pixels == 0
+
+
+def test_the_plain_template_still_refuses_to_run_without_a_prompt():
+    argv = [a for a in _churro_argv() if a != "churro-xml"]
+    argv[argv.index("--template") + 1:argv.index("--template") + 1] = ["plain"]
+    with pytest.raises(SystemExit):
+        parse_eval_args(argv)

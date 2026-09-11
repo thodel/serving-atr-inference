@@ -21,6 +21,11 @@ import argparse
 import json
 from pathlib import Path
 
+from atr_serving.training.churro_xml import (
+    CHURRO_SYSTEM_PROMPT,
+    flatten,
+    normalize_convention,
+)
 from atr_serving.training.textmetrics import score_pairs
 from atr_serving.training.vlm_dataset import (
     CHAT_TEMPLATE_KWARGS,
@@ -41,9 +46,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--report", required=True)
     p.add_argument("--base-model", required=True)
     p.add_argument("--data-root", required=True)
-    p.add_argument("--prompt", required=True)
+    p.add_argument("--prompt", default="",
+                   help="user-turn instruction; required for --template plain")
+    p.add_argument("--template", default="plain", choices=["plain", "churro-xml"],
+                   help="plain: our prompt in the user turn, plain-text output. "
+                        "churro-xml: CHURRO's own system message, an image-only user "
+                        "turn, HistoricalDocument XML flattened by CHURRO's rule before "
+                        "scoring (docs/CHURRO_PLAN.md §1.1)")
     p.add_argument("--granularity", default="line", choices=["line", "page"])
-    p.add_argument("--max-pixels", type=int, required=True)
+    p.add_argument("--max-pixels", type=int, required=True,
+                   help="visual budget in pixels; 0 keeps the processor's own default, "
+                        "which is what CHURRO's inference uses and so the only fair "
+                        "setting for a zero-shot comparison with it")
     p.add_argument("--max-seq-len", type=int, required=True)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda:0")
@@ -59,6 +73,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # That is the silent success this subsystem refuses everywhere else.
     if bool(args.adapter) == bool(args.no_adapter):
         p.error("pass exactly one of --adapter <dir> or --no-adapter")
+    if args.template == "plain" and not args.prompt:
+        p.error("--template plain needs --prompt")
     return args
 
 
@@ -85,7 +101,13 @@ def load_model(args):
     # Same budget, applied the same way as in training — a CER measured at a
     # different visual budget than the model was trained at is not comparable (#86).
     processor = AutoProcessor.from_pretrained(processor_src, trust_remote_code=True)
-    print(f"visual budget: {apply_visual_budget(processor, args.max_pixels)}", flush=True)
+    if args.max_pixels > 0:
+        print(f"visual budget: {apply_visual_budget(processor, args.max_pixels)}", flush=True)
+    else:
+        ip = getattr(processor, "image_processor", None)
+        print(f"visual budget: processor default "
+              f"(size={getattr(ip, 'size', None)}, max_pixels={getattr(ip, 'max_pixels', None)})",
+              flush=True)
     if processor.tokenizer.pad_token_id is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
@@ -154,15 +176,16 @@ def stop_token_ids(tokenizer) -> list[int]:
     return ids
 
 
-def transcribe(model, processor, image_path: Path, prompt: str, max_new_tokens: int) -> str:
+def transcribe(model, processor, image_path: Path, prompt: str, max_new_tokens: int,
+               system: str | None = None) -> str:
     import torch
     from PIL import Image
 
     with Image.open(image_path) as raw:
         image = raw.convert("RGB")
         text = processor.apply_chat_template(
-            chat_example(prompt), tokenize=False, add_generation_prompt=True,
-            **CHAT_TEMPLATE_KWARGS)
+            chat_example(prompt, system=system), tokenize=False,
+            add_generation_prompt=True, **CHAT_TEMPLATE_KWARGS)
         inputs = processor(text=[text], images=[image], return_tensors="pt")
     inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
     with torch.no_grad():
@@ -187,17 +210,34 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"{args.val_jsonl} has no samples to evaluate")
 
     model, processor = load_model(args)
+    churro = args.template == "churro-xml"
+    system = CHURRO_SYSTEM_PROMPT if churro else None
     pairs: list[tuple[str, str]] = []
     examples: list[dict] = []
+    #: Every raw output, kept beside the report: for CHURRO the XML is the source
+    #: of truth and the flattened text a derived view (its own docs say as much).
+    raw_outputs: list[dict] = []
     #: Predictions that stopped within a hair of the generation cap, which is what
     #: a truncated transcription looks like from outside (#92).
     at_cap = 0
+    #: CHURRO outputs that would not parse. CHURRO's tooling scores these as empty
+    #: pages; we recover the text and count them here instead (churro_xml.flatten).
+    unparsed = 0
+    #: CHURRO outputs with no HistoricalDocument in them — the model ignored the format.
+    not_xml = 0
     for index, sample in enumerate(samples, 1):
-        prediction = transcribe(model, processor, root / sample.image,
-                                args.prompt, args.max_new_tokens)
-        if _looks_truncated(prediction, processor, args.max_new_tokens):
+        raw = transcribe(model, processor, root / sample.image,
+                         args.prompt, args.max_new_tokens, system=system)
+        if _looks_truncated(raw, processor, args.max_new_tokens):
             at_cap += 1
+        prediction = raw
+        if churro:
+            flat = flatten(raw)
+            prediction = flat.text
+            unparsed += not flat.parsed
+            not_xml += not flat.was_xml
         pairs.append((prediction, sample.text))
+        raw_outputs.append({"image": sample.image, "raw": raw})
         if len(examples) < 10:  # a handful in the report, for eyeballing
             examples.append({"image": sample.image, "reference": sample.text,
                              "prediction": prediction})
@@ -206,6 +246,13 @@ def main(argv: list[str] | None = None) -> int:
 
     score = score_pairs(pairs)
     report = score.as_report()
+    # Diagnostic, never the headline: the same notation-free mapping on both sides
+    # separates "could it read the page" from "did it write our notation"
+    # (docs/CHURRO_PLAN.md §2). Reported for every template, so arms compare.
+    normalized = score_pairs([(normalize_convention(h), normalize_convention(r))
+                              for h, r in pairs])
+    report["convention_normalized"] = {
+        k: v for k, v in normalized.as_report().items() if k != "examples"}
     report.update({
         "base_model": args.base_model,
         # Named unambiguously so a baseline report can never be mistaken for a
@@ -213,7 +260,9 @@ def main(argv: list[str] | None = None) -> int:
         "adapter": args.adapter,
         "is_baseline": args.adapter is None,
         "granularity": args.granularity,
-        "prompt": args.prompt,
+        "template": args.template,
+        "prompt": system if churro else args.prompt,
+        "max_pixels": args.max_pixels or "processor default",
         # Named so a reader cannot mistake a capped run for a full one.
         "eval_cap": args.max_samples,
         "val_total": sum(1 for _ in read_jsonl(args.val_jsonl)),
@@ -223,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         # says so: qwen3vl-sg-missiven-v1 was recorded at CER 0.5921 with every
         # page truncated at 256 tokens, and scored 0.2785 once the cap was raised.
         "truncated_at_cap": at_cap,
+        "xml_unparsed": unparsed if churro else None,
+        "xml_absent": not_xml if churro else None,
         "examples": examples,
     })
     if at_cap:
@@ -231,11 +282,19 @@ def main(argv: list[str] | None = None) -> int:
               f"--max-new-tokens={args.max_new_tokens}. The CER below is a *floor*: "
               f"those transcriptions were cut off, not wrong. Raise the cap "
               f"(page granularity needs ~1500) and score again.", flush=True)
+    if churro and unparsed:
+        print(f"NOTE: {unparsed} of {len(pairs)} XML outputs did not parse and were "
+              f"recovered tolerantly. CHURRO's own tooling would have scored them as "
+              f"empty pages.", flush=True)
     out = Path(args.report)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    out.with_suffix(".raw.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in raw_outputs),
+        encoding="utf-8")
     print(f"CER {score.cer:.4f}  WER {score.wer}  over {score.samples} samples -> {out}",
           flush=True)
+    print(f"CER {normalized.cer:.4f} convention-normalized (diagnostic)", flush=True)
     return 0
 
 

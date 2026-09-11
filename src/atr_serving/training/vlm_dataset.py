@@ -313,7 +313,8 @@ def read_jsonl(path: str | Path) -> Iterator[Sample]:
 CHAT_TEMPLATE_KWARGS: dict = {"enable_thinking": False}
 
 
-def chat_example(prompt: str, text: str | None = None) -> list[dict]:
+def chat_example(prompt: str, text: str | None = None,
+                 system: str | None = None) -> list[dict]:
     """The chat turns for one sample, in the shape ``apply_chat_template`` wants.
 
     Built here rather than in the training script so the *exact* conversation the
@@ -321,11 +322,20 @@ def chat_example(prompt: str, text: str | None = None) -> list[dict]:
     evaluation time (where ``text`` is None — the assistant turn is what the model
     must produce). A prompt that drifts between training and inference is a silent
     distribution shift, which is why the trained ModelSpec also carries it.
+
+    ``system`` is for models trained with an instruction in the system turn and
+    nothing but the image in the user turn — CHURRO's template is exactly that
+    (docs/CHURRO_PLAN.md §1.1). An empty ``prompt`` then means *no* text part in
+    the user turn, not an empty one: a stray empty string is still a token
+    sequence the model never saw in training.
     """
-    messages: list[dict] = [{
-        "role": "user",
-        "content": [{"type": "image"}, {"type": "text", "text": prompt}],
-    }]
+    messages: list[dict] = []
+    if system:
+        messages.append({"role": "system", "content": [{"type": "text", "text": system}]})
+    content: list[dict] = [{"type": "image"}]
+    if prompt:
+        content.append({"type": "text", "text": prompt})
+    messages.append({"role": "user", "content": content})
     if text is not None:
         messages.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
     return messages
