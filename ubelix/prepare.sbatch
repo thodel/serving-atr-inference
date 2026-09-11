@@ -77,6 +77,9 @@ run() {
 
 JOB_ID=$(run python "$HOME/ubelix/submit_job.py" "$SPEC")
 echo "$JOB_ID" > "$S/runs/last-prepared.jobid"
+# Keyed by this Slurm job too, so a dependent job reads THIS prepare's id and
+# not whichever prepare happened to write last-prepared.jobid most recently.
+echo "$JOB_ID" > "$S/runs/prep-$SLURM_JOB_ID.jobid"
 echo "== job $JOB_ID"
 echo "== node $(hostname), $(nproc) cpus, $(date -Is)"
 
