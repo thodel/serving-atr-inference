@@ -1443,3 +1443,71 @@ caught the first; the other two surfaced only with a Qwen3.5 model in the loop.
 * **Mostly in-domain.** Only 594 of 19,069 validation lines are the held-out
   `escript_test` projects; the rest share hands with training. The held-out subset
   still needs scoring on its own.
+
+---
+
+## 14. The German 19th-century run (`qwen3vl-german-xix-v1`)
+
+Queued 2026-09-11 as one dependency chain: prepare **14797054** (CPU) →
+`fanout_submit` **14797055** (after prepare succeeds) → three H100 arms
+(Qwen3-VL-4B anchor, Qwen3.5-4B, Qwen3.5-2B). The 0.8B is left out: it was the
+clear loser on the medieval corpus (§13).
+
+### The planner would have trained on machine output
+
+Asked for 1800–1900, `plan_corpus.py` put
+**`handwritten-bundesratsprotokolle_xix-xx` at 45 % of the corpus**, scoring it
+0.95. Its own card:
+
+```
+--- Data has been automatically created, using ATR models ---
+These are ''automatically'' transcribed pages.
+!!!This data set does not contain Ground Truth!!!
+```
+
+The scorer read only period, language and script, so a good card for bad data
+scored well. Training on it teaches a model another model's errors; scoring
+against it measures agreement with that model. **Fixed in the planner** (`253cc7d`):
+a card that declares machine output is vetoed outright, outside the geometric mean
+where no weighting can outvote it. The detector is deliberately specific — every
+pagexml-hf card also says "the Hub automatically merges all parquet files", so a
+bare match on "automatically" would have vetoed the whole org.
+
+**It caught a second one on the next run**: `historisches-grundbuch-basel_xix-xx`,
+the Basel land register, rejected for the same reason.
+
+### Two things the cards could not say
+
+* **`kurrent-xix` scored 0.5399**, below threshold only because its card is empty
+  (unknown metadata is penalised to 0.5, by design). It is the other large
+  19th-century German ground-truth set, and without it the 50 % share cap collapsed
+  the corpus to ~1,200 pages. Included by lowering the threshold to 0.53 and
+  excluding the other low scorers by name with the new `--exclude-repo`.
+* **The two big datasets overlap.** `zh-regierungsratsprotokolle` has 262 project
+  directories including `MM_1_001…`, and `kurrent-xix` carries 12 `MM_` projects
+  of the same names — the same Zurich volumes twice. The planner could not
+  deduplicate them because zh's *card* lists no projects. `kurrent-xix`'s `MM_*`
+  are excluded; zh keeps them.
+
+### A real held-out benchmark this time
+
+`kurrent-xix` ships the CITlab/READ split: 21 `TRAIN_CITlab_*` and 21 matched
+`TEST_CITlab_*` projects. The `TEST_*` projects are held out on both
+`--eval-project` and `--exclude-project` — **genuinely unseen hands**, unlike the
+medieval run's validation set, which was 97 % partition split.
+
+The validation set is still mixed, though: zh and the two small repos have no
+eval projects, so they contribute a partition split. **The `TEST_CITlab` subset
+must be scored on its own** to get the held-out number; that is now the second run
+that needs it, and it should become a feature of the evaluator rather than a
+one-off.
+
+### Corpus
+
+| repo | pages | note |
+|---|---:|---|
+| `zh-regierungsratsprotokolle` | 20,000 | capped from 152,786 at the 50 % share |
+| `kurrent-xix` | 19,808 | 25 train projects; 21 `TEST_*` held out, 12 `MM_*` dropped as duplicates |
+| `parlamentsdienste-protokolle` | 138 | |
+| `nr-sr-vereinigte-bundesversammlung-xix` | 52 | |
+| **total** | **39,998** | ~940 K lines *estimated* — the medieval estimate ran ~30 % high |
