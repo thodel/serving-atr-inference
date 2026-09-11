@@ -90,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--min-pages", type=int, default=100,
                    help="drop a dataset whose unique remainder is smaller")
     p.add_argument("--exclude-project", action="append", default=[])
+    p.add_argument("--exclude-repo", action="append", default=[],
+                   help="drop a whole dataset (repo name, with or without the org); "
+                        "repeatable. For what the cards cannot tell the planner.")
     p.add_argument("--cache", type=Path, default=None)
     p.add_argument("--json", type=Path, default=None, help="write a job request here")
     p.add_argument("--engine", default="vllm", choices=["kraken", "vllm", "trocr"])
@@ -120,6 +123,17 @@ def main(argv: list[str] | None = None) -> int:
         c = s.candidate
         print(f"{c.repo.split('/')[-1][:49]:<50}{s.score:>7.2f}{s.period:>6.2f}"
               f"{s.language:>6.2f}{s.script:>6.2f}{c.pages:>9}")
+
+    if args.exclude_repo:
+        drop = {r.split("/")[-1] for r in args.exclude_repo}
+        unknown = drop - {c.repo.split("/")[-1] for c in candidates}
+        if unknown:
+            # A typo here would silently keep the dataset it meant to drop.
+            print(f"\nno plan: --exclude-repo names no dataset in the catalogue: "
+                  f"{sorted(unknown)}", file=sys.stderr)
+            return 1
+        candidates = [c for c in candidates if c.repo.split("/")[-1] not in drop]
+        print(f"\nexcluded by hand: {', '.join(sorted(drop))}")
 
     eval_projects = list(args.eval_project)
     try:
