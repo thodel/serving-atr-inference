@@ -124,6 +124,44 @@ Gemessen an den 13.929 Seiten und 12,3 Mio. Zeichen des v3-Korpus:
 | alle kombinierenden Zeichen | 93.249 | 7,58 | |
 | `ſ` (langes s) | **547** | 0,04 | fast immer zu `s` normalisiert |
 
+### Woher die Zeichen kommen (Schritt 0.1, gemessen am 11.09.)
+
+Je Quelle, zugeordnet über die Transkribus-`docId` im Seitennamen — ein Dokument
+gehört nie zu zwei Datasets. Gezählt sind nur Seiten, deren Zuordnung eindeutig
+ist (11.332 von 13.929, siehe Anmerkung unten):
+
+| Quelle | `✳` | `ˀ` | `ù` | `₎` | `ſ` | Makron | `ͤ` | `ͦ` | `✳` je 1.000 Zeichen |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Königsfelden** (charters post 1500) | 30.603 | 11.605 | 11.183 | 3.659 | 0 | 29.638 | 11.758 | 8.961 | **14,40** |
+| Zürcher Rats- und Richtebücher | 3.491 | 3.700 | 1.952 | 248 | **547** | 1.633 | 1.399 | 2.216 | 1,85 |
+| Bullinger | 0 | 0 | 0 | 0 | 0 | 0 | 790 | 1.530 | 0 |
+| AAEB | 0 | 0 | 6 | 0 | 0 | 0 | 0 | 0 | 0 |
+| St. Galler Missiven | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+**Die Notation ist im Kern die des Königsfelden-Korpus**: es trägt 76–95 % jedes
+Sonderzeichens (`✳` 90 %, `₎` 94 %, Makron 95 %) in acht- bis zehnfacher Dichte
+der nächsten Quelle. **Aber nicht ausschliesslich**: die Zürcher Rats- und
+Richtebücher verwenden dieselben Zeichen sparsamer und sind die einzige Quelle
+mit `ſ`. Bullinger kennt nur übergeschriebene Vokale, AAEB und die Missiven sind
+vollständig normalisiert.
+
+Das heisst für jedes Modell, nicht nur für CHURRO: der Korpus mischt mindestens
+drei Konventionen — diplomatisch mit Sonderzeichen (Königsfelden, Rats- und
+Richtebücher), übergeschriebene Vokale (Bullinger), normalisiert (AAEB, Missiven).
+Ein Modell lernt, je nach Handschrift eine andere Notation zu schreiben.
+
+**Entscheidung (11.09.):** vorerst alles beibehalten — auch in CHURROs Training.
+
+> Anmerkung zur Messung: Der Pool-Index vorn im Seitennamen ist **kein
+> eindeutiger Schlüssel** über Datasets hinweg. `_prepare_multi` setzt
+> `start_index=total_pages_written`, zählt also nur geschriebene Seiten, während
+> übersprungene Seiten innerhalb eines Datasets trotzdem Indizes verbrauchen. Das
+> nächste Dataset beginnt daher im Indexbereich des vorigen. Die Dateinamen
+> bleiben dank `docId`/`pageId` eindeutig, aber für 2.597 Seiten (19 %) lässt
+> sich die Quelle aus dem Index allein nicht bestimmen. Ein erster, naiver
+> Durchgang schrieb AAEB deshalb 7.411 `✳` zu, die in Wahrheit Königsfelden-Seiten
+> waren.
+
 Zwei Konsequenzen:
 
 **Ein Zero-Shot-Ergebnis von CHURRO misst zuerst Konvention, nicht Lesefähigkeit.**
@@ -140,6 +178,7 @@ bestraft. Das betrifft nicht nur CHURRO.
 
 Ob `✳` & Co. behalten oder vereinheitlicht werden, ist eine **editorische**
 Entscheidung — `✳` kann eine sinntragende Markierung sein —, keine technische.
+Entschieden ist sie vorerst für **Beibehalten** (§5).
 
 ---
 
@@ -246,12 +285,14 @@ die Jobs abbricht, ist das kein Detail.
 
 ---
 
-## 5. Entscheidungen, die bei dir liegen
+## 5. Entscheidungen (getroffen am 11.09.2026)
 
-1. **Zeitpunkt von Phase 0.4.** GPU 1 ist bis zum Ende von v3 belegt (Test-CER heute Nacht, ~01:30 CEST 12.09., dann der TrOCR-Smoke). GPU 0 hätte 35 GB frei, gehört aber laut Settings dem RAG-Dienst der Nachbarn.
-2. **Zielformat**: XML (empfohlen, §3 1.1) oder Klartext.
-3. **Konvention** (§2): unsere Notation (`✳`, `ˀ`, `₎` …) behalten und lehren, oder die Ground Truth vereinheitlichen? Editorisch, nicht technisch.
-4. **Lizenz** (§1.2): ist „nicht-kommerziell" für den vorgesehenen Einsatz tragbar?
+| # | Frage | Entscheidung | Folge |
+|---|---|---|---|
+| 1 | Wann Phase 0.4 | **auf GPU 1, sobald sie frei ist** — nach v3 und dem TrOCR-Smoke-Job | GPU 0 bleibt dem RAG-Dienst der Nachbarn; ein Warteskript auf der Box startet 0.4 von selbst, wenn die Trainingsqueue leer ist |
+| 2 | Zielformat | **XML** (`HistoricalDocument`) | Phase 1.1 wie beschrieben; Klartext nur als Ablation |
+| 3 | Konvention | **vorerst alles beibehalten** | kein Mapping der Ground Truth; die Zero-Shot-Zahl wird trotzdem zusätzlich konventionsbereinigt erhoben, um Lesen von Notation zu trennen. Herkunft der Zeichen: §2 |
+| 4 | Lizenz | **„nur nicht-kommerziell" genügt** — Einsatz ist universitäre Forschung, Lehre und nicht-kommerzielle Anwendung, etwa mit Archiven | `publish.py` liefert `qwen-research`-`LICENSE` und `NOTICE` mit; ein kommerzieller Einsatz bräuchte eine Lizenz von Alibaba Cloud |
 
 ## 6. Zeitrahmen
 
