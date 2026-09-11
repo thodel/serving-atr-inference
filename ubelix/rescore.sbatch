@@ -30,7 +30,7 @@ SIF=${SIF:-$HOME/ubelix/vlm-train-tf5.sif}
 : "${JOB_ID:?set JOB_ID}"
 J=$S/runs/jobs/$JOB_ID
 BASE=$(python3 -c "import json;print(json.load(open('$J/job.json'))['request']['base_model'])")
-if [ -r "$HOME/.hf_token" ]; then HF_TOKEN=$(cat "$HOME/.hf_token"); export HF_TOKEN; fi
+if [ -s "$HOME/.hf_token" ]; then HF_TOKEN=$(tr -d '[:space:]' < "$HOME/.hf_token"); export HF_TOKEN; fi
 
 echo "== rescoring $JOB_ID ($BASE) on $(hostname)"
 apptainer exec --nv \

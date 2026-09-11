@@ -48,12 +48,19 @@ export HF_HOME=/storage/research/wbkolleg_dh_1/Textrecognition_Training/hf_hub
 # project directories dies mid-stream:
 #   429 … We had to rate limit your IP … make sure you pass a HF_TOKEN
 # (job 14710443, koenigsfelden-charters-post-1500, 1,185 project globs.)
-if [ -r "$HOME/.hf_token" ]; then
-  HF_TOKEN=$(cat "$HOME/.hf_token"); export HF_TOKEN
-  echo "== HF token: present"
-else
-  echo "== HF token: ABSENT — prepare will use anonymous rate limits"
+# `-r` (readable) is not enough, and that is not hypothetical: the token file
+# existed, was mode 600, and held ZERO bytes, while every job logged "present".
+# The trainer's "unauthenticated requests" warning was the true signal. Require a
+# non-empty file whose content looks like a token, and say which check failed.
+HF_TOKEN=""
+if [ -s "$HOME/.hf_token" ]; then
+  HF_TOKEN=$(tr -d '[:space:]' < "$HOME/.hf_token")
 fi
+case "$HF_TOKEN" in
+  hf_?*) export HF_TOKEN; echo "== HF token: present (${#HF_TOKEN} chars)" ;;
+  "")    unset HF_TOKEN; echo "== HF token: ABSENT or EMPTY (~/.hf_token) — anonymous rate limits apply" ;;
+  *)     unset HF_TOKEN; echo "== HF token: ~/.hf_token does not look like a token (expected hf_…) — ignoring it" ;;
+esac
 export ATR_TRAIN_JOBS_ROOT=$S/runs/jobs
 export ATR_TRAIN_CHECKPOINT_ROOT=$S/runs/checkpoints
 export ATR_TRAIN_TRAINED_ROOT=$S/runs/trained

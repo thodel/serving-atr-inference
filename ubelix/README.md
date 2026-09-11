@@ -87,7 +87,14 @@ from there:
 umask 077
 read -rs -p 'HF token: ' T && printf '%s' "$T" > ~/.hf_token && unset T && echo
 chmod 600 ~/.hf_token
+echo "saved $(wc -c < ~/.hf_token) bytes"      # must NOT be 0
 ```
+
+**Check the byte count.** The first attempt here produced a 0-byte file — the silent
+prompt accepted an empty line — and nothing noticed, because the jobs only checked
+that the file was *readable*. They now require a non-empty `hf_…` token and say so
+in their log; the trainer's *"You are sending unauthenticated requests"* warning is
+the other tell.
 
 Every sbatch here picks it up automatically and reports `HF token: present` or
 `ABSENT` in its log.
