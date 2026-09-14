@@ -143,10 +143,18 @@ async def health(request: Request) -> HealthResponse:
 async def list_models(request: Request) -> ModelsResponse:
     registry = _registry(request)
     resident = set(_manager(request).resident_model_ids())
+    # `enabled: false` means "registered, not servable on this host" (#30/#36), and
+    # until now only the overlay honoured it — the tracked registry's entries were
+    # listed regardless. tests/test_api.py has asserted the absence of disabled
+    # entries in this response since #30, but it was asserting a property of
+    # config/models.yaml rather than of this code: nothing filtered, and no tracked
+    # entry happened to be disabled. The first one that is (the qwen3.5 pair, which
+    # this host's vLLM cannot load at all) would have been advertised to every
+    # consumer, each of whom would have spent a request discovering it cannot run.
     return ModelsResponse(
         models=[
             ModelInfo(**spec.model_dump(), resident=spec.id in resident)
-            for spec in registry.all()
+            for spec in registry.all() if spec.enabled
         ]
     )
 
@@ -176,6 +184,17 @@ def _resolve_spec_strict(request: Request, model: str) -> tuple[str, ModelSpec |
     as a real (empty) transcription.
     """
     spec = _registry(request).get(model)
+    if spec is not None and not spec.enabled:
+        # Registered, and known not to run here. Refusing now — with the reason —
+        # beats launching an engine that will fail: the caller gets a 404 it can
+        # act on instead of a 502 it has to interpret, and a batch runner can
+        # abandon the model on its first page rather than on its five hundredth.
+        raise HTTPException(
+            status_code=404,
+            detail=(f"model {model!r} is registered but not servable on this host "
+                    f"(enabled: false in the registry). See the registry entry for "
+                    f"why, and GET /models for what this host can run."),
+        )
     if spec is not None:
         return spec.engine, spec
     if model and _RAW_KRAKEN_REF.match(model):

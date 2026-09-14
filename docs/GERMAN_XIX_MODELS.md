@@ -64,26 +64,86 @@ The weights cannot be pulled at all without it. Put a token with read access to
 the `dh-unibe` org in the environment the merge and the vLLM subprocess inherit
 (`~/Repo/serving-atr-inference/.env`, which `scripts/*` and the units source).
 
-### 2. Merge each adapter into its base
+### 2. Merge the adapter into its base — from the right venv
 
 vLLM 0.11 refuses LoRA on the vision tower ("only supports adding LoRA to language
 model" — an `AssertionError` inside the ViT during `profile_run`), and the
 adaptation here covers the vision tower. So the adapter is baked into the base
-once, and vLLM serves an ordinary full model:
+once, and vLLM serves an ordinary full model.
+
+**Which venv is not a detail.** peft records its own version in
+`adapter_config.json`, and an older peft reading a newer adapter fails with
+`AttributeError("'list' object has no attribute 'keys'")` — a message that names
+neither peft nor a version, after the base has already been loaded. These
+adapters say `"peft_version": "0.20.0"`; `.venvs/vllm` had 0.19.1 and
+`.venvs/vlm-train` had 0.20.0, so the training venv is the one that can read
+them:
 
 ```bash
 cd ~/Repo/serving-atr-inference
 . ./.env                                   # HF_TOKEN + HF_HOME
-.venvs/vllm/bin/python scripts/merge_loras.py --only qwen3vl-german-xix-v1
-.venvs/vllm/bin/python scripts/merge_loras.py --only qwen3.5-4b-german-xix-v1
-.venvs/vllm/bin/python scripts/merge_loras.py --only qwen3.5-2b-german-xix-v1
+.venvs/vlm-train/bin/python scripts/merge_loras.py --only qwen3vl-german-xix-v1
 ```
+
+`scripts/merge_loras.py` now checks this before loading anything heavy, and names
+a venv that would work. `--list` shows what is mergeable at all.
 
 Output lands in `$vllm_merged_dir/<model id>/` (default `~/atr-cache/vllm-merged`),
 which is exactly where `manager.resolve_model_path` looks first. **Until a merged
-directory with a `config.json` exists, the launcher falls back to the private hub
-repo and vLLM fails on the vision-tower LoRA** — a model that is registered,
-advertised by `/models`, and not actually servable.
+directory exists, the launcher falls back to the private hub repo and vLLM fails
+on the vision-tower LoRA** — a model that is registered, advertised by `/models`,
+and not actually servable.
+
+**A merged directory can also be half-written, and that is worse.** `merge_one`
+writes the weights, then the processor, then prints `DONE`; a run that dies
+between the first two leaves 8.3 GB of correct weights, a `config.json`, and no
+tokenizer. That happened on 2026-09-14. `resolve_model_path` serves any directory
+it finds, and the old skip check only looked for `config.json`, so every retry
+skipped the very directory that needed redoing. The script now requires config,
+weights, tokenizer *and* processor before it calls a directory merged, and
+re-merges one that is missing any of them. If you suspect an older half-written
+merge, `ls` it: no `tokenizer*`/`*processor_config.json` means it is not a
+model.
+
+### If a merge stops after the weights
+
+`merge_one` writes weights -> processor -> `DONE`. On 2026-09-14 it stopped
+between the first two, leaving 8.3 GB of correct weights and no tokenizer, with
+this:
+
+```
+AttributeError: 'list' object has no attribute 'keys'
+  tokenization_utils_base.py:1210 in _set_model_specific_special_tokens
+```
+
+The cause is in the adapter, not in the venv. `dh-unibe/qwen3vl-german-xix-v1`
+was trained on UBELIX, and its `tokenizer_config.json` -- 735 bytes, against the
+base's 10,868 -- writes `extra_special_tokens` as a **list of strings**.
+transformers 4.57.6 calls `.keys()` on that value. (peft warns about unknown
+config fields in the same run. That warning is unrelated, and it cost an hour.)
+
+Copying the adapter's file into the merged directory would not fix it: vLLM loads
+the tokenizer through the same transformers and would fail the same way at serve
+time. The processor has to come from the **base**, which is canonical, readable,
+and correct -- a LoRA over projection matrices changes no tokens, so the
+adapter's copy was only ever a re-serialization. `merge_loras.py` now takes it
+from the base by default, and from the adapter only when `modules_to_save` or
+`trainable_token_indices` say the vocabulary actually changed.
+
+**To repair an existing half-written merge without redoing the 9 GB** -- the
+weights are already correct, only the processor is missing:
+
+```bash
+.venvs/vlm-train/bin/python - <<'EOF'
+from transformers import AutoProcessor
+import pathlib
+out = pathlib.Path.home() / "atr-cache/vllm-merged/qwen3vl-german-xix-v1"
+AutoProcessor.from_pretrained("Qwen/Qwen3-VL-4B-Instruct").save_pretrained(out)
+print(sorted(f.name for f in out.iterdir()))
+EOF
+```
+
+Then `systemctl --user restart atr-gateway` and read one real page through it.
 
 ### Disk, before you start
 
@@ -107,6 +167,49 @@ Merge one model, check `df -h` again, then merge the next. Running out of disk
 midway leaves a partial merged directory that `resolve_model_path` will happily
 serve if it contains a `config.json` — delete any partial directory rather than
 retrying on top of it.
+
+## What is servable on asterAIx — verified 2026-09-14
+
+One of the three. This is a property of the box, not of the models.
+
+| model | merge | vLLM 0.11.0 can serve it |
+|---|---|---|
+| `qwen3vl-german-xix-v1` | ✅ from `.venvs/vlm-train` (peft 0.20.0) | ✅ `Qwen3VLForConditionalGeneration` is in the registry |
+| `qwen3.5-4b-german-xix-v1` | ❌ | ❌ |
+| `qwen3.5-2b-german-xix-v1` | ❌ | ❌ |
+
+The two `qwen3.5` models are blocked twice over, and neither block is a pip
+command:
+
+* **The base cannot be loaded.** `Qwen/Qwen3.5-4B` declares `model_type:
+  qwen3_5`, and transformers 4.57.6 — the version in *both* venvs — has no
+  implementation of it. It is not a `trust_remote_code` case: the repo ships no
+  `auto_map` and no `modeling_*.py`, so there is no remote code to trust. Its
+  `config.json` was written by `4.57.0.dev0`, a dev build.
+* **vLLM could not serve the result anyway.** Asked directly, vLLM 0.11.0 lists
+  `Qwen2VLForConditionalGeneration … Qwen3NextForCausalLM,
+  Qwen3VLForConditionalGeneration, Qwen3VLMoeForConditionalGeneration` — and not
+  `Qwen3_5ForConditionalGeneration`. It is a hybrid linear-attention/SSM stack
+  (`layer_types`, `mamba_ssm_dtype` in the config), which needs kernels a newer
+  vLLM has. And `engines/vllm/requirements.txt` pins 0.11.0 because newer builds
+  need CUDA 13 / driver ≥ 580; the box has 565.
+
+So serving them is a **driver upgrade**, i.e. an admin ticket — not an afternoon.
+They were trained on UBELIX (`~/atr-cache/jobs-local` has no record of the jobs),
+where a newer transformers was available; that is why models this project trained
+cannot be loaded by the project's own serving box.
+
+Both are marked `enabled: false` in `config/models.yaml`, and that is now a guard
+rather than a note: `/models` does not list them, and `/recognize` refuses them
+with a 404 that says why instead of a 502 from an engine launch that was never
+going to work. (`tests/test_api.py` had asserted the listing property since #30 —
+but nothing filtered, and no tracked entry was disabled, so it was asserting a
+property of the YAML rather than of the code. These two entries are what made the
+difference visible.)
+
+A comparison run does not have to wait for them: the batch runner takes any
+registered ids, and `qwen3vl-german-xix-v1` alongside `kraken-fondue_gd_v2` (19th
+century) and `party` gives three readings of the same page today.
 
 ## Making them live
 

@@ -104,6 +104,13 @@ models:
 
   - id: qwen3.5-4b-german-xix-v1
     engine: vllm
+    # Not servable on asterAIx (verified 2026-09-14): transformers 4.57.6 has no
+    # implementation of model type `qwen3_5` (so the LoRA cannot even be merged),
+    # and vLLM 0.11.0 does not list Qwen3_5ForConditionalGeneration among its
+    # supported architectures. A vLLM that does needs CUDA 13 / driver >=580; the
+    # box has 565. Trained on UBELIX, not here. `enabled: false` records that —
+    # see ModelSpec.enabled: registered, not yet proven servable.
+    enabled: false
     hf_repo: dh-unibe/qwen3.5-4b-german-xix-v1
     base_model: Qwen/Qwen3.5-4B
     task: htr
@@ -123,6 +130,13 @@ models:
 
   - id: qwen3.5-2b-german-xix-v1
     engine: vllm
+    # Not servable on asterAIx (verified 2026-09-14): transformers 4.57.6 has no
+    # implementation of model type `qwen3_5` (so the LoRA cannot even be merged),
+    # and vLLM 0.11.0 does not list Qwen3_5ForConditionalGeneration among its
+    # supported architectures. A vLLM that does needs CUDA 13 / driver >=580; the
+    # box has 565. Trained on UBELIX, not here. `enabled: false` records that —
+    # see ModelSpec.enabled: registered, not yet proven servable.
+    enabled: false
     hf_repo: dh-unibe/qwen3.5-2b-german-xix-v1
     base_model: Qwen/Qwen3.5-2B
     task: htr

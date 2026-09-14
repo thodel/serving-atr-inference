@@ -44,3 +44,49 @@ def test_models_with_key(client: TestClient):
 
 def test_models_wrong_key(client: TestClient):
     assert client.get("/models", headers={"X-API-Key": "nope"}).status_code == 401
+
+
+# ── `enabled: false` is a statement the gateway acts on (2026-09-14) ──────────
+
+def test_a_disabled_model_is_not_advertised(client: TestClient):
+    """The listing must not name a model this host cannot run.
+
+    `test_models_with_key` has asserted this since #30 — but it was asserting a
+    property of config/models.yaml, not of the code: nothing filtered, and no
+    tracked entry was disabled, so it passed for the wrong reason. The first
+    genuinely unservable entry (qwen3.5, whose architecture vLLM 0.11 does not
+    implement) is what made the difference visible.
+    """
+    from atr_serving.registry import ModelSpec
+
+    reg = client.app.state.registry
+    reg._by_id["ghost"] = ModelSpec(id="ghost", engine="vllm", hf_repo="x/y",
+                                    base_model="b", enabled=False)
+    try:
+        ids = {m["id"] for m in client.get("/models", headers={"X-API-Key": "test-key"})
+               .json()["models"]}
+        assert "ghost" not in ids
+        assert "party" in ids, "filtering must not swallow the servable ones"
+    finally:
+        reg._by_id.pop("ghost")
+
+
+def test_a_disabled_model_is_refused_with_its_reason(client: TestClient):
+    """404, not a 502 from an engine launch that was never going to work — and the
+    detail says which of the two it is."""
+    from atr_serving.registry import ModelSpec
+
+    reg = client.app.state.registry
+    reg._by_id["ghost"] = ModelSpec(id="ghost", engine="vllm", hf_repo="x/y",
+                                    base_model="b", enabled=False)
+    try:
+        resp = client.post(
+            "/recognize",
+            headers={"X-API-Key": "test-key"},
+            files={"image": ("p.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+            data={"model": "ghost"},
+        )
+        assert resp.status_code == 404
+        assert "not servable on this host" in resp.json()["detail"]
+    finally:
+        reg._by_id.pop("ghost")
