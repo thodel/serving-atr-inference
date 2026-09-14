@@ -193,9 +193,39 @@ its base (needs the vLLM venv; also downloads the bases if missing):
 ```
 
 The gateway's ModelManager serves the merged full model automatically (config
-`vllm_merged_dir`). Note the pinned vLLM knobs in `Settings`: `max_model_len=16384`
-(Qwen3-VL's 262k default OOMs the KV cache) and `gpu_memory_utilization≈0.70`.
+`vllm_merged_dir`). Note the pinned vLLM knob in `Settings`: `max_model_len=16384`
+— Qwen3-VL's 262k default OOMs the KV cache.
 kraken/party download their Zenodo models on demand via htrmopo.
+
+### How much of the card a model gets
+
+`--gpu-memory-utilization` is **a fraction of the card's total memory**, and vLLM
+refuses to start unless that much is *free*. One constant cannot satisfy both: on
+2026-09-14 a 12 GB model failed to start three times running on GPU 1 (45.5 GB
+total, 19 GB free at the time) because the configured 0.70 asks for 31 GB.
+
+So the launcher computes it per launch, from the registry's `vram_mb` and
+`nvidia-smi`: `min(vram_mb × 1.6, free − 2048 MiB) / total`, floored to two
+decimals (`manager.plan_gpu_budget`). The ×1.6 is KV cache, activation scratch and
+CUDA graphs, which `vram_mb` does not cover; the 2048 MiB is left to the card.
+Every launch logs the number and the arithmetic behind it:
+
+```
+vLLM qwen3vl-german-xix-v1 gpu budget: 0.42 = 19200 of 45516 MiB
+  (12000 MiB weights x 1.6 for KV cache), 31047 MiB free
+```
+
+If the card cannot hold the model even at 1.15×, the request fails **before** the
+launch with a message naming free/total — rather than after a minute of loading
+weights, which is what vLLM does. `GET /gpu` then says what is holding the memory;
+an orphaned training process has been the answer more than once.
+
+| variable | default | |
+|---|---|---|
+| `ATR_VLLM_AUTOSIZE` | `true` | `false` goes back to the flat constant |
+| `ATR_VLLM_GPU_MEMORY_UTILIZATION` | `0.70` | fallback: no `vram_mb`, or no readable `nvidia-smi` |
+| `ATR_VLLM_VRAM_HEADROOM` | `1.6` | multiplier on `vram_mb` |
+| `ATR_VLLM_VRAM_RESERVE_MB` | `2048` | never handed to vLLM |
 
 ## 5. Install + start the user services
 

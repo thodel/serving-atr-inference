@@ -15,6 +15,7 @@ Everything that touches the OS (process launch, health poll) is behind the
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import time
@@ -25,6 +26,7 @@ from typing import Protocol, runtime_checkable
 import httpx
 from loguru import logger
 
+from atr_serving import gpu as gpu_probe
 from atr_serving.config import Settings
 from atr_serving.registry import ModelSpec, Registry
 
@@ -76,15 +78,141 @@ def resolve_model_path(spec: ModelSpec, settings: Settings) -> str:
     return spec.hf_repo or spec.id
 
 
+#: What the registry's ``vram_mb`` does **not** cover. It is the size of the
+#: weights; vLLM also wants a KV cache, activation scratch and captured CUDA
+#: graphs out of the same allocation. 1.6x is what the three German-XIX failures
+#: on asterAIx cost to find: at 1.0x (12 000 MB of 45 516) vLLM loaded the weights
+#: and then died computing a KV cache of 2.22 GiB against the 2.25 GiB it needed.
+KV_HEADROOM = 1.6
+
+#: Below this there is no point starting. 1.15x leaves a KV cache that holds a
+#: handful of pages; under it vLLM either refuses outright or serves a context so
+#: short that a page does not fit in it, which is worse than a clear refusal.
+MIN_HEADROOM = 1.15
+
+#: Left to the card on top of the model's share: the CUDA context of the process
+#: itself, fragmentation, and whatever the small engine services on the same card
+#: grow into while this one is resident. vLLM checks ``free >= util * total``
+#: once, at startup, and never again.
+RESERVE_MB = 2048
+
+#: vLLM's own ceiling. Above it the driver's own allocations stop fitting.
+MAX_UTILISATION = 0.95
+
+
+@dataclass(frozen=True)
+class Budget:
+    """A ``--gpu-memory-utilization`` value and the sentence that explains it."""
+
+    utilisation: float
+    reason: str
+
+
+def _floor2(value: float) -> float:
+    """Two decimals, always downwards.
+
+    Rounding is wrong here in one direction only: 0.4249 -> 0.42 wastes 15 MB,
+    0.4251 -> 0.43 asks for memory that was measured as absent.
+    """
+    return math.floor(value * 100) / 100
+
+
+def plan_gpu_budget(
+    vram_mb: int,
+    free_mb: int,
+    total_mb: int,
+    *,
+    headroom: float = KV_HEADROOM,
+    reserve_mb: int = RESERVE_MB,
+    fallback: float = 0.70,
+) -> Budget | None:
+    """How much of the card this model may take, or ``None`` if it cannot fit.
+
+    ``--gpu-memory-utilization`` is a fraction of the card's **total** memory, and
+    vLLM refuses to start unless that much is **free** — so the one number has to
+    satisfy two quantities that a constant in a config file knows neither of. The
+    registry knows the model (``vram_mb``); ``nvidia-smi`` knows the card. This
+    function is the arithmetic between them, and it is pure so that the three
+    failures that produced it can be regression tests rather than a runbook.
+
+    Returns ``None`` when not even :data:`MIN_HEADROOM` fits, which is a better
+    answer than a launch: vLLM would spend a minute loading 8 GB of weights before
+    reaching the same conclusion, and its message names neither the model nor what
+    is holding the memory.
+    """
+    if vram_mb <= 0 or total_mb <= 0:
+        return Budget(fallback, f"no vram_mb in the registry; configured default {fallback}")
+
+    ceiling_mb = free_mb - reserve_mb
+    wanted_mb = vram_mb * headroom
+    minimum_mb = vram_mb * MIN_HEADROOM
+
+    if ceiling_mb < minimum_mb:
+        return None
+
+    granted_mb = min(wanted_mb, ceiling_mb)
+    utilisation = min(_floor2(granted_mb / total_mb), MAX_UTILISATION)
+    if utilisation <= 0:
+        return None
+
+    if granted_mb < wanted_mb:
+        reason = (
+            f"{utilisation} = {int(granted_mb)} of {total_mb} MiB — all that is free "
+            f"({free_mb} MiB) less {reserve_mb} MiB reserve; the model wants "
+            f"{int(wanted_mb)} ({vram_mb} x {headroom})"
+        )
+    else:
+        reason = (
+            f"{utilisation} = {int(granted_mb)} of {total_mb} MiB "
+            f"({vram_mb} MiB weights x {headroom} for KV cache), {free_mb} MiB free"
+        )
+    return Budget(utilisation, reason)
+
+
+def gpu_budget(spec: ModelSpec, gpu: int, settings: Settings) -> Budget:
+    """:func:`plan_gpu_budget` against the live card, with every way out.
+
+    Raises :class:`ManagerError` only for the one case worth refusing: the card is
+    readable, and what is on it leaves no room for this model. Anything unreadable
+    — no ``nvidia-smi``, autosizing switched off — falls back to the configured
+    constant, which is exactly the behaviour this function replaces.
+    """
+    fallback = settings.vllm_gpu_memory_utilization
+    if not settings.vllm_autosize:
+        return Budget(fallback, f"autosizing off; configured {fallback}")
+
+    memory = gpu_probe.card_memory(gpu)
+    if memory is None:
+        return Budget(fallback, f"gpu {gpu} memory unreadable; configured {fallback}")
+
+    free_mb, total_mb = memory
+    budget = plan_gpu_budget(
+        spec.vram_mb, free_mb, total_mb,
+        headroom=settings.vllm_vram_headroom,
+        reserve_mb=settings.vllm_vram_reserve_mb,
+        fallback=fallback,
+    )
+    if budget is None:
+        raise ManagerError(
+            f"{spec.id} needs at least {int(spec.vram_mb * MIN_HEADROOM)} MiB on gpu "
+            f"{gpu}, which has {free_mb} of {total_mb} MiB free "
+            f"(reserving {settings.vllm_vram_reserve_mb} MiB). Free the card — "
+            "`GET /gpu` names what is holding it — or evict a resident model."
+        )
+    return budget
+
+
 class VllmLauncher:
     """Default launcher: spawn ``vllm serve`` pinned to one GPU."""
 
     def start(self, spec: ModelSpec, port: int, gpu: int, settings: Settings) -> VllmHandle:
+        budget = gpu_budget(spec, gpu, settings)
+        logger.info("vLLM {} gpu budget: {}", spec.id, budget.reason)
         cmd = [
             str(settings.vllm_python), "serve", resolve_model_path(spec, settings),
             "--host", "127.0.0.1", "--port", str(port),
             "--served-model-name", spec.id,
-            "--gpu-memory-utilization", str(settings.vllm_gpu_memory_utilization),
+            "--gpu-memory-utilization", str(budget.utilisation),
         ]
         if settings.vllm_trust_remote_code:
             cmd.append("--trust-remote-code")
