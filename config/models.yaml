@@ -56,6 +56,90 @@ models:
     residency: lazy
     gpu_affinity: 1
 
+  # ── dh-unibe German XIX fine-tunes (our own, trained by the training service) ──
+  # Three adapters over three different bases, trained on the SAME material and the
+  # SAME instruction, so a run over one corpus compares the bases rather than the
+  # data. `prompt` is the instruction they were trained with, verbatim: serving
+  # them with different wording is a silent distribution shift, and their own model
+  # cards say so.
+  #
+  # `level: page` is a deployment decision, not a property of the weights: they
+  # were trained on line crops (`granularity: line`), and page-level serving asks
+  # them to read a whole page in one call. It is the cheaper and simpler shape —
+  # one request per page instead of one per line, and no dependency on the kraken
+  # segmenter being right about this material — and it is a distribution shift the
+  # readings have to be judged on. Switching back is one word per entry.
+  #
+  # It has one sharp edge: a page is many times more output than a line, and vLLM
+  # stops at `ATR_VLLM_MAX_NEW_TOKENS` (512) without saying so. Raise it well above
+  # a page's worth of text before serving these — see docs/GERMAN_XIX_MODELS.md.
+  #
+  # All three are LoRA adapters on PRIVATE hub repos. Two consequences for the box:
+  # `HF_TOKEN` must be set before the weights can be pulled at all, and vLLM 0.11
+  # refuses LoRA on the vision tower — so each one must be baked into its base with
+  # `scripts/merge_loras.py` before it is servable. See docs/GERMAN_XIX_MODELS.md.
+  #
+  # vram_mb covers the merged bf16 weights plus KV cache; all three are `lazy`, so
+  # GPU 1 holds one at a time. A caller that wants to compare them should therefore
+  # run model-major (all pages of one model, then the next) — page-major evicts and
+  # reloads on every page.
+  - id: qwen3vl-german-xix-v1
+    engine: vllm
+    hf_repo: dh-unibe/qwen3vl-german-xix-v1
+    base_model: Qwen/Qwen3-VL-4B-Instruct
+    task: htr
+    level: page          # trained on line crops; served whole-page on purpose
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 12000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
+  - id: qwen3.5-4b-german-xix-v1
+    engine: vllm
+    hf_repo: dh-unibe/qwen3.5-4b-german-xix-v1
+    base_model: Qwen/Qwen3.5-4B
+    task: htr
+    level: page          # trained on line crops; served whole-page on purpose
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 12000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
+  - id: qwen3.5-2b-german-xix-v1
+    engine: vllm
+    hf_repo: dh-unibe/qwen3.5-2b-german-xix-v1
+    base_model: Qwen/Qwen3.5-2B
+    task: htr
+    level: page          # trained on line crops; served whole-page on purpose
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 7000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
   # ── Party HTR — its own always-on service (runs for every image) ──────────
   - id: party
     engine: party
