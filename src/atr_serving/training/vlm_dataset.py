@@ -256,6 +256,56 @@ def drop_long_samples(samples: Iterable["Sample"], max_chars: int) -> LengthFilt
     return LengthFilter(kept=kept, dropped=dropped, max_chars=longest)
 
 
+@dataclass(frozen=True)
+class ShortFilter:
+    """What :func:`drop_short_samples` kept, and what it found."""
+
+    kept: list["Sample"]
+    dropped: int
+    min_chars: int
+
+    def __str__(self) -> str:
+        if not self.dropped:
+            return f"no sample under the floor (shortest {self.min_chars} chars)"
+        return (f"dropped {self.dropped} sample(s) under the floor; the shortest was "
+                f"{self.min_chars} chars")
+
+
+def drop_short_samples(samples: Iterable["Sample"], min_chars: int) -> ShortFilter:
+    """Remove training samples too short to teach anything but stopping.
+
+    The mirror of :func:`drop_long_samples`, and the opposite tail of the same
+    distribution — but for a different reason. A long sample is dropped because
+    it cannot be *afforded*; a short one because of what it *teaches*.
+
+    A line crop reading ``dat`` or ``16`` or ``B VI`` is a folio number, a column
+    figure, a marginal note. It is perfectly good ground truth. The damage is
+    statistical: when a fifth of the corpus is 1-3 characters, the model learns
+    that a plausible transcription ends almost immediately, and carries that onto
+    the long lines it is actually scored on. On the medieval corpus this produced
+    output/reference length ratios of 1.70 at 1-3 reference chars, 0.67 at 4-15
+    and 0.14 at 16-40 — the longer the true line, the less the model wrote — for
+    a CER near 0.55 that survived every hyperparameter sweep because no
+    hyperparameter was the cause.
+
+    **Callers must apply this to the training split only.** Filtering validation
+    would remove exactly the samples the model finds easiest and inflate the
+    score, and it would make the CER incomparable with every run recorded before
+    this filter existed.
+    """
+    kept: list[Sample] = []
+    dropped = 0
+    shortest = None
+    for sample in samples:
+        length = len(sample.text)
+        shortest = length if shortest is None else min(shortest, length)
+        if length < min_chars:
+            dropped += 1
+            continue
+        kept.append(sample)
+    return ShortFilter(kept=kept, dropped=dropped, min_chars=shortest or 0)
+
+
 def _relative(path: Path, root: str | Path | None) -> str:
     """Path relative to ``root`` when it is under it, else absolute.
 

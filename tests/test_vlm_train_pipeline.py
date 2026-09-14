@@ -66,12 +66,16 @@ class FakeSource:
     """Yields dataset rows shaped like the real ``Image(decode=False)`` column."""
 
     def __init__(self, per_role: dict[str, int], empty_every: int | None = None,
-                 long_page_chars: int | None = None) -> None:
+                 long_page_chars: int | None = None,
+                 short_page_chars: int | None = None) -> None:
         self.per_role = per_role
         self.empty_every = empty_every
         #: Make the first page of each role carry a transcription this long, to
         #: stand in for the 32,477-character page that killed the German run.
         self.long_page_chars = long_page_chars
+        #: Make the *second* page of each role carry a transcription this short,
+        #: to stand in for the medieval corpus's folio numbers and marginalia.
+        self.short_page_chars = short_page_chars
         self.calls: list[tuple[str, list[str]]] = []
 
     def stream(self, hf_repo, data_files, revision=None):
@@ -83,6 +87,11 @@ class FakeSource:
             if self.long_page_chars and i == 0 and not empty:
                 xml = PAGE_XML.replace("Item ontfaen van Janne",
                                        "w" * self.long_page_chars)
+            if self.short_page_chars and i == 1 and not empty:
+                # Both lines, so the *page* sample is short too — the real short
+                # samples are folio numbers on an otherwise empty leaf.
+                xml = (PAGE_XML.replace("Item ontfaen van Janne", "w" * self.short_page_chars)
+                               .replace("van der Straten", "w" * self.short_page_chars))
             yield {
                 "image": {"bytes": _jpeg_bytes(), "path": f"{i}.jpg"},
                 "xml_content": xml,
@@ -499,3 +508,51 @@ def test_it_scales_with_the_epoch_rather_than_being_a_constant():
     """The whole defect: a constant that suits a 52-step smoke run is worthless on
     a 2,352-step corpus run."""
     assert recovery_interval(4000) > recovery_interval(2000) > recovery_interval(1000)
+
+
+# ── samples too short to teach anything but stopping ────────────────────────
+def test_a_short_training_sample_is_dropped_when_a_floor_is_set(store, settings):
+    request = request_with(params=VlmTrainParams(granularity="page", min_train_chars=8))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, short_page_chars=3),
+                       FakeRunner(), request)
+
+    assert job.status == "completed", job.error
+    train = list(read_jsonl(store.paths(job.id).data / "train.jsonl"))
+    assert all(len(s.text) >= 8 for s in train)
+    assert job.progress.short_samples == 1
+
+
+def test_the_validation_side_keeps_its_short_samples(store, settings):
+    # The opposite of the long filter, and deliberately so. Dropping the short
+    # tail from validation would remove the samples the model finds easiest and
+    # flatter the CER, and would make it incomparable with every earlier run.
+    request = request_with(params=VlmTrainParams(granularity="page", min_train_chars=8))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, short_page_chars=3),
+                       FakeRunner(), request)
+
+    val = list(read_jsonl(store.paths(job.id).data / "val.jsonl"))
+    assert any(len(s.text) < 8 for s in val), "validation must not be filtered"
+
+
+def test_no_floor_by_default_keeps_every_short_sample(store, settings):
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, short_page_chars=3),
+                       FakeRunner(), request)
+
+    train = list(read_jsonl(store.paths(job.id).data / "train.jsonl"))
+    assert any(len(s.text) < 8 for s in train)
+    assert job.progress.short_samples in (0, None)
+
+
+def test_a_floor_that_empties_the_training_set_fails_the_job(store, settings):
+    # Better a failed compile than a run that trains on nothing and reports a
+    # CER against a validation set it never saw a comparable sample of.
+    request = request_with(params=VlmTrainParams(granularity="page",
+                                                 min_train_chars=100_000))
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}),
+                       FakeRunner(), request)
+    assert job.status == "failed"
+    assert "min_train_chars" in (job.error or "")

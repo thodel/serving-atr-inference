@@ -356,6 +356,18 @@ class VlmTrainParams(BaseModel):
     save_steps: int = Field(default=0, ge=0)
     max_pixels: int | None = Field(default=None, ge=32 * 32)
     max_seq_len: int | None = Field(default=None, ge=32)
+    #: Drop training samples whose transcription is shorter than this. 0 = off.
+    #: **Training only** — validation keeps every sample, so a CER stays
+    #: comparable with runs made before the filter existed.
+    #:
+    #: For the reason it exists, see the medieval corpus: 20.9 % of its lines are
+    #: 1-3 characters (folio numbers, column figures, marginalia), against 0.8 %
+    #: in the 19th-century one. A model trained on them learns to emit
+    #: end-of-turn early and then writes only the first word of every real line -
+    #: output/reference length ran 1.70 at 1-3 chars, 0.67 at 4-15, 0.14 at
+    #: 16-40, for a corpus-wide length_ratio of 0.48 and a CER near 0.55 that had
+    #: nothing to do with the hyperparameters.
+    min_train_chars: int = Field(default=0, ge=0)
 
     # ── evaluation ───────────────────────────────────────────────────────────
     #: Generating a transcription per sample is ~1 s; a full validation split of
@@ -636,6 +648,10 @@ class Progress(BaseModel):
     #: Measured before so the record shows what the corpus contained, not what
     #: survived — the outlier is the finding.
     long_samples: int | None = None
+    #: VLM: training samples dropped at compile for being shorter than
+    #: ``min_train_chars``. Validation is never filtered, so this counts the
+    #: training split alone.
+    short_samples: int | None = None
     max_sample_chars: int | None = None
     #: The cached artefact (#109) this run's compiled corpus lives in, and
     #: whether this job built it or reused one. Set on both paths, because after

@@ -53,6 +53,7 @@ from atr_serving.training.vlm_cmd import (
 )
 from atr_serving.training.vlm_dataset import (
     drop_long_samples,
+    drop_short_samples,
     samples_for,
     write_jsonl,
 )
@@ -98,7 +99,8 @@ class Pipeline(BasePipeline):
         total = 0
 
         cap = VLM_MAX_SAMPLE_CHARS[params.granularity]
-        dropped_total = longest = 0
+        floor = params.min_train_chars
+        dropped_total = longest = short_total = 0
 
         for name, manifest in (("train", pages_train), ("val", pages_val)):
             samples = samples_for(read_manifest(manifest), params.granularity, root=paths.root)
@@ -114,6 +116,21 @@ class Pipeline(BasePipeline):
             if filtered.dropped:
                 logger.warning("{}: {} (cap {} chars at granularity {})",
                                name, filtered, cap, params.granularity)
+
+            # Train only. Filtering the short tail out of *validation* would
+            # drop the samples the model finds easiest and flatter the CER, and
+            # it would make the number incomparable with every run recorded
+            # before the filter existed.
+            if floor and name == "train":
+                short = drop_short_samples(samples, floor)
+                samples = short.kept
+                short_total = short.dropped
+                logger.info("{}: {} (floor {} chars)", name, short, floor)
+                if not samples:
+                    raise StageFailed(
+                        f"min_train_chars={floor} removed every training sample. The "
+                        "floor is longer than the longest line in the corpus."
+                    )
 
             if params.granularity == "line":
                 samples = write_crops(samples, paths.root, paths.data / "crops" / name)
@@ -131,6 +148,7 @@ class Pipeline(BasePipeline):
 
         job.progress.samples_written = total
         job.progress.long_samples = dropped_total
+        job.progress.short_samples = short_total
         job.progress.max_sample_chars = longest
         self.store.save(job)
         return out[0], out[1]

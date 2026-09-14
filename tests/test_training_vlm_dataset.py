@@ -19,6 +19,7 @@ from atr_serving.training.vlm_dataset import (
     VlmDatasetError,
     chat_example,
     drop_long_samples,
+    drop_short_samples,
     line_samples,
     page_sample,
     read_jsonl,
@@ -468,3 +469,47 @@ def test_a_tokenizer_without_stop_tokens_is_refused():
 
     with pytest.raises(RuntimeError):
         stop_token_ids(_Tok({}))
+
+
+# ── dropping samples too short to teach anything but stopping ───────────────
+def test_a_sample_under_the_floor_is_dropped():
+    result = drop_short_samples([_sample(2), _sample(45), _sample(1)], 4)
+    assert result.dropped == 2
+    assert [len(s.text) for s in result.kept] == [45]
+
+
+def test_the_floor_is_exclusive():
+    # min_train_chars=4 means "at least 4 chars": 4 survives, 3 does not.
+    assert drop_short_samples([_sample(4)], 4).dropped == 0
+    assert drop_short_samples([_sample(3)], 4).dropped == 1
+
+
+def test_a_floor_of_zero_drops_nothing():
+    corpus = [_sample(1), _sample(2), _sample(45)]
+    assert drop_short_samples(corpus, 0).dropped == 0
+
+
+def test_the_shortest_is_measured_before_the_drop():
+    # Same reason as the long filter: the record should show what the corpus
+    # contained, not what survived it.
+    result = drop_short_samples([_sample(1), _sample(45)], 4)
+    assert result.min_chars == 1
+    assert result.dropped == 1
+
+
+def test_the_medieval_short_tail_is_what_the_floor_removes():
+    # The measured medieval distribution: median 12 chars, 20.9% at 1-3 chars
+    # (folio numbers, column figures, marginalia: "dat", "16", "B VI", "190").
+    # A model trained on that emits end-of-turn after the first word and scores
+    # 0.14 output/reference on real 16-40 char lines.
+    corpus = [_sample(n) for n in (3, 2, 16, 1, 45, 12, 3, 64, 2, 104)]
+    result = drop_short_samples(corpus, 4)
+    assert result.dropped == 5
+    assert [len(s.text) for s in result.kept] == [16, 45, 12, 64, 104]
+
+
+def test_the_nineteenth_century_corpus_is_barely_touched():
+    # Median 30 chars, 0.8% at <=3 — which is why it reached 1.0% CER on the
+    # same code, prompt and evaluator that gave medieval 0.53.
+    corpus = [_sample(n) for n in (23, 27, 30, 30, 32, 35, 28, 31)]
+    assert drop_short_samples(corpus, 4).dropped == 0
