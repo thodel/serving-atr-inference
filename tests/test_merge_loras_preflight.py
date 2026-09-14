@@ -17,6 +17,7 @@ from scripts.merge_loras import (
     Blocker,
     _version_tuple,
     peft_blocker,
+    processor_source,
     transformers_blocker,
     vllm_blocker,
 )
@@ -232,3 +233,30 @@ def test_merged_state_on_a_real_directory(tmp_path):
     for name in ("tokenizer.json", "preprocessor_config.json"):
         (half / name).write_text("x")
     assert merged_state(half) == (True, [])
+
+
+# ── where the processor comes from ───────────────────────────────────────────
+
+def test_a_projection_only_lora_takes_its_processor_from_the_base():
+    """The live bug. `dh-unibe/qwen3vl-german-xix-v1` changes no tokens, and its
+    own tokenizer_config.json (735 bytes, against the base's 10,868) writes
+    `extra_special_tokens` as a list of strings — which transformers 4.57.6 calls
+    .keys() on. The base's copy is canonical and readable."""
+    cfg = {"target_modules": ["q_proj", "v_proj"], "modules_to_save": None,
+           "trainable_token_indices": None}
+    assert processor_source("Qwen/Qwen3-VL-4B-Instruct", "dh-unibe/x", cfg) \
+        == "Qwen/Qwen3-VL-4B-Instruct"
+
+
+@pytest.mark.parametrize("cfg", [
+    {"modules_to_save": ["embed_tokens"]},
+    {"trainable_token_indices": [151665, 151666]},
+    {"modules_to_save": ["lm_head"], "trainable_token_indices": None},
+])
+def test_an_adapter_that_changed_the_vocabulary_keeps_its_own(cfg):
+    """Then the adapter's processor is the only correct one, whatever its risks."""
+    assert processor_source("base/model", "org/adapter", cfg) == "org/adapter"
+
+
+def test_an_unreadable_adapter_config_falls_back_to_the_base():
+    assert processor_source("base/model", "org/adapter", {}) == "base/model"

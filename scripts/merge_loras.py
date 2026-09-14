@@ -306,6 +306,36 @@ def adapter_of(spec) -> str:
     return spec.local_path or spec.hf_repo
 
 
+def processor_source(base_model: str, adapter: str, adapter_cfg: dict) -> str:
+    """Where the tokenizer/processor for the merged model should come from.
+
+    **The base, unless the adapter actually changed the vocabulary.** A LoRA over
+    the projection matrices changes no tokens, so whatever the adapter carries is
+    a *re-serialization* of the base's processor — written by whichever
+    transformers the training ran under, and read later by whichever transformers
+    serves it. When those differ, the copy is not merely redundant, it is wrong.
+
+    That is not hypothetical. `dh-unibe/qwen3vl-german-xix-v1` was trained on
+    UBELIX and its `tokenizer_config.json` (735 bytes, against the base's 10,868)
+    writes `extra_special_tokens` as a **list of strings**. transformers 4.57.6
+    calls `.keys()` on that value:
+
+        AttributeError: 'list' object has no attribute 'keys'
+            tokenization_utils_base.py:1210 _set_model_specific_special_tokens
+
+    Taking it from the base sidesteps the round-trip entirely — and copying the
+    adapter's file instead would only move the failure from merge time to serve
+    time, since vLLM loads the tokenizer through the same transformers.
+
+    The exception is an adapter that genuinely added tokens: `modules_to_save`
+    covering an embedding, or `trainable_token_indices`. Then the adapter's
+    processor is the only correct one and its risks have to be taken.
+    """
+    if adapter_cfg.get("modules_to_save") or adapter_cfg.get("trainable_token_indices"):
+        return adapter
+    return base_model
+
+
 def merge_one(spec, out_dir: Path) -> None:
     import torch
     from peft import PeftModel
@@ -321,9 +351,28 @@ def merge_one(spec, out_dir: Path) -> None:
     merged = PeftModel.from_pretrained(base, adapter).merge_and_unload()
     out_dir.mkdir(parents=True, exist_ok=True)
     merged.save_pretrained(out_dir, safe_serialization=True)
-    # tokenizer/processor from the adapter (it carries the chat template + added tokens)
-    AutoProcessor.from_pretrained(adapter, trust_remote_code=True).save_pretrained(out_dir)
+    # Tokenizer/processor: from the base unless the adapter changed the vocabulary
+    # — see processor_source. The previous version took it from the adapter on the
+    # assumption that it "carries the chat template + added tokens"; for a LoRA
+    # over projection matrices it carries neither, only a re-serialized copy that
+    # a different transformers may not be able to read.
+    src = processor_source(spec.base_model, adapter, _adapter_config_quietly(adapter))
+    print(f"[{spec.id}] processor from {src}")
+    AutoProcessor.from_pretrained(src, trust_remote_code=True).save_pretrained(out_dir)
     print(f"[{spec.id}] DONE -> {out_dir}")
+
+
+def _adapter_config_quietly(adapter: str) -> dict:
+    """``_adapter_config`` that answers {} instead of raising.
+
+    An unreadable adapter config must not decide the processor source by crashing
+    — {} means "no recorded vocabulary change", which is both the common case and
+    the safe one.
+    """
+    try:
+        return _adapter_config(adapter)
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def main() -> int:

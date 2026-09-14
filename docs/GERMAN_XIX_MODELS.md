@@ -105,6 +105,46 @@ re-merges one that is missing any of them. If you suspect an older half-written
 merge, `ls` it: no `tokenizer*`/`*processor_config.json` means it is not a
 model.
 
+### If a merge stops after the weights
+
+`merge_one` writes weights -> processor -> `DONE`. On 2026-09-14 it stopped
+between the first two, leaving 8.3 GB of correct weights and no tokenizer, with
+this:
+
+```
+AttributeError: 'list' object has no attribute 'keys'
+  tokenization_utils_base.py:1210 in _set_model_specific_special_tokens
+```
+
+The cause is in the adapter, not in the venv. `dh-unibe/qwen3vl-german-xix-v1`
+was trained on UBELIX, and its `tokenizer_config.json` -- 735 bytes, against the
+base's 10,868 -- writes `extra_special_tokens` as a **list of strings**.
+transformers 4.57.6 calls `.keys()` on that value. (peft warns about unknown
+config fields in the same run. That warning is unrelated, and it cost an hour.)
+
+Copying the adapter's file into the merged directory would not fix it: vLLM loads
+the tokenizer through the same transformers and would fail the same way at serve
+time. The processor has to come from the **base**, which is canonical, readable,
+and correct -- a LoRA over projection matrices changes no tokens, so the
+adapter's copy was only ever a re-serialization. `merge_loras.py` now takes it
+from the base by default, and from the adapter only when `modules_to_save` or
+`trainable_token_indices` say the vocabulary actually changed.
+
+**To repair an existing half-written merge without redoing the 9 GB** -- the
+weights are already correct, only the processor is missing:
+
+```bash
+.venvs/vlm-train/bin/python - <<'EOF'
+from transformers import AutoProcessor
+import pathlib
+out = pathlib.Path.home() / "atr-cache/vllm-merged/qwen3vl-german-xix-v1"
+AutoProcessor.from_pretrained("Qwen/Qwen3-VL-4B-Instruct").save_pretrained(out)
+print(sorted(f.name for f in out.iterdir()))
+EOF
+```
+
+Then `systemctl --user restart atr-gateway` and read one real page through it.
+
 ### Disk, before you start
 
 `/` on asterAIx is a single partition and **hit 100 % full on 2026-08-06**
