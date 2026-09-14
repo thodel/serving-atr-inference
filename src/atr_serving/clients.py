@@ -204,9 +204,17 @@ class VllmClient:
             raise EngineError(f"vLLM error {resp.status_code} at {url}: {resp.text}")
         return resp.json()
 
-    async def transcribe_image(
+    async def transcribe_image_detail(
         self, model: str, image: bytes, content_type: str, prompt: str | None, max_tokens: int
-    ) -> str:
+    ) -> tuple[str, str | None]:
+        """``(text, finish_reason)`` for one image.
+
+        ``finish_reason`` is the only place the server says *why* generation
+        stopped: ``"stop"`` when the model ended the text, ``"length"`` when it
+        ran into ``max_tokens``. Dropping it — which ``transcribe_image`` did, and
+        still does for callers that do not need it — makes a truncated reading
+        indistinguishable from a complete one.
+        """
         payload = {
             "model": model,
             "messages": [
@@ -216,7 +224,16 @@ class VllmClient:
             "temperature": 0.0,
         }
         data = await self.chat(payload)
-        return data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        return choice["message"]["content"], choice.get("finish_reason")
+
+    async def transcribe_image(
+        self, model: str, image: bytes, content_type: str, prompt: str | None, max_tokens: int
+    ) -> str:
+        text, _ = await self.transcribe_image_detail(
+            model, image, content_type, prompt, max_tokens
+        )
+        return text
 
 
 def get_vllm_client(port: int) -> VllmClient:

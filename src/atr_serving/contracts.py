@@ -55,6 +55,16 @@ class RecognitionResult(BaseModel):
     timing_ms: int = 0
     segmented_by: str | None = None
     version: str
+    #: The model stopped because it hit the token ceiling, not because the text
+    #: ended. Page-level generation makes this reachable: a page is many times
+    #: more output than a line, and the default budget is sized for a line.
+    #:
+    #: It has to be reported rather than inferred. A truncated reading comes back
+    #: as an ordinary 200 whose text ends mid-sentence — indistinguishable, from
+    #: outside, from a model that read a short page or gave up, and the natural
+    #: response to the wrong diagnosis (a better prompt, a different model) does
+    #: not help. Raising the ceiling does.
+    truncated: bool = False
     #: Party runs on every image (config/models.yaml), so every result can carry
     #: its reading alongside the requested engine's. None when the second opinion
     #: is switched off, or when party *is* the requested engine.
