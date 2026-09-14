@@ -72,3 +72,63 @@ def test_fondue_records_the_corpora_it_was_trained_on():
     joined = " ".join(spec.training_datasets)
     assert "zenodo.4746342" in joined, "Federal Council minutes missing from the list"
     assert "valais-recensement" in joined, "Valais census missing from the list"
+
+
+# ── dh-unibe German XIX fine-tunes ───────────────────────────────────────────
+
+#: The instruction the three models were trained with, character for character.
+#: Their model cards state that serving them with different wording is a silent
+#: distribution shift — it does not fail, it just reads worse, and nothing in the
+#: output says why. That makes it exactly the kind of drift a test has to hold.
+GERMAN_XIX_PROMPT = "Transcribe the handwritten text in this image exactly as written."
+
+GERMAN_XIX_MODELS = (
+    ("qwen3vl-german-xix-v1", "Qwen/Qwen3-VL-4B-Instruct"),
+    ("qwen3.5-4b-german-xix-v1", "Qwen/Qwen3.5-4B"),
+    ("qwen3.5-2b-german-xix-v1", "Qwen/Qwen3.5-2B"),
+)
+
+
+@pytest.mark.parametrize("model_id,base", GERMAN_XIX_MODELS)
+def test_german_xix_models_are_registered_as_page_level_vllm(model_id: str, base: str):
+    """Registered, page-level, and pointing at the base each adapter needs.
+
+    ``level`` decides the whole shape of a request: ``page`` sends the image in
+    one call, ``line`` makes the gateway segment first and send one crop per line.
+    These were trained on line crops and are served whole-page deliberately — one
+    request per page instead of forty, and no dependence on the segmenter — so the
+    value is a decision somebody made, and a silent flip to ``line`` would change
+    what every reading is without changing anything visible.
+    """
+    reg = load_registry(REPO_ROOT / "config" / "models.yaml")
+    spec = reg.get(model_id)
+    assert spec is not None, f"{model_id} missing from config/models.yaml"
+    assert spec.engine == "vllm"
+    assert spec.level == "page"
+    assert spec.base_model == base
+    assert spec.hf_repo == f"dh-unibe/{model_id}"
+    # lazy + GPU 1: GPU 0 is shared with the RAG service (docs/asteraix-environment.md)
+    assert spec.residency == "lazy"
+    assert spec.gpu_affinity == 1
+
+
+@pytest.mark.parametrize("model_id,_base", GERMAN_XIX_MODELS)
+def test_german_xix_models_carry_their_training_prompt(model_id: str, _base: str):
+    """See GERMAN_XIX_PROMPT — a reworded instruction is a silent regression."""
+    reg = load_registry(REPO_ROOT / "config" / "models.yaml")
+    assert reg.get(model_id).prompt == GERMAN_XIX_PROMPT
+
+
+@pytest.mark.parametrize("model_id,_base", GERMAN_XIX_MODELS)
+def test_german_xix_models_record_their_training_corpora(model_id: str, _base: str):
+    """All three saw the same four corpora; an evaluation set drawn from any of
+    them is contaminated, and only this list makes that checkable."""
+    reg = load_registry(REPO_ROOT / "config" / "models.yaml")
+    joined = " ".join(reg.get(model_id).training_datasets)
+    for corpus in (
+        "image-text_zh-regierungsratsprotokolle",
+        "image-text_parlamentsdienste-protokolle",
+        "image-text_nr-sr-vereinigte-bundesversammlung-xix",
+        "image-text_kurrent-xix",
+    ):
+        assert corpus in joined, f"{model_id}: {corpus} missing from training_datasets"
