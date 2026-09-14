@@ -504,10 +504,11 @@ def _validation_scope(model: TrainedModel) -> list[str]:
         return ["", "Every dataset here holds whole projects out of training "
                     f"({_names(held)}), so the score is on **unseen hands**, not "
                     "merely unseen pages."]
+    whose = "their own" if len(split) > 1 else "its own"
     return ["", "**The score mixes two kinds of validation, and the difference "
                 f"matters.** {_names(held)} held whole projects out of training, so "
                 f"those lines test unseen hands. {_names(split)} contributed a seeded "
-                "partition of its own training projects instead — unseen pages in a "
+                f"partition of {whose} training projects instead — unseen pages in a "
                 "hand the model trained on, which is the easier test. The figure above "
                 "is one CER over both, so read it as *mostly in-domain*, not as a "
                 "held-out-hands benchmark. Scoring the held-out projects on their own "
