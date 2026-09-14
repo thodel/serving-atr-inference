@@ -454,3 +454,49 @@ def test_publish_one_skips_without_contacting_the_uploader(tmp_path: Path):
     model = scan_trained(tmp_path).models[0]  # re-read: it now carries the record
     result = publish_one(plan([model])[0], FakeUploader())
     assert result.status == "skipped" and result.url == "https://huggingface.co/x"
+
+
+# ── saying what kind of validation the score came from ──────────────────────
+def _card_with(tmp_path: Path, datasets: list[dict]) -> str:
+    meta = {**VLM_META, "request": {**VLM_META["request"], "datasets": datasets}}
+    meta["request"].pop("dataset", None)
+    return card_for(tmp_path, meta, weights="adapter_model.safetensors")
+
+
+def test_a_mixed_validation_set_says_the_score_is_mostly_in_domain(tmp_path):
+    card = _card_with(tmp_path, [
+        {"hf_repo": "dh-unibe/kurrent-xix", "train_projects": ["TRAIN_a"],
+         "eval_projects": ["TEST_a"]},
+        {"hf_repo": "dh-unibe/zh-regierungsratsprotokolle", "train_projects": [],
+         "eval_projects": [], "partition": 0.9, "seed": 42},
+    ])
+    assert "mostly in-domain" in card
+    assert "`dh-unibe/kurrent-xix`" in card
+    assert "`dh-unibe/zh-regierungsratsprotokolle`" in card
+
+
+def test_a_partition_only_corpus_says_unseen_pages_not_unseen_hands(tmp_path):
+    card = _card_with(tmp_path, [
+        {"hf_repo": "dh-unibe/thun", "train_projects": ["a"], "eval_projects": [],
+         "partition": 0.9, "seed": 42},
+    ])
+    assert "seeded partition of the training projects" in card
+    assert "hands it has" in card
+    assert "mostly in-domain" not in card
+
+
+def test_a_fully_held_out_corpus_is_allowed_to_say_unseen_hands(tmp_path):
+    # The claim the other two must not make. If every dataset holds projects
+    # out, the score really is on unseen writers and the card should say so.
+    card = _card_with(tmp_path, [
+        {"hf_repo": "dh-unibe/kurrent-xix", "train_projects": ["TRAIN_a"],
+         "eval_projects": ["TEST_a"]},
+    ])
+    assert "unseen hands" in card
+    assert "mostly in-domain" not in card
+
+
+def test_no_datasets_adds_no_claim_at_all(tmp_path):
+    card = _card_with(tmp_path, [])
+    assert "mostly in-domain" not in card
+    assert "unseen hands" not in card

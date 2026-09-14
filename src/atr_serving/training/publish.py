@@ -426,6 +426,7 @@ def model_card(model: TrainedModel, repo_id: str, licence: str | None = None) ->
         "Measured on **this run's own held-out validation split** (page-level and "
         "seeded, so no page contributes lines to both sides). It is not a score on a "
         "shared benchmark and does not transfer to a different corpus.",
+        *_validation_scope(model),
         "",
         "## Training data",
         "",
@@ -464,6 +465,53 @@ def model_card(model: TrainedModel, repo_id: str, licence: str | None = None) ->
         lines += ["", "## Notes", "",
                   str(model.request.get("notes") or model.metadata.get("notes"))]
     return "\n".join(lines) + "\n"
+
+
+def _validation_scope(model: TrainedModel) -> list[str]:
+    """Say how much of the validation set is genuinely unseen *hands*.
+
+    "Held-out validation split" is true of every run here and still hides the
+    distinction that decides what the number means. A dataset with
+    ``eval_projects`` contributes whole project directories the model never saw:
+    different writers, different hands. A dataset without them contributes a
+    seeded partition of the *same* projects — unseen pages in a hand the model
+    trained on, which is a much easier test.
+
+    A corpus that mixes the two reports one CER over both, and the headline then
+    reads as a held-out-hands number when most of it is not. On the 19th-century
+    run, `kurrent-xix` held out 21 `TEST_CITlab_*` projects while
+    `zh-regierungsratsprotokolle` — half the pages — contributed only a partition
+    split, and the card said nothing about it.
+
+    Derived from the run's own dataset records rather than written as a fixed
+    sentence, so it stays true for a corpus this code has never seen, including
+    one where every dataset holds projects out.
+    """
+    datasets = model.datasets
+    if not datasets:
+        return []
+    held = [d for d in datasets if d.eval_projects]
+    split = [d for d in datasets if not d.eval_projects]
+
+    def _names(links: list[Any]) -> str:
+        return ", ".join(f"`{d.repo}`" for d in links)
+
+    if not held:
+        return ["", "**The validation split is a seeded partition of the training "
+                    "projects.** It measures the model on pages it has not seen, in "
+                    "hands it has. Expect a higher error rate on a new writer."]
+    if not split:
+        return ["", "Every dataset here holds whole projects out of training "
+                    f"({_names(held)}), so the score is on **unseen hands**, not "
+                    "merely unseen pages."]
+    return ["", "**The score mixes two kinds of validation, and the difference "
+                f"matters.** {_names(held)} held whole projects out of training, so "
+                f"those lines test unseen hands. {_names(split)} contributed a seeded "
+                "partition of its own training projects instead — unseen pages in a "
+                "hand the model trained on, which is the easier test. The figure above "
+                "is one CER over both, so read it as *mostly in-domain*, not as a "
+                "held-out-hands benchmark. Scoring the held-out projects on their own "
+                "would give the stricter number."]
 
 
 def _projects(projects: Any) -> str:
