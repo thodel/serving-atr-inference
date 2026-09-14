@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
@@ -85,7 +84,7 @@ def test_the_notation_free_diagnostic_is_reported_and_lower(run):
 
 def test_the_raw_xml_is_kept_beside_the_report(run):
     _, _, path = run
-    raw = [json.loads(l) for l in path.with_suffix(".raw.jsonl").read_text().splitlines()]
+    raw = [json.loads(line) for line in path.with_suffix(".raw.jsonl").read_text().splitlines()]
     assert [r["raw"] for r in raw] == [GOOD, CUT]
 
 

@@ -72,5 +72,5 @@ def test_the_output_records_each_page_s_source(tmp_path):
     (job / "data" / "train.jsonl").write_text("")
     out = tmp_path / "eval.jsonl"
     assert sev.main([str(job), "--per-source", "5", "--out", str(out)]) == 0
-    rows = [json.loads(l) for l in out.read_text().splitlines()]
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
     assert {r["source"] for r in rows} == {"a", "b"}
