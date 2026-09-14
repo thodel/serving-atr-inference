@@ -30,8 +30,17 @@ class FakeManager:
 
 
 class FakeVllmClient:
+    #: What the server says about why generation stopped; "length" = cut off.
+    finish_reason = "stop"
+
+    async def transcribe_image_detail(self, model, image, content_type, prompt, max_tokens):
+        return f"line[{model}]", self.finish_reason
+
     async def transcribe_image(self, model, image, content_type, prompt, max_tokens) -> str:
-        return f"line[{model}]"
+        text, _ = await self.transcribe_image_detail(
+            model, image, content_type, prompt, max_tokens
+        )
+        return text
 
     async def chat(self, payload) -> dict:
         return {"id": "cmpl-1", "model": payload["model"],
@@ -110,3 +119,29 @@ def test_models_marks_resident(client: TestClient):
     by_id = {m["id"]: m for m in r.json()["models"]}
     assert by_id["qwen3vl-8b-hebrew"]["resident"] is True
     assert by_id["qwen3vl-8b-old-church-slavonic"]["resident"] is False
+
+
+# ── truncation (page-level) ──────────────────────────────────────────────────
+
+def test_a_page_reading_reports_that_it_was_cut_off(client):
+    """vLLM stops at max_tokens and answers 200 with text that ends mid-sentence.
+    From outside, that is indistinguishable from a model that read a short page —
+    and the natural response to the wrong diagnosis (a different prompt, a
+    different model) does not help, while raising the ceiling does. So the result
+    has to say it, not leave it to be inferred."""
+    client.app.state.vllm_client.finish_reason = "length"
+    res = _post_recognize(client, "qwen3vl-8b-hebrew")     # level: page
+    assert res.status_code == 200
+    assert res.json()["truncated"] is True
+
+
+def test_a_complete_page_reading_is_not_flagged(client):
+    client.app.state.vllm_client.finish_reason = "stop"
+    assert _post_recognize(client, "qwen3vl-8b-hebrew").json()["truncated"] is False
+
+
+def test_a_server_that_reports_no_finish_reason_is_not_called_truncated(client):
+    """Absence of a signal is not evidence of one. A flag raised because a field
+    was missing would teach people to ignore the flag."""
+    client.app.state.vllm_client.finish_reason = None
+    assert _post_recognize(client, "qwen3vl-8b-hebrew").json()["truncated"] is False

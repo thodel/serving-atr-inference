@@ -13,6 +13,7 @@ import asyncio
 import time
 from typing import Awaitable, Callable
 
+from loguru import logger
 from PIL import Image
 
 from atr_serving import __version__
@@ -56,11 +57,26 @@ def _png_bytes(img: Image.Image) -> bytes:
 
 
 async def recognize_page_vllm(image, content_type, spec, vllm_client, max_tokens) -> RecognitionResult:
-    """Page-level VLM: send the whole image in one chat call."""
+    """Page-level VLM: send the whole image in one chat call.
+
+    Reports truncation. A page is many times more output than a line, and
+    ``vllm_max_new_tokens`` is sized for a line by default — so this is the path
+    where the ceiling is actually reachable, and where hitting it silently costs
+    the most: a whole corpus of readings that stop partway and look like the model
+    simply gave up.
+    """
     t0 = time.perf_counter()
-    text = await vllm_client.transcribe_image(spec.id, image, content_type, spec.prompt, max_tokens)
+    text, finish_reason = await vllm_client.transcribe_image_detail(
+        spec.id, image, content_type, spec.prompt, max_tokens
+    )
+    truncated = finish_reason == "length"
+    if truncated:
+        logger.warning(
+            "{}: reading hit the {}-token ceiling and was cut off — raise "
+            "ATR_VLLM_MAX_NEW_TOKENS", spec.id, max_tokens,
+        )
     return RecognitionResult(
-        model=spec.id, engine="vllm", text=text, lines=[],
+        model=spec.id, engine="vllm", text=text, lines=[], truncated=truncated,
         timing_ms=int((time.perf_counter() - t0) * 1000), version=__version__,
     )
 
