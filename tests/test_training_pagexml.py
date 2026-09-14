@@ -103,3 +103,64 @@ def test_namespaced_prefix_form_is_supported():
 def test_unparsable_xml_raises():
     with pytest.raises(PageXMLError):
         line_texts("<Page><TextLine>")
+
+
+# ── word segmentation (#125) ─────────────────────────────────────────────────
+
+WORD_SEGMENTED = """<PcGts><Page imageFilename="a.jpg"><TextRegion>
+  <TextLine id="l1">
+    <Coords points="10,10 500,10 500,60 10,60"/>
+    <Word id="l1w1"><TextEquiv><Unicode>und</Unicode></TextEquiv></Word>
+    <Word id="l1w2"><TextEquiv><Unicode>zueget</Unicode></TextEquiv></Word>
+    <Word id="l1w3"><TextEquiv><Unicode>an</Unicode></TextEquiv></Word>
+    <TextEquiv><Unicode>und zueget an</Unicode></TextEquiv>
+  </TextLine>
+  <TextLine id="l2">
+    <Coords points="10,70 500,70 500,120 10,120"/>
+    <TextEquiv><Unicode>hoff senen und sy</Unicode></TextEquiv>
+  </TextLine>
+</TextRegion></Page></PcGts>"""
+
+
+def test_a_word_segmented_line_keeps_the_whole_line():
+    """The regression of #125.
+
+    Transkribus writes ``<Word>`` children *before* the line's own
+    ``TextEquiv``. Taking the first ``Unicode`` among a line's descendants
+    therefore returned word 1 and threw the rest away — 453 characters of one
+    Rats- und Richtebücher page reduced to 84, across 34 % of the v3 corpus.
+    """
+    assert line_texts(WORD_SEGMENTED) == ["und zueget an", "hoff senen und sy"]
+
+
+def test_the_line_box_carries_the_whole_line_too():
+    """Same bug, second copy: this is what labels a kraken/TrOCR line crop."""
+    from atr_serving.training.pagexml import line_boxes
+    assert [b.text for b in line_boxes(WORD_SEGMENTED)] == [
+        "und zueget an", "hoff senen und sy"]
+
+
+def test_words_are_joined_when_the_line_has_no_text_of_its_own():
+    """An export that transcribes only the words must not read as untranscribed."""
+    xml = """<PcGts><Page imageFilename="a.jpg"><TextRegion>
+      <TextLine id="l1">
+        <Word><TextEquiv><Unicode>Petter</Unicode></TextEquiv></Word>
+        <Word><TextEquiv><Unicode>wolff</Unicode></TextEquiv></Word>
+      </TextLine>
+    </TextRegion></Page></PcGts>"""
+    assert line_texts(xml) == ["Petter wolff"]
+
+
+def test_an_untranscribed_line_stays_empty():
+    xml = """<PcGts><Page imageFilename="a.jpg"><TextRegion>
+      <TextLine id="l1"><Coords points="1,1 2,1 2,2 1,2"/></TextLine>
+    </TextRegion></Page></PcGts>"""
+    assert line_texts(xml) == [""]
+
+
+def test_the_character_count_follows_the_whole_line():
+    """page_stats drives prepare's `chars` and the charset for --resize."""
+    stats = page_stats(WORD_SEGMENTED)
+    assert stats.lines == 2
+    assert stats.transcribed_lines == 2
+    assert stats.chars == len("und zueget an") + len("hoff senen und sy")

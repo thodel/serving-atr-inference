@@ -59,6 +59,39 @@ def _iter_local(root: ET.Element, name: str):
             yield el
 
 
+def _own_text(line: ET.Element) -> str:
+    """The transcription **of this line**, not of the first word inside it.
+
+    Transkribus exports word segmentation as ``<Word>`` children, each with its
+    own ``TextEquiv/Unicode``, and those come **before** the line's own
+    ``TextEquiv`` in document order. Searching the line's descendants for the
+    first ``Unicode`` therefore returns word 1 and drops the rest of the line.
+    That is what happened to the Zurich Rats- und Richtebücher: 453 characters
+    of transcription on a page, 84 of them kept (#125).
+
+    So the line's own ``TextEquiv`` — a *direct child* — is the answer. Only when
+    a line has none (exports that put text solely in the words) are the ``Word``
+    texts joined, in reading order as the file gives them. A line with neither is
+    untranscribed and yields ``""``.
+    """
+    for child in line:
+        if _localname(child.tag) != "TextEquiv":
+            continue
+        for uni in child.iter():
+            if _localname(uni.tag) == "Unicode" and uni.text and uni.text.strip():
+                return uni.text.strip()
+
+    words: list[str] = []
+    for child in line:
+        if _localname(child.tag) != "Word":
+            continue
+        for uni in child.iter():
+            if _localname(uni.tag) == "Unicode" and uni.text and uni.text.strip():
+                words.append(uni.text.strip())
+                break
+    return " ".join(words)
+
+
 def image_filename(xml_text: str) -> str:
     """Return the ``@imageFilename`` of the ``<Page>`` element."""
     page = _PAGE_TAG_RE.search(xml_text)
@@ -161,15 +194,7 @@ def line_texts(xml_text: str) -> list[str]:
     except ET.ParseError as exc:
         raise PageXMLError(f"unparsable PageXML: {exc}") from exc
 
-    out: list[str] = []
-    for line in _iter_local(root, "TextLine"):
-        text = ""
-        for uni in _iter_local(line, "Unicode"):
-            if uni.text and uni.text.strip():
-                text = uni.text
-                break
-        out.append(text)
-    return out
+    return [_own_text(line) for line in _iter_local(root, "TextLine")]
 
 
 def parse_points(points: str) -> list[tuple[int, int]]:
@@ -238,11 +263,7 @@ def line_boxes(xml_text: str) -> list[TextLineBox]:
 
     boxes: list[TextLineBox] = []
     for index, line in enumerate(_iter_local(root, "TextLine")):
-        text = ""
-        for uni in _iter_local(line, "Unicode"):
-            if uni.text and uni.text.strip():
-                text = uni.text.strip()
-                break
+        text = _own_text(line)
         if not text:
             continue
 
