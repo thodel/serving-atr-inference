@@ -230,9 +230,11 @@ def main(argv: list[str] | None = None) -> int:
 
     trainer.train()
 
-    # Save the full checkpoint at the top of output_dir: find_checkpoint() looks
-    # for checkpoint-<epoch>[-<step>] directories, but also falls back to the
-    # top-level if save_pretrained was called without a sub-directory.
+    # The finished model goes at the top of output_dir, processor included. The
+    # Trainer's own checkpoint-<epoch> dirs carry no preprocessor_config.json, so
+    # this is the only directory an evaluation can load from; find_checkpoint()
+    # prefers it and uses training_summary.json below as the marker that it is
+    # complete.
     trainer.save_model(str(out_dir))
     processor.save_pretrained(str(out_dir))
     (out_dir / "training_summary.json").write_text(

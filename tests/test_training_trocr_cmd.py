@@ -199,6 +199,50 @@ def test_find_checkpoint_returns_none_for_a_non_directory(tmp_path):
     assert find_checkpoint(tmp_path) is None
 
 
+def _finished_run(root):
+    """What ``train_trocr`` leaves behind after a clean run.
+
+    The distinction that matters: the processor is saved at the top level and
+    **nowhere else**. The Trainer's own ``checkpoint-<N>`` carries weights and
+    tokenizer but no ``preprocessor_config.json``.
+    """
+    ckpt = root / "checkpoint-119"
+    ckpt.mkdir()
+    for name in ("model.safetensors", "config.json", "tokenizer.json"):
+        (ckpt / name).touch()
+    for name in ("model.safetensors", "config.json", "tokenizer.json",
+                 "preprocessor_config.json", "training_summary.json"):
+        (root / name).touch()
+    return ckpt
+
+
+def test_a_finished_run_is_evaluated_where_its_processor_is(tmp_path):
+    """The regression that failed 20260910T121127Z-trocr-thun-smoke-v2.
+
+    Training went through; the test stage pointed at ``checkpoint-119`` and died
+    in ``AutoProcessor.from_pretrained`` for want of a preprocessor config.
+    """
+    _finished_run(tmp_path)
+    found = find_checkpoint(tmp_path)
+    assert found == tmp_path
+    assert (found / "preprocessor_config.json").is_file()
+
+
+def test_an_unfinished_run_still_falls_back_to_its_latest_checkpoint(tmp_path):
+    """No final save: the epoch checkpoints are all there is."""
+    for epoch in (1, 3):
+        d = tmp_path / f"checkpoint-{epoch}"
+        d.mkdir()
+        (d / "model.safetensors").touch()
+    assert find_checkpoint(tmp_path).name == "checkpoint-3"
+
+
+def test_a_named_epoch_still_selects_that_checkpoint_after_a_final_save(tmp_path):
+    """``epoch=N`` means that epoch, not "whatever is newest"."""
+    _finished_run(tmp_path)
+    assert find_checkpoint(tmp_path, epoch=119).name == "checkpoint-119"
+
+
 # ── report parsing ───────────────────────────────────────────────────────────
 
 def test_parse_eval_report_prefers_the_raw_counts():

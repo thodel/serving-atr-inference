@@ -150,17 +150,33 @@ def evaluate_cmd(
 _CKPT_RE = re.compile(r"^checkpoint-(?P<epoch>\d+)(?:-(?P<step>\d+))?$")
 
 
+#: Written last by ``train_trocr``, after ``save_model`` and the processor. Its
+#: presence is the statement "this directory holds the finished model".
+_FINAL_MARKER = "training_summary.json"
+
+
 def find_checkpoint(output_dir: str | Path, *, epoch: int | None = None) -> Path | None:
     """Find a TrOCR checkpoint directory.
 
-    ``output_dir`` is the ``--output-dir`` passed to :func:`train_cmd`. By default
-    the **latest epoch** is returned (highest ``checkpoint-<N>``), because a run
-    stopped part-way leaves earlier checkpoints behind. Pass ``epoch=N`` to
-    select a specific checkpoint.
+    ``output_dir`` is the ``--output-dir`` passed to :func:`train_cmd`. When the
+    run finished, the answer is ``output_dir`` **itself**: ``train_trocr`` saves
+    the model and — crucially — the processor there, and only there. A Trainer
+    ``checkpoint-<N>`` sub-directory holds weights and tokenizer but **no**
+    ``preprocessor_config.json``, so evaluating one dies in
+    ``AutoProcessor.from_pretrained`` before it reads a single image. That is
+    what killed the test stage of ``20260910T121127Z-trocr-thun-smoke-v2`` after
+    the training had gone through cleanly.
+
+    So: the top level wins when it carries the final-save marker; otherwise the
+    **latest epoch** (highest ``checkpoint-<N>``), because a run stopped part-way
+    leaves only those behind. ``epoch=N`` always selects that checkpoint.
     """
     root = Path(output_dir)
     if not root.is_dir():
         return None
+
+    if epoch is None and (root / _FINAL_MARKER).is_file():
+        return root
 
     candidates = [
         p for p in root.glob("checkpoint-*")
