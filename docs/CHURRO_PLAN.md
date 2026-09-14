@@ -180,6 +180,34 @@ Ob `✳` & Co. behalten oder vereinheitlicht werden, ist eine **editorische**
 Entscheidung — `✳` kann eine sinntragende Markierung sein —, keine technische.
 Entschieden ist sie vorerst für **Beibehalten** (§5).
 
+### Das zweite Risiko: unsere Ground Truth ist teilweise wortweise zeilenumbrochen
+
+Gemessen auf dem stratifizierten Satz (200 Seiten, 40 je Quelle):
+
+| Quelle | Wörter je „Zeile" | Anteil Zeilen mit **einem** Wort |
+|---|---:|---:|
+| Zürcher Rats- und Richtebücher | 2,88 | **78 %** |
+| AAEB | 4,45 | 45 % |
+| St. Galler Missiven | 10,23 | 1 % |
+| Bullinger | 8,80 | 3 % |
+| Königsfelden | 17,79 | 9 % |
+
+Bei zwei Quellen ist der Zeilenumbruch also überwiegend ein Segmentierungs- und
+Annotationsartefakt, keine Lesart. Wer dieselben Wörter mit Leerzeichen statt
+Zeilenumbrüchen schreibt, erreicht auf solchen Seiten **CER 0,1316 — ohne ein
+einziges falsch gelesenes Zeichen.** Das ist eine Layout-Strafe. Ein
+feinabgestimmtes Modell (v3) zahlt sie nicht, weil es das Layout mitgelernt hat;
+ein Zero-Shot-CHURRO zahlt sie voll. Ein Vergleich der beiden misst dann Layout,
+nicht Lesefähigkeit.
+
+**Deshalb ist die Vergleichszahl der `whitespace-flat` CER**: jeder Lauf in Phase 0
+und Phase 3 wird zusätzlich gewertet, nachdem auf beiden Seiten jede Folge von
+Leerraum zu einem Leerzeichen zusammengezogen wurde
+(`churro_xml.flatten_whitespace`). Sie zählt weiterhin jeden Buchstaben **und
+jedes Zeichen unserer Notation** — die Entscheidung vom 11.09. bleibt unberührt —
+und hört nur dort auf zu zählen, wo die Zeilen umbrechen. `scripts/compare_eval_reports.py`
+führt sie als erste Spalte.
+
 ---
 
 ## 3. Der Plan

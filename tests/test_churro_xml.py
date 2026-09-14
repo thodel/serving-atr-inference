@@ -17,8 +17,10 @@ from atr_serving.training.churro_xml import (
     CHURRO_SYSTEM_PROMPT,
     build_historical_document,
     flatten,
+    flatten_whitespace,
     normalize_convention,
 )
+from atr_serving.training.textmetrics import score_pairs
 
 
 # ── the oracle: CHURRO's tooling/evaluation/xml_utils.py, verbatim ──────────
@@ -192,5 +194,25 @@ def test_combining_marks_go_on_both_sides_alike():
     assert normalize_convention("über") == "uber"
 
 
-def test_whitespace_is_collapsed_but_lines_are_kept():
-    assert normalize_convention("a   b\n\n  c  ") == "a b\nc"
+def test_the_diagnostic_flattens_layout_too():
+    assert normalize_convention("a   b\n\n  c  ") == "a b c"
+
+
+# ── layout is not reading ───────────────────────────────────────────────────
+
+WORD_PER_LINE = "es\nsunder,\nir\nhelenharten\nKlein\nAndres"   # a real Rats page's shape
+
+
+def test_the_raw_cer_punishes_line_layout_alone():
+    """The defect this measure exists for: identical words, written as a line."""
+    assert score_pairs([("es sunder, ir helenharten Klein Andres", WORD_PER_LINE)]).cer > 0.1
+
+
+def test_whitespace_flat_cer_does_not():
+    hyp = flatten_whitespace("es sunder, ir helenharten Klein Andres")
+    assert score_pairs([(hyp, flatten_whitespace(WORD_PER_LINE))]).cer == 0.0
+
+
+def test_whitespace_flat_keeps_every_character_of_our_notation():
+    """Decision of 11.09.: keep the notation. Only layout is forgiven."""
+    assert flatten_whitespace("vˀsocht\n✳  ſein") == "vˀsocht ✳ ſein"

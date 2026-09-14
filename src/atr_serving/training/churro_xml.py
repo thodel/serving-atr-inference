@@ -49,6 +49,7 @@ __all__ = [
     "Flattened",
     "flatten",
     "build_historical_document",
+    "flatten_whitespace",
     "normalize_convention",
 ]
 
@@ -176,6 +177,23 @@ _NOTATION = str.maketrans({"✳": None, "ˀ": None, "₎": None, "¬": None})
 _LETTERS = str.maketrans({"ſ": "s", "ù": "u", "ꝛ": "r"})
 
 
+def flatten_whitespace(text: str) -> str:
+    """Every run of whitespace, line breaks included, as one space.
+
+    Line breaks in our ground truth are partly a segmentation artefact, not
+    reading. Measured on the stratified set: in the Zurich Rats- und
+    Richtebücher **78 % of "lines" are a single word** (2.9 words per line), in
+    AAEB 45 %. A model that writes real lines with spaces between the words scores
+    CER 0.13 against such a page **without a single misread character** — which is
+    a layout penalty, and one v3 does not pay because it learned the layout.
+
+    CER after this still counts every letter and every character of our notation
+    (decision of 11.09.: keep them); it only stops counting where the line breaks
+    fall.
+    """
+    return " ".join(text.split())
+
+
 def normalize_convention(text: str) -> str:
     """Map a transcription onto a notation-free common ground. Diagnostic only.
 
@@ -183,13 +201,12 @@ def normalize_convention(text: str) -> str:
     distance is reading, not notation: project markers (``✳ ˀ ₎``) and the
     line-end hyphen ``¬`` go, ``ſ ù ꝛ`` become ``s u r``, combining marks
     (abbreviation strokes, superscript vowels, and — by the same stroke — umlaut
-    dots) are dropped after NFD, whitespace is collapsed per line.
+    dots) are dropped after NFD, and all whitespace is flattened as in
+    :func:`flatten_whitespace`, since layout is not reading either.
 
     Lossy by design and blunt on purpose: it answers "could the model read the
     page", not "did it transcribe it to our standard". The raw CER answers the
     second question and stays the one that counts.
     """
     text = unicodedata.normalize("NFD", text.translate(_NOTATION).translate(_LETTERS))
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    lines = (" ".join(line.split()) for line in text.splitlines())
-    return "\n".join(line for line in lines if line)
+    return flatten_whitespace("".join(ch for ch in text if not unicodedata.combining(ch)))

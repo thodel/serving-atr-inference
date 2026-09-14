@@ -24,6 +24,7 @@ from pathlib import Path
 from atr_serving.training.churro_xml import (
     CHURRO_SYSTEM_PROMPT,
     flatten,
+    flatten_whitespace,
     normalize_convention,
 )
 from atr_serving.training.textmetrics import score_pairs
@@ -246,6 +247,12 @@ def main(argv: list[str] | None = None) -> int:
 
     score = score_pairs(pairs)
     report = score.as_report()
+    # Layout-free, notation kept: line breaks in our ground truth are partly a
+    # segmentation artefact (78 % one-word "lines" in the Rats- und Richtebücher),
+    # and a model writing real lines pays CER ~0.13 for that alone.
+    flat = score_pairs([(flatten_whitespace(h), flatten_whitespace(r)) for h, r in pairs])
+    report["whitespace_flat"] = {
+        k: v for k, v in flat.as_report().items() if k != "examples"}
     # Diagnostic, never the headline: the same notation-free mapping on both sides
     # separates "could it read the page" from "did it write our notation"
     # (docs/CHURRO_PLAN.md §2). Reported for every template, so arms compare.
@@ -294,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8")
     print(f"CER {score.cer:.4f}  WER {score.wer}  over {score.samples} samples -> {out}",
           flush=True)
+    print(f"CER {flat.cer:.4f} whitespace-flat (layout ignored, notation kept)", flush=True)
     print(f"CER {normalized.cer:.4f} convention-normalized (diagnostic)", flush=True)
     return 0
 

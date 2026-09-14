@@ -132,3 +132,9 @@ def test_the_plain_template_scores_exactly_as_before(tmp_path, monkeypatch):
     # not flattened: the XML is the prediction, so it scores badly against "abc"
     assert report["examples"][0]["prediction"].startswith("<HistoricalDocument>")
     assert report["cer"] > 1.0
+
+
+def test_the_report_carries_a_layout_free_cer(run):
+    report, _, _ = run
+    assert "whitespace_flat" in report
+    assert report["whitespace_flat"]["cer"] <= report["cer"]
