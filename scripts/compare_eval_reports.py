@@ -72,7 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", type=Path, help="also write the table as JSON")
     args = ap.parse_args(argv)
 
-    references = [json.loads(l) for l in args.eval_set.read_text(encoding="utf-8").splitlines() if l]
+    references = [json.loads(line)
+                  for line in args.eval_set.read_text(encoding="utf-8").splitlines() if line]
     sources = sorted({r.get("source", "?") for r in references})
     table = {}
     for path in args.reports:

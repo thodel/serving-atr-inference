@@ -99,8 +99,10 @@ def main(argv: list[str] | None = None) -> int:
     job = json.loads((args.job_dir / "job.json").read_text(encoding="utf-8"))
     spans = source_spans(job["progress"]["dataset_counts"])
     data = args.job_dir / "data"
-    val = [json.loads(l) for l in (data / "val.jsonl").read_text(encoding="utf-8").splitlines() if l]
-    train = [json.loads(l)["image"] for l in (data / "train.jsonl").read_text(encoding="utf-8").splitlines() if l]
+    val = [json.loads(line)
+           for line in (data / "val.jsonl").read_text(encoding="utf-8").splitlines() if line]
+    train = [json.loads(line)["image"]
+             for line in (data / "train.jsonl").read_text(encoding="utf-8").splitlines() if line]
 
     owner = attribute([r["image"] for r in val], spans, extra_images=train)
     picked = stratify(val, owner, args.per_source, args.seed)
