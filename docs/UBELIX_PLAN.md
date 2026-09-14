@@ -1571,3 +1571,77 @@ Three private repos under `dh-unibe` are planned and their cards verified — th
 Qwen3.5 cards carry the corrected CER, the re-score explanation and the in-domain
 caveat. **Blocked**: `~/.hf_token` on UBELIX held zero bytes, so no job had ever
 been authenticated despite logging "present" (fixed in `cbb7858`).
+
+---
+
+## 16. Results of the 19th-century arms — and what they reveal about medieval
+
+All three 19th-century arms finished 2026-09-12. The four medieval arms had
+finished 2026-09-11. Every adapter is on the research share under
+`Textrecognition_Training/trained-ubelix/`, with `metadata.json` (the full
+`job.json`) beside it.
+
+### The 19th-century numbers
+
+| model | base | CER | WER | H100 time |
+|---|---|---:|---:|---:|
+| `qwen3vl-german-xix-v1` | Qwen3-VL-4B | **0.0100** | 0.0378 | 10 h 03 |
+| `qwen3.5-4b-german-xix-v1` | Qwen3.5-4B | 0.0107 | 0.0435 | 15 h 46 |
+| `qwen3.5-2b-german-xix-v1` | Qwen3.5-2B | 0.0141 | 0.0527 | 7 h 45 |
+
+881,542 train / 85,206 validation lines, one epoch, 200 lines scored.
+`length_ratio` 1.00 for all three.
+
+Two readings, and the caveats belong with them. **"Smaller but newer" holds up**:
+Qwen3.5-2B reaches 1.41 % on a 2B backbone in 7 ¾ hours. **Newer at the same size
+does not pay here**: Qwen3.5-4B is within noise of Qwen3-VL-4B (63 vs 59 character
+errors out of 5,898) and took 57 % longer. On 200 lines that difference is not
+resolvable; the wall-clock difference is. Qwen3-VL-4B stays the anchor.
+
+The 21 `TEST_CITlab_*` projects are still not scored separately — the validation
+set mixes them with the partition split from `zh`. The 1.0 % is therefore a
+*mostly in-domain* number, the same caveat as §14 flagged in advance.
+
+### The medieval `length_ratio ≈ 0.5` is a data problem, and now it is identified
+
+This had been open since §12 across every medieval run. The 19th-century results
+solved it by contrast: identical code, prompt, evaluator and hardware, and
+`length_ratio` 1.00 instead of 0.48. So it is not the trainer.
+
+The medieval models stop after the first word:
+
+```
+REF (35): Hanns pfister Jacob slossers knecht     HYP (5): Hanns
+REF (13): Judicatum est                           HYP (9): Judicatum
+REF  (3): xvj                                     HYP (3): xvj
+```
+
+Output length over reference length, by how long the true line is — 1.70 at 1–3
+chars, 0.67 at 4–15, **0.14 at 16–40**. The longer the real line, the less it
+writes. `truncated_at_cap` is 0, so this is the model emitting end-of-turn, not
+`max_new_tokens`.
+
+The cause is the training set's line lengths:
+
+| set | median line | ≤3 chars |
+|---|---:|---:|
+| medieval **train** | 12 chars | **20.9 %** |
+| medieval **val** | 44 chars | 8.3 % |
+| 19th c. train | 30 chars | 0.8 % |
+| 19th c. val | 30 chars | 1.3 % |
+
+A fifth of medieval training samples are 1–3 character fragments — folio numbers,
+column figures, marginalia (`dat`, `16`, `B VI`, `190`). At one epoch the model
+learns an aggressive end-of-turn from them and carries it onto the long lines it is
+scored on. Train and val differ because the partition is by page, and the
+fragment-heavy pages are not spread evenly.
+
+**This means the four medieval CERs (0.53–0.70) measure the corpus, not the
+models**, and the medieval/19th-century gap is not a statement about how hard
+medieval script is. All of the medieval sweeps varied hyperparameters; none
+touched this.
+
+**Next medieval run:** filter short lines out of *training* (a minimum reference
+length, or a cap on their share), leaving validation as it is so the numbers stay
+comparable. That is one prepare-stage change, and it should be tried before any
+further hyperparameter work on this corpus.
