@@ -49,6 +49,7 @@ __all__ = [
     "ArtefactKey",
     "CacheEntry",
     "ArtefactCache",
+    "heldout_fingerprint",
     "key_for",
     "key_for_specs",
 ]
@@ -80,7 +81,11 @@ EVICT_MIN_IDLE_HOURS = 72.0
 #: did not change, so nothing else would tell a cached artefact apart from a
 #: correct one — including the kraken and TrOCR line crops, which carried the
 #: same mislabelling through ``line_boxes``.
-KEY_VERSION = 2
+#: 3 — 697ce82. Everything compiled before it still contains the pages of the
+#: documents reserved for evaluation: the reservation is applied in ``_prepare``,
+#: and a cache hit skips ``prepare`` altogether (#98). An artefact built without
+#: it is a different corpus, and nothing in the specs says so.
+KEY_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,21 @@ def _describe(spec) -> dict[str, Any]:
     }
 
 
+def heldout_fingerprint() -> str:
+    """A short digest of the documents currently reserved for evaluation.
+
+    ``"none"`` when nothing is reserved, so a box with no registry keeps the keys
+    it had rather than getting a new namespace for an empty set.
+    """
+    from atr_serving.training.heldout import load_heldout
+
+    documents = load_heldout().documents
+    if not documents:
+        return "none"
+    payload = "\n".join(sorted(documents)).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
 def key_for_specs(specs: Sequence[Any], engine: str, *,
                   extra: dict[str, Any] | None = None) -> ArtefactKey:
     """The content key for a whole job's dataset list compiled by ``engine``.
@@ -134,6 +154,12 @@ def key_for_specs(specs: Sequence[Any], engine: str, *,
         "engine": engine,
         "datasets": described,
         "extra": dict(sorted((extra or {}).items())),
+        # Which documents were withheld is part of what compiling produced (#98),
+        # and a cache hit skips the prepare stage that withholds them. Folded in
+        # as a digest rather than as another KEY_VERSION bump per edit: a manual
+        # bump that somebody forgets is precisely the "subtly wrong" this key is
+        # meant to be impossible to get.
+        "heldout": heldout_fingerprint(),
     }
     payload = json.dumps(describes, sort_keys=True, ensure_ascii=False,
                          separators=(",", ":")).encode("utf-8")

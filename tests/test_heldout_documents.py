@@ -177,3 +177,46 @@ def test_a_line_granularity_manifest_is_left_alone(tmp_path, monkeypatch):
     pipeline._reserve_eval_documents(job, manifest)
     assert manifest.read_text().splitlines() == lines
     assert job.progress.reserved_pages == 0
+
+
+# ── a cache hit must not smuggle the reserved pages back in ────────────────
+
+def test_the_artefact_key_changes_when_the_reservation_does(tmp_path, monkeypatch):
+    """A cache hit skips `prepare`, which is where the reservation is applied —
+    so an artefact compiled under a different reservation is a different corpus
+    and must not be served under this one."""
+    from atr_serving.training import artefact_cache
+    from atr_serving.training.contracts import DatasetSpec
+
+    spec = DatasetSpec(hf_repo="dh-unibe/x")
+    monkeypatch.setattr(artefact_cache, "heldout_fingerprint", lambda: "aaaa")
+    before = artefact_cache.key_for(spec, "vllm").digest
+    monkeypatch.setattr(artefact_cache, "heldout_fingerprint", lambda: "bbbb")
+    assert artefact_cache.key_for(spec, "vllm").digest != before
+
+
+def test_a_box_with_nothing_reserved_keeps_one_namespace(tmp_path, monkeypatch):
+    """No registry must not mean a new key namespace — that would invalidate every
+    cached artefact on a box that reserves nothing, for no change in the corpus."""
+    from atr_serving.training import artefact_cache, heldout
+
+    monkeypatch.setattr(heldout, "DEFAULT_REGISTRY", tmp_path / "absent.json")
+    assert artefact_cache.heldout_fingerprint() == "none"
+
+
+def test_the_fingerprint_follows_the_documents_not_the_file(tmp_path, monkeypatch):
+    """Reordering or re-formatting the registry is not a corpus change."""
+    from atr_serving.training import artefact_cache, heldout
+
+    first = tmp_path / "a.json"
+    first.write_text(json.dumps({"sets": [
+        {"name": "s", "test_documents": ["2", "1"], "val_documents": []}]}))
+    second = tmp_path / "b.json"
+    second.write_text(json.dumps({"sets": [
+        {"name": "renamed", "test_documents": ["1"], "val_documents": ["2"]}], "x": 1},
+        indent=4))
+
+    monkeypatch.setattr(heldout, "DEFAULT_REGISTRY", first)
+    a = artefact_cache.heldout_fingerprint()
+    monkeypatch.setattr(heldout, "DEFAULT_REGISTRY", second)
+    assert artefact_cache.heldout_fingerprint() == a != "none"
