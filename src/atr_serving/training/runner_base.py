@@ -44,6 +44,7 @@ from atr_serving.training.contracts import (
     utcnow,
 )
 from atr_serving.training.convergence import check_convergence
+from atr_serving.training.heldout import load_heldout
 from atr_serving.training.hf_source import data_files_for, granularity_files
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.manifests import split_pages, write_manifest
@@ -206,12 +207,54 @@ class BasePipeline(ABC):
         if len(datasets) == 1:
             spec = datasets[0]
             if spec.granularity == "line":
-                return self._prepare_lines_single(job, spec, paths)
+                train, val = self._prepare_lines_single(job, spec, paths)
             else:
-                return self._prepare_pages_single(job, spec, paths)
+                train, val = self._prepare_pages_single(job, spec, paths)
+        else:
+            # Multi-dataset: page-level only for now (line-level multi-dataset is TBD).
+            train, val = self._prepare_multi(job, datasets, paths)
+        return self._reserve_eval_documents(job, train), val
 
-        # Multi-dataset: page-level only for now (line-level multi-dataset is TBD).
-        return self._prepare_multi(job, datasets, paths)
+    def _reserve_eval_documents(self, job: TrainJob, train_manifest: Path) -> Path:
+        """Drop pages of documents reserved for evaluation (#98).
+
+        Here rather than in the selection, because selection is by *project* and
+        the hold-out is by *document*: the two do not line up, and the check that
+        matters is the one against the pages a run is actually about to train on.
+        Every backend and every prepare path goes through this method.
+
+        Dropping, not refusing: the reserved documents live inside the corpora the
+        run is meant to train on. The count goes on the job record — a hold-out
+        that quietly removed data would be its own kind of unmeasured run.
+        """
+        reserved_set = load_heldout()
+        if not reserved_set:
+            return train_manifest
+        pages = [line for line in
+                 train_manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+        keep, reserved = reserved_set.split(pages)
+        job.progress.reserved_pages = len(reserved)
+        if not reserved:
+            logger.info("held-out documents: none of {} training pages are reserved "
+                        "({} documents in the registry)", len(pages), len(reserved_set.documents))
+            self.store.save(job)
+            return train_manifest
+        if not keep:
+            raise DatasetSelectionError(
+                f"every one of the {len(pages)} selected training pages belongs to a "
+                f"document reserved for evaluation ({', '.join(reserved_set.sets)}). "
+                "This selection is the eval set, not a training corpus."
+            )
+        logger.warning(
+            "held-out documents: dropped {} of {} training pages, reserved for "
+            "evaluation by {} (#98)",
+            len(reserved), len(pages), ", ".join(sorted(reserved_set.sets)),
+        )
+        train_manifest.write_text("\n".join(keep) + "\n", encoding="utf-8")
+        (train_manifest.parent / "pages_reserved.lst").write_text(
+            "\n".join(reserved) + "\n", encoding="utf-8")
+        self.store.save(job)
+        return train_manifest
 
     def _chunked(self, spec) -> bool:
         """Should this run materialize a chunk at a time?

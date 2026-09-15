@@ -423,10 +423,7 @@ def model_card(model: TrainedModel, repo_id: str, licence: str | None = None) ->
         f"| characters scored | {_plain(metrics.get('chars'))} |",
         f"| character errors | {_plain(metrics.get('errors'))} |",
         "",
-        "Measured on **this run's own held-out validation split** (page-level and "
-        "seeded, so no page contributes lines to both sides). It is not a score on a "
-        "shared benchmark and does not transfer to a different corpus.",
-        *_validation_scope(model),
+        *_where_measured(model),
         "",
         "## Training data",
         "",
@@ -465,6 +462,39 @@ def model_card(model: TrainedModel, repo_id: str, licence: str | None = None) ->
         lines += ["", "## Notes", "",
                   str(model.request.get("notes") or model.metadata.get("notes"))]
     return "\n".join(lines) + "\n"
+
+
+def _where_measured(model: TrainedModel) -> list[str]:
+    """Where the number on the card comes from.
+
+    The card used to state one provenance for every model: "this run's own
+    held-out validation split (page-level and seeded)". For
+    ``kraken-medieval-german-v2`` that was **wrong in the direction that
+    understates it** — its 21.31 % was measured against `german_test.arrow`, 695
+    pages of 200 documents the run never saw, a document-grouped hold-out and a
+    far stronger claim than an in-run page split (#98).
+
+    A metric recorded with ``measured_on`` says so itself; the fixed sentence is
+    for the ordinary case where the run scored its own split. A card whose
+    provenance line is a template rather than a fact is how a leaky number and a
+    clean one come to look identical.
+    """
+    metrics = model.metrics
+    measured_on = metrics.get("measured_on")
+    note = metrics.get("note")
+    if measured_on:
+        lines = [f"Measured on **{measured_on}** — not on this run's own validation "
+                 "split. It is not a score on a shared benchmark and does not transfer "
+                 "to a different corpus."]
+        if note:
+            lines += ["", str(note)]
+        return lines
+    return [
+        "Measured on **this run's own held-out validation split** (page-level and "
+        "seeded, so no page contributes lines to both sides). It is not a score on a "
+        "shared benchmark and does not transfer to a different corpus.",
+        *_validation_scope(model),
+    ]
 
 
 def _validation_scope(model: TrainedModel) -> list[str]:

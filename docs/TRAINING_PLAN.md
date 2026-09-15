@@ -1061,6 +1061,45 @@ is the first one where `--lrate` means what it says — worth remembering before
 an old and a new CER side by side. Upstream is worth telling: `steps_per_epoch` should
 be `ceil(len_train_set / batch_size)`.
 
+### 9d. The German hold-out, and what it took to keep it held out (#98)
+
+`german-medieval-v1`, built by `scripts/make_split.py` from the four German corpora
+(seed 20260810, job `20260905T190759Z-kraken-german-eval-pool-v1`):
+
+| | documents | pages |
+|---|---:|---:|
+| test | 200 | 695 |
+| val | 150 | 769 |
+
+Compiled to `~/atr-cache/arrows/german_{val,test}.arrow`. It gave
+`kraken-medieval-german-v2` its first CER on material of its own language —
+**0.2131** over 882,255 characters — where the number on its card before that had
+been 0.3471 on ~96 % Flemish pages.
+
+**And then it was trained on.** Measured on 2026-09-15, comparing document ids:
+
+| | of 200 test documents | of 150 val documents |
+|---|---:|---:|
+| in the training set of `…-qwen3vl-german-pages-v3` | **198** | **146** |
+
+The split record said `leak_documents_into_train: 0` and was right about itself.
+Nothing carried that fact from the split into the *next* run's selection: the VLM
+runs select by project and take all of them, and the hold-out is by document, so the
+two never met. A CER from v3 against this set would have described hands it trained
+on — the failure this issue predicted in its own last paragraph.
+
+**Now enforced in the pipeline, not in the selection.** `config/heldout_eval_documents.json`
+lists the reserved document ids; `_prepare` drops their pages from the training
+manifest of every backend and every prepare path, writes them to `pages_reserved.lst`,
+and records the count as `progress.reserved_pages`. Dropping rather than refusing,
+because the reserved documents live inside the corpora a run is supposed to train on —
+refusing would make the eval set unusable for the training it exists to measure. A
+selection that is *entirely* reserved documents is refused: that is not a training
+corpus.
+
+Retiring a set is deleting its block from that file. Nothing else reads it, which is
+the point: spending an eval set should take an edit somebody reviews.
+
 ### 10a. shard_00 experiment series (2026-08-10 … 31)
 
 All on `shard_00.arrow` (24,744 pages / 831,718 lines, compiled before #89/#90) with

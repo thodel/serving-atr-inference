@@ -652,6 +652,10 @@ class Progress(BaseModel):
     #: Per-dataset materialisation counts (pages, skipped, lines, chars).
     #: Supersedes the flat counters above when multiple datasets are used.
     dataset_counts: list[DatasetCounts] = Field(default_factory=list)
+    #: Training pages dropped because their document is reserved for evaluation
+    #: (#98). 0 means the registry was consulted and matched nothing — not that
+    #: nothing was checked, which is what the log line says.
+    reserved_pages: int = 0
     #: Aspect ratio per character over the prepared lines — what the line-geometry
     #: guard compares against the VGSL spec. Recorded so it can travel with a
     #: cached artefact (#109), whose pages are deleted once it is stored.

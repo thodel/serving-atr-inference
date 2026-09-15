@@ -500,3 +500,31 @@ def test_no_datasets_adds_no_claim_at_all(tmp_path):
     card = _card_with(tmp_path, [])
     assert "mostly in-domain" not in card
     assert "unseen hands" not in card
+
+
+# ── where the number came from (#98) ────────────────────────────────────────
+
+def test_a_metric_measured_elsewhere_says_so_on_the_card(tmp_path: Path):
+    """`kraken-medieval-german-v2` carried 21.31 % under the sentence "measured on
+    this run's own held-out validation split (page-level and seeded)". It was not:
+    the number came from german_test.arrow, 695 pages of 200 documents the run
+    never saw — a document-grouped hold-out, and a stronger claim than the card
+    was making for it."""
+    meta = json.loads(json.dumps(KRAKEN_META))
+    meta["metrics"]["measured_on"] = (
+        "german_test.arrow — 695 pages of 200 documents held out by document"
+    )
+    meta["metrics"]["note"] = "Built by scripts/make_split.py, seed 20260810."
+    card = card_for(tmp_path, meta)
+
+    assert "german_test.arrow" in card
+    assert "not on this run's own validation split" in card
+    assert "page-level and seeded" not in card
+    assert "seed 20260810" in card
+
+
+def test_without_that_field_the_card_is_unchanged(tmp_path: Path):
+    """Every other model's provenance sentence must stay exactly as published."""
+    card = card_for(tmp_path, KRAKEN_META)
+    assert "this run's own held-out validation split" in card
+    assert "page-level and seeded" in card
