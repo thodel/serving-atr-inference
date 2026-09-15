@@ -724,10 +724,19 @@ class TestCurveWhileRunning:
 # ── the GPU claim the gateway asks about (#129) ──────────────────────────────
 
 def _set_stage(client, job_id, status, stage):
+    """Move a job, then let the scheduler notice — as it does in production.
+
+    The claim is cached and refreshed on the scheduler's tick, because computing
+    it costs a listing of every record and on asterAIx that store is on CIFS: the
+    uncached route took longer than the gateway's probe allowed, the probe timed
+    out, and the gateway launched a model beside a running job. So the tests
+    drive the same refresh the tick does rather than reaching past it.
+    """
     store = store_of(client)
     job = store.load(job_id)
     job.status, job.stage = status, stage
     store.save(job)
+    app_module.refresh_gpu_claim(store.list())
 
 
 def test_no_job_no_claim(client):
@@ -772,3 +781,35 @@ def test_a_finished_job_releases_the_card(client):
     job_id = client.post("/jobs", json=BODY).json()["job_id"]
     _set_stage(client, job_id, "completed", None)
     assert client.get("/gpu-claim").json()["claimed"] is False
+
+
+def test_a_stale_claim_is_recomputed_rather_than_served(client, monkeypatch):
+    """A cache nobody refreshes freezes on "no claim" — the one wrong answer.
+
+    This is what a dead scheduler looks like from the gateway's side: the route
+    pays for a listing instead of repeating something it can no longer vouch for.
+    """
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    store = store_of(client)
+    job = store.load(job_id)
+    job.status, job.stage = "training", "train"
+    store.save(job)                       # deliberately no refresh: nobody ticked
+
+    assert client.get("/gpu-claim").json()["claimed"] is False   # cache still fresh
+
+    app_module.app.state.gpu_claim_at = 0.0                      # now it is old
+    body = client.get("/gpu-claim").json()
+    assert body["claimed"] is True
+    assert body["jobs"][0]["id"] == job_id
+
+
+def test_a_claim_with_no_cache_at_all_is_computed(client):
+    """Nothing seeded yet (a route hit before the first tick)."""
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    store = store_of(client)
+    job = store.load(job_id)
+    job.status, job.stage = "training", "train"
+    store.save(job)
+
+    app_module.app.state.gpu_claim = None
+    assert client.get("/gpu-claim").json()["claimed"] is True

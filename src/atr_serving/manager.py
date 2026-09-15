@@ -334,9 +334,13 @@ class ModelManager:
            manager exists for, training or no training.
 
         Unreachable trainer means the first question is skipped, loudly, and the
-        second decides. The alternative — refusing all inference whenever the
-        trainer is down — would trade a rare, recoverable fault for a constant
-        one.
+        second decides — but on a stricter bar. Fitting is not the same as being
+        safe: on 15.09. the trainer's answer timed out while v4 trained, the card
+        had 7.6 GB free, and 7.6 GB fits a 3 GB model perfectly while leaving the
+        run to die at its next peak. So an unverifiable launch requires the card
+        to look idle rather than merely roomy. Inference still works on an idle
+        box when the trainer is down, which is what fail-open was for; what it is
+        no longer allowed to do is guess on a busy one.
         """
         claim = self._gpu_claim()
         if claim is not None and claim.get("claimed"):
@@ -355,6 +359,26 @@ class ModelManager:
             return                      # nvidia-smi cannot say; the launch decides
         free_mb, _ = free_total
         need = spec.vram_mb + self.settings.vllm_vram_reserve_mb
+
+        if claim is None:
+            # No answer from the trainer, so "is a run in progress" is unknown and
+            # the card has to answer it. Fitting is not enough: on 15.09. v4 was
+            # training with 7.6 GB left on the card, which fits a 3 GB model and
+            # would still have taken the run down at its next peak. A card with a
+            # multi-GB consumer on it looks exactly like this, so an unverifiable
+            # launch requires the card to look **idle** — free space of the order
+            # of the whole vLLM budget — not merely roomy enough for this model.
+            idle = self.settings.vllm_vram_budget_mb
+            if free_mb < idle:
+                raise GpuBusyError(
+                    f"GPU {self.settings.vllm_gpu} has {free_mb} MB free and the "
+                    f"trainer did not answer, so whether a run is using the card is "
+                    f"unknown. Not launching {spec.id}: below {idle} MB free, "
+                    "something substantial is resident and it cannot be ruled out "
+                    "that it is a training job."
+                )
+            return
+
         if free_mb < need:
             raise GpuBusyError(
                 f"GPU {self.settings.vllm_gpu} has {free_mb} MB free, {spec.id} needs "

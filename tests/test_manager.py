@@ -205,3 +205,44 @@ def test_a_card_nvidia_smi_cannot_read_is_left_to_the_launch(monkeypatch):
     m, launcher = make_manager()
     assert m.ensure_resident(HEBREW) == 8210
     assert launcher.starts == [(HEBREW, 8210, 1)]
+
+
+def test_the_15_09_incident_would_now_be_refused(monkeypatch):
+    """The exact numbers of the failure this guard was supposed to prevent.
+
+    v4 was in its train stage. /gpu-claim listed 44 job records off a CIFS share
+    and took longer than the two-second probe, so the trainer's answer was lost.
+    The card had 7,636 MB free — which fits lightonocr's 3,000 + 2,048 reserve
+    exactly, and would have left v4 to die at its next peak. The guard said
+    "ALLOWED".
+    """
+    from atr_serving.manager import GpuBusyError
+
+    _claim(monkeypatch, RuntimeError("timed out"))
+    _free_vram(monkeypatch, 7636)
+    m, launcher = make_manager()
+    with pytest.raises(GpuBusyError, match="did not answer"):
+        m.ensure_resident(LIGHTON)          # 3000 MB, would have fitted
+    assert launcher.starts == []
+
+
+def test_an_idle_card_still_serves_when_the_trainer_is_down(monkeypatch):
+    """Fail-open's actual purpose survives: an idle box keeps answering."""
+    _claim(monkeypatch, RuntimeError("connection refused"))
+    _free_vram(monkeypatch, 44000)
+    m, launcher = make_manager()
+    assert m.ensure_resident(LIGHTON) == 8210
+    assert launcher.starts == [(LIGHTON, 8210, 1)]
+
+
+def test_a_definite_no_claim_only_needs_the_model_to_fit(monkeypatch):
+    """With the trainer answering, the strict bar is unnecessary and wrong.
+
+    Another vLLM model resident is not a reason to refuse — that is what the LRU
+    budget is for.
+    """
+    _claim(monkeypatch, {"claimed": False, "jobs": []})
+    _free_vram(monkeypatch, 7636)
+    m, launcher = make_manager()
+    assert m.ensure_resident(LIGHTON) == 8210
+    assert launcher.starts == [(LIGHTON, 8210, 1)]

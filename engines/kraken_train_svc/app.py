@@ -31,6 +31,7 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -200,11 +201,15 @@ def schedule_once(
 
 def _schedule() -> TrainJob | None:
     """Run one scheduling pass with whatever seams are installed on app.state."""
-    return schedule_once(
+    started = schedule_once(
         _store(), _settings(),
         spawn=getattr(app.state, "spawn", None) or _spawn,
         vram_check=getattr(app.state, "vram_check", None) or check_vram,
     )
+    # The tick has just reconciled and listed every record, so the claim the
+    # gateway asks about costs nothing extra here — and nothing at all there.
+    refresh_gpu_claim(_store().list())
+    return started
 
 
 async def _scheduler() -> None:  # pragma: no cover - timing loop
@@ -245,6 +250,9 @@ async def lifespan(_app: FastAPI):  # pragma: no cover - process lifecycle
     # A restart must not leave a killed job looking like it is still training.
     for job in _store().list():
         _store().reconcile(job)
+    # Seeded before the first tick: an empty cache would answer "no claim" to the
+    # gateway, which is the one wrong answer this must never give.
+    refresh_gpu_claim(_store().list())
     task = asyncio.create_task(_scheduler())
     _app.state.scheduler = task
     try:
@@ -292,6 +300,56 @@ async def health() -> JSONResponse:
     })
 
 
+def compute_gpu_claim() -> dict:
+    """The claim, read from the job store.
+
+    Costs one listing of every job record. On asterAIx the store lives on a CIFS
+    share and holds 44 jobs, some of them 57 KB — under training load that took
+    longer than the gateway's two-second probe, the probe timed out, and the
+    gateway fell back to free VRAM and allowed a launch **beside a running job**.
+    The warning it logged is what caught it. So this is computed on the
+    scheduler's tick, which lists the store anyway, and the route answers from
+    the result: see :func:`refresh_gpu_claim`.
+    """
+    return {
+        "gpu": _settings().gpu,
+        "claimed": False,
+        "jobs": [],
+    } | _claim_from(_store().list())
+
+
+def _claim_from(jobs) -> dict:
+    claims = [
+        {"id": j.id, "status": j.status, "stage": j.stage}
+        for j in jobs
+        if j.status in RUNNING_STATUSES and (j.stage is None or j.stage in GPU_STAGES)
+    ]
+    return {"claimed": bool(claims), "jobs": claims}
+
+
+def refresh_gpu_claim(jobs) -> dict:
+    """Store the claim computed from a listing the caller already has."""
+    claim = {"gpu": _settings().gpu} | _claim_from(jobs)
+    app.state.gpu_claim = claim
+    app.state.gpu_claim_at = time.monotonic()
+    return claim
+
+
+def _claim_is_fresh() -> bool:
+    """False once the cache is older than several scheduler ticks.
+
+    A cache nobody refreshes freezes at whatever it last said, and the answer it
+    would freeze on is "no claim" — the one answer that must never be wrong. So a
+    stale cache is not served: the route pays for a listing instead. This is what
+    a dead scheduler looks like from here, and it is also why the tests can drive
+    the store directly.
+    """
+    at = getattr(app.state, "gpu_claim_at", None)
+    if at is None:
+        return False
+    return (time.monotonic() - at) < max(3 * _settings().poll_interval_s, 30.0)
+
+
 @app.get("/gpu-claim")
 async def gpu_claim() -> JSONResponse:
     """Whether a job holds the training GPU right now.
@@ -307,14 +365,10 @@ async def gpu_claim() -> JSONResponse:
     the record has not said what it is doing, and guessing "not the GPU" is the
     guess that costs a multi-day run.
     """
-    claims = [
-        {"id": j.id, "status": j.status, "stage": j.stage}
-        for j in _store().list()
-        if j.status in RUNNING_STATUSES and (j.stage is None or j.stage in GPU_STAGES)
-    ]
-    return JSONResponse({"gpu": _settings().gpu,
-                         "claimed": bool(claims),
-                         "jobs": claims})
+    cached = getattr(app.state, "gpu_claim", None)
+    if cached is not None and _claim_is_fresh():
+        return JSONResponse(cached)
+    return JSONResponse(refresh_gpu_claim(_store().list()))
 
 
 @app.post("/jobs", status_code=202)
