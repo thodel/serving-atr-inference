@@ -128,7 +128,7 @@ def test_submitted_job_is_readable(client):
     body = client.get(f"/jobs/{job_id}").json()
     assert body["request"]["model_id"] == "kraken-thun-missiven-v1"
     assert body["request"]["params"]["batch_size"] == 256
-    assert body["request"]["params"]["schedule"] == "1cycle"
+    assert body["request"]["params"]["schedule"] == "cosine"
 
 
 def test_invalid_request_is_rejected(client):

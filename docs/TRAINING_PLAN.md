@@ -194,7 +194,8 @@ parsable metric is `failed`, not `completed`.
 >
 > `batch_size: 256` over 1,898 training lines is **8 batches per epoch**; at the default
 > 50 epochs that is **400 optimizer steps** for a 15.2 M-parameter network from random
-> weights, with `1cycle` ramping and annealing the learning rate across all of them.
+> weights, at a learning rate that (being `1cycle` on this kraken) sat frozen at
+> `lrate/25` = 4e-6 rather than ramping and annealing across them — §9c, #96.
 > That is what produced `kraken-thun-missiven-v1` at CER 0.98 with 11,191 insertions
 > and 2 deletions (§9): the hypothesis was nearly empty — CTC blank collapse. (In this
 > project `insertions` are characters *missing*; see §9a.)
@@ -211,14 +212,14 @@ The architecture and hyperparameters to use, as specified:
 spec        [256,64,0,1 Cr4,2,8,4,2 Cr4,2,32,1,1 Mp4,2,4,2 Cr3,3,64,1,1 Mp1,2,1,2
              S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]
 batch size  256
-schedule    1cycle (cyclical), lrate 1e-4
+schedule    cosine, lrate 1e-4      # 1cycle until 2026-09-15; see §9c
 ```
 
 ```bash
 ketos --device cuda:0 --workers 8 --seed 42 train \
   --format-type binary --training-data train_bin.lst --evaluation-data val_bin.lst \
   --output checkpoints --weights-format coreml \
-  --batch-size 256 --schedule 1cycle --lrate 0.0001 --quit fixed --epochs 50 \
+  --batch-size 256 --schedule cosine --lrate 0.0001 --quit fixed --epochs 50 \
   --spec '[256,64,0,1 Cr4,2,8,4,2 Cr4,2,32,1,1 Mp4,2,4,2 Cr3,3,64,1,1 Mp1,2,1,2 S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]' \
   --normalization NFD --normalize-whitespace --augment
 ```
@@ -246,10 +247,14 @@ Four things about how kraken 7.0.2 actually consumes this (read off
 3. **`--spec` is ignored when `--load` is given** (the loaded net's spec wins). This
    recipe therefore only applies to from-scratch runs; fine-tuning a Zenodo base model is
    a different job shape (`-i … --resize union`, no `-s`).
-4. **`1cycle` wants a fixed epoch count.** kraken derives the cycle length from
-   `--epochs` and steps `OneCycleLR` per batch, so `-q early` can cut the cycle in half
-   and leave the LR mid-ramp. Hence `-q fixed -N <n>`; if early stopping is wanted
-   anyway, pair it with `--min-epochs` ≈ `--epochs`.
+4. **`1cycle` cannot be used on kraken 7.0.2 at all.** It wants a fixed epoch count —
+   kraken derives the cycle length from `--epochs`, so `-q early` can cut the cycle in
+   half and leave the LR mid-ramp. That turned out to be the *smaller* problem: kraken
+   sizes the cycle in **samples**, so it is `batch_size` times too long, no run leaves
+   the warmup, and `--lrate` silently means `lrate/25` (§9c, #96). `train_cmd` refuses
+   to build a 1cycle run; `cosine` is the default and `constant` the other safe choice.
+   Both are stepped the same way but encode no total length that has to match
+   reality.
 
 **Preflight measured on the box (2026-08-07)** — `kraken_train_svc.vgsl_preflight`
 builds the network in seconds and prints its shapes. Actual output, which corrects two
@@ -324,14 +329,14 @@ Request for the first test case:
   "base_model": null,
   "params": {
     "spec": "[256,64,0,1 Cr4,2,8,4,2 Cr4,2,32,1,1 Mp4,2,4,2 Cr3,3,64,1,1 Mp1,2,1,2 S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]",
-    "batch_size": 256, "schedule": "1cycle", "lrate": 0.0001,
+    "batch_size": 256, "schedule": "cosine", "lrate": 0.0001,
     "quit": "fixed", "epochs": 50, "augment": true, "normalization": "NFD",
     "weights_format": "coreml", "seed": 42
   }
 }
 ```
 
-The `kraken+` spec and `1cycle`/1e-4 above are the **defaults** the trainer fills in when
+The `kraken+` spec and `cosine`/1e-4 above are the **defaults** the trainer fills in when
 `params` omits them, so a minimal job body is just `model_id` + `dataset`.
 
 `base_model` accepts a **local path**, a **registry id** from `config/models.yaml`, or a
@@ -442,8 +447,9 @@ things about it are worth knowing here, because they changed shared code:
    from the first run; the default flips after `kraken_svc` moves to
    `kraken.models.load_models`.
 4. **Auth: the existing shared `X-API-Key`.** No separate training key.
-5. **Default architecture + schedule:** the `kraken+` spec, batch 256, `1cycle` @ 1e-4
-   (§3a).
+5. **Default architecture + schedule:** the `kraken+` spec, batch 256, `cosine` @ 1e-4
+   (§3a). Decided as `1cycle` here; changed on 2026-09-15 because that schedule never
+   left its warmup on this kraken (§9c).
 
 ---
 
@@ -507,7 +513,7 @@ truth survives.
 | `batch_size` | 256 → **8 batches per epoch** (7 full + 1 partial) |
 | `epochs` | 50 → **400 optimizer steps total** |
 | network | 15.2 M parameters, random initialisation |
-| schedule | `1cycle`, ramping and annealing across those 400 steps |
+| schedule | `1cycle` — which on this kraken never ramps: a frozen 4e-6 (§9c) |
 
 > **Read the edit counts in this project's convention, not the usual one.**
 > `insertions` are characters **missing** from the hypothesis; `deletions` are
@@ -526,8 +532,10 @@ The mechanism is the ordinary failure of an under-trained CTC network. With 400
 optimizer steps from random weights the network cannot yet discriminate characters, and
 the fastest available loss reduction is to put mass on the blank label — which is
 correct at most timesteps in any case, since blanks outnumber characters. It settles
-there and never leaves, because `1cycle` has already annealed the learning rate to
-nothing by the time it might have.
+there and never leaves. This paragraph used to end "because `1cycle` has already
+annealed the learning rate to nothing by the time it might have" — it had not annealed
+anything; the rate was frozen at 4e-6 from the first step (§9c). Either way it was far
+too small to climb back out, which is why the diagnosis held.
 
 `kraken-medieval-scripts-v1` sits on the same curve from the other side: more data, CER
 0.707 rather than 0.984, insertions still dominant — the same collapse, less complete.
@@ -1038,6 +1046,20 @@ Consequences for what is written above:
 It does **not** confound the architecture comparison: run 2 and run 3 both sat at
 ~4e-5 despite different batch sizes, because the warmup is far too long for the batch
 size to matter over the epochs they ran.
+
+**Resolved 2026-09-15.** The default schedule is now `cosine`, and `train_cmd` refuses
+to build a run with `1cycle` at all — on kraken 7.0.2 there is no batch size at which
+it works, so an option that can only produce a wrong answer should not be reachable by
+accident. `cosine` and `constant` are stepped identically but encode no total length
+that has to match reality. The literal stays in `KrakenTrainParams` so the job records
+that produced every number above still load.
+
+What this does **not** do is fix the numbers already measured. Every kraken CER in this
+document and in `ARCHITECTURE_SEARCH.md` was measured at a frozen `lrate/25`, so the
+*requested* rates in those tables are not the rates that were compared. The next sweep
+is the first one where `--lrate` means what it says — worth remembering before reading
+an old and a new CER side by side. Upstream is worth telling: `steps_per_epoch` should
+be `ceil(len_train_set / batch_size)`.
 
 ### 10a. shard_00 experiment series (2026-08-10 … 31)
 

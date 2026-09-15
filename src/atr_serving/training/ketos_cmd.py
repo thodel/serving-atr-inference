@@ -19,6 +19,7 @@ from atr_serving.training.contracts import KrakenTrainParams, Metrics
 
 __all__ = [
     "KetosCommandError",
+    "ONE_CYCLE_REFUSAL",
     "COMPILE_WORKER_TAPER_PAGES",
     "compile_cmd",
     "compile_workers",
@@ -97,6 +98,30 @@ def compile_cmd(
     return cmd
 
 
+#: Why ``--schedule 1cycle`` cannot be used on kraken 7.0.2 (#96).
+#:
+#: ``kraken/train/vgsl.py`` passes ``len_train_set=len(datamodule.train_set)`` —
+#: a count of **samples** — into ``OneCycleLR(steps_per_epoch=...)``, which wants
+#: optimizer steps. The cycle therefore comes out ``batch_size`` times too long:
+#: shard_00 at 30 epochs produced ``total_steps`` 24,951,540 against 97,470 real
+#: steps, and that figure was *identical* at batch 64 and batch 256, which is the
+#: fingerprint. ``OneCycleLR`` starts at ``max_lr / 25`` and warms up over the
+#: first 30 % of the cycle, so the warmup would end after ~2,304 epochs: run 2
+#: moved from 4.000e-05 to 4.324e-05 in 85 epochs and 27 hours, and the annealing
+#: phase — the whole point of 1cycle — is never reached.
+#:
+#: So ``--lrate`` has silently meant ``lrate / 25``, held roughly constant, for
+#: every kraken run this project has done.
+ONE_CYCLE_REFUSAL = (
+    "--schedule 1cycle is broken on kraken 7.0.2: OneCycleLR is given "
+    "steps_per_epoch in samples rather than optimizer steps, so the cycle is "
+    "batch_size times too long, no run leaves the warmup, and --lrate silently "
+    "means lrate/25 (#96). Use 'cosine' (the default) or 'constant', which are "
+    "stepped the same way but encode no total length. If you deliberately want "
+    "the frozen warmup rate, ask for 'constant' at the rate you actually want."
+)
+
+
 def train_cmd(
     ketos: str | Path,
     *,
@@ -119,9 +144,14 @@ def train_cmd(
     * **the batch size must be passed explicitly.** The leading ``256`` of the
       VGSL spec only sizes ``example_input_array``; the dataloader reads
       ``--batch-size``.
+    * **``--epochs`` does not bound a run under ``--quit early``** — it sizes the
+      schedule and the ``stage N/∞`` counter, and ``--lag`` decides when to stop.
+      Worth knowing before reading ``epochs`` as "how long this will take" (#96).
     """
     if format_type not in {"path", "xml", "alto", "page", "binary"}:
         raise KetosCommandError(f"ketos 7.0.2 train has no format type {format_type!r}")
+    if params.schedule == "1cycle":
+        raise KetosCommandError(ONE_CYCLE_REFUSAL)
 
     cmd = [str(ketos), *_global_opts(params.device, params.workers, params.seed), "train",
            "--format-type", format_type,

@@ -126,7 +126,7 @@ The response is `202` with the job id:
   "params": {
     "batch_size": 16,
     "resize": "union",
-    "schedule": "1cycle",
+    "schedule": "cosine",
     "lrate": 0.0001,
     "epochs": 50,
     "augment": true,
@@ -142,8 +142,11 @@ The response is `202` with the job id:
 > wrong by three orders of magnitude for a few thousand lines. The Thun set above is
 > **1,898 training lines** (2,087 transcribed, 189 held out for eval): at
 > `batch_size: 256` that is **8 batches per epoch, 400 optimizer steps over the whole
-> run**, for a 15.2 M-parameter network from random weights — and `1cycle` spends all
-> 400 ramping up and annealing back down. The result was
+> run**, for a 15.2 M-parameter network from random weights. (This run was
+> configured `1cycle`, and the sentence here used to add "and `1cycle` spends all 400
+> ramping up and annealing back down". It did not: kraken sizes the cycle in samples,
+> so the rate sat frozen at `lrate/25` — `docs/TRAINING_PLAN.md` §9c, #96. The step
+> count is what killed it either way.) The result was
 > `kraken-thun-missiven-v1` at **CER 0.98** with a nearly empty output — CTC blank
 > collapse. (`insertions` here are characters *missing* from the hypothesis, inverted
 > from standard ASR usage; see `docs/TRAINING_PLAN.md` §9a.)
@@ -810,24 +813,28 @@ exceed VRAM. Keep the effective batch at 256 via gradient accumulation:
 
 The effective batch is still 256; training speed drops slightly but it fits.
 
-### `1cycle` run cut short by early stopping
+### `1cycle` is refused (#96)
 
-`1cycle` derives the LR schedule from `--epochs`. If early stopping (`-q early`)
-fires before the cycle completes, the LR is mid-ramp and the model may not have
-learned the low-rate anneal. To use early stopping with 1cycle safely:
-
-```json
-{
-  "params": {
-    "schedule": "1cycle",
-    "quit": "early",
-    "min_epochs": 50
-  }
-}
+```
+--schedule 1cycle is broken on kraken 7.0.2: OneCycleLR is given steps_per_epoch
+in samples rather than optimizer steps …
 ```
 
-This holds the run to 50 epochs regardless of early stopping, and the `1cycle`
-policy completes its full cycle before the scheduler stops improving.
+kraken builds the scheduler with `steps_per_epoch=len(datamodule.train_set)` — a
+count of **samples**, where `OneCycleLR` wants optimizer steps. The cycle comes out
+`batch_size` times too long: a 30-epoch run at batch 256 reported `total_steps`
+24,951,540 against 97,470 real steps, *and the same figure at batch 64*, which is the
+fingerprint. `OneCycleLR` starts at `max_lr/25` and warms up over the first 30 % of
+the cycle, so the warmup would end after ~2,304 epochs. Every kraken run this project
+did before 2026-09-15 trained at a near-constant **`lrate/25`**.
+
+Use `cosine` (the default) or `constant`. Both are stepped the same way and encode no
+total length that has to match reality. If you want the frozen warmup rate that older
+runs actually saw, ask for `constant` at that rate and say so — do not reproduce it by
+accident.
+
+Job records written before the change still load: the value stays in the type, it
+just cannot start a new run.
 
 ### Job stuck in `training` with a dead PID
 

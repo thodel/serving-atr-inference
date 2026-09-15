@@ -72,8 +72,11 @@ small sets favour small models — so promotion is never the final word.
    The linear scaling rule (batch ↔ LR) means an uncontrolled batch silently changes
    the learning rate too.
 3. **`--quit dumb` with a fixed epoch count in rungs 0–2.** `--epochs` only sizes the
-   `1cycle` schedule; `--quit early` decides when to stop. run 2 spent ~18 of its 27
-   hours training after the LR had annealed to zero.
+   schedule; `--quit early` decides when to stop. run 2 spent ~18 of its 27 hours
+   training with no improvement — written here as "after the LR had annealed to zero",
+   which was wrong in the opposite direction: under `1cycle` the rate never annealed at
+   all, it rose from 4.000e-05 to 4.324e-05 across 50 epochs (#96). Sweeps since
+   2026-09-15 run `cosine`, which does anneal.
 4. **From scratch, or vary base models — never mixed.** `--spec` is ignored when
    `--load` is given.
 5. **One data version per sweep**, recorded. `shard_00.arrow` predates #89/#90 and
@@ -118,7 +121,10 @@ switch we have not tried.
 
 **Peak learning rate** — 3e-4 / 1e-3 / 3e-3, with warmup.
 Measured here: 1e-4 from scratch under `1cycle` starts at 4e-6 and never escapes CTC
-blank collapse; 1e-3 works. Warmup exists precisely because early parameters are far
+blank collapse; 1e-3 works. Both numbers are the *requested* rate: under `1cycle` the
+run saw `lrate/25` throughout (#96), so what was really compared is **4e-6 against
+4e-5**. The ranking stands, the values to sweep do not — under `cosine` the requested
+rate is the rate. Warmup exists precisely because early parameters are far
 from any solution and a large LR is unstable there.
 
 ### Tier 2 — plausible, cheap to include

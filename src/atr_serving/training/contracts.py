@@ -244,9 +244,15 @@ class KrakenTrainParams(BaseModel):
 
     spec: str = KRAKEN_PLUS_SPEC
     batch_size: int = Field(default=256, ge=1)
+    #: ``cosine``, not ``1cycle``: kraken 7.0.2 hands ``OneCycleLR`` a
+    #: ``steps_per_epoch`` counted in **samples**, so the cycle is ``batch_size``
+    #: times too long and no run ever leaves the warmup — every kraken run this
+    #: project did before 2026-09-15 trained at a near-constant ``lrate / 25``
+    #: (#96). ``1cycle`` stays in the type so job records written then still load;
+    #: :func:`ketos_cmd.train_cmd` refuses to build a new run with it.
     schedule: Literal[
         "constant", "1cycle", "exponential", "step", "reduceonplateau", "cosine"
-    ] = "1cycle"
+    ] = "cosine"
     lrate: float = Field(default=1e-4, gt=0.0)
     quit: Literal["early", "fixed"] = "fixed"
     epochs: int = Field(default=50, ge=1)
@@ -272,10 +278,17 @@ class KrakenTrainParams(BaseModel):
 
     @model_validator(mode="after")
     def _one_cycle_needs_a_full_cycle(self) -> "KrakenTrainParams":
-        """kraken derives the 1cycle length from ``--epochs`` and steps OneCycleLR
-        per batch, so early stopping can cut the cycle off mid-ramp and leave the
-        LR nowhere near its annealed value. If someone asks for both anyway, hold
-        the run to the full cycle by defaulting ``min_epochs`` to ``epochs``."""
+        """kraken derives the 1cycle length from ``--epochs``, so early stopping
+        can cut the cycle off mid-ramp and leave the LR nowhere near its annealed
+        value. If someone asks for both anyway, hold the run to the full cycle by
+        defaulting ``min_epochs`` to ``epochs``.
+
+        This was written believing OneCycleLR is stepped per batch. It is stepped
+        per batch, but kraken sizes the cycle in **samples** (#96), so the cycle
+        is ``batch_size`` times too long and cutting it short is the smaller of
+        the two problems by far. The guard is kept for the day the sizing is
+        fixed upstream; until then ``train_cmd`` does not let a 1cycle run start.
+        """
         if self.schedule == "1cycle" and self.quit == "early" and self.min_epochs is None:
             object.__setattr__(self, "min_epochs", self.epochs)
         return self

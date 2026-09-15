@@ -238,7 +238,7 @@ def test_commands_are_the_expected_ketos_calls(store, settings):
     assert train[train.index("--training-data") + 1] == str(data / "train_bin.lst")
     assert train[train.index("--evaluation-data") + 1] == str(data / "val_bin.lst")
     assert train[train.index("--batch-size") + 1] == "256"
-    assert train[train.index("--schedule") + 1] == "1cycle"
+    assert train[train.index("--schedule") + 1] == "cosine"   # not 1cycle (#96)
     assert "--load" not in train and "--spec" in train
 
     test = runner.commands_named("test")[0]

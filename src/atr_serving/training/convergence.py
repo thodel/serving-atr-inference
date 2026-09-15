@@ -8,8 +8,11 @@ it was available the moment ``prepare`` finished:
     training lines**. At batch 256 that is 8 batches per epoch (7 full + 1
     partial), so **400 optimizer steps** over 50 epochs.
 
-400 optimizer steps for a 15.2 M-parameter network starting from random weights,
-with ``1cycle`` ramping and annealing the learning rate across all of them. An
+400 optimizer steps for a 15.2 M-parameter network starting from random weights.
+(The run was configured ``1cycle``, and at the time this read "ramping and
+annealing the learning rate across all of them" — it did neither: kraken sizes
+the cycle in samples, so the rate sat frozen near ``lrate/25`` (#96). The step
+count is what this guard is about and is unaffected.) An
 unconverged CTC network has not learned blank-dominance and emits a character at
 nearly every timestep — which *is* an insertion-dominated CER, and which then
 cost two days to diagnose (11,191 insertions against 2 deletions).

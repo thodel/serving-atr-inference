@@ -59,7 +59,7 @@ def test_train_cmd_from_scratch_is_exact():
         "--output", "/j/checkpoints",
         "--weights-format", "coreml",
         "--batch-size", "256",
-        "--schedule", "1cycle",
+        "--schedule", "cosine",
         "--lrate", "0.0001",
         "--quit", "fixed",
         "--epochs", "50",
@@ -74,7 +74,9 @@ def test_defaults_are_the_agreed_recipe():
     p = KrakenTrainParams()
     assert p.spec == KRAKEN_PLUS_SPEC
     assert p.batch_size == 256
-    assert p.schedule == "1cycle"
+    # cosine since #96: kraken 7.0.2 sizes the 1cycle in samples, so no run ever
+    # left the warmup and --lrate silently meant lrate/25.
+    assert p.schedule == "cosine"
     assert p.lrate == 0.0001
     assert "[256,64,0,1" in p.spec  # batch 256, line height 64, grayscale
 
@@ -119,12 +121,44 @@ def test_lag_only_when_early_stopping():
 
 def test_one_cycle_with_early_stopping_holds_the_full_cycle():
     """kraken derives the 1cycle length from --epochs; stopping early leaves the
-    LR mid-ramp, so min_epochs is pinned to epochs."""
-    p = KrakenTrainParams(quit="early", epochs=30)
+    LR mid-ramp, so min_epochs is pinned to epochs. Kept as a contract for the
+    day the sizing is fixed upstream — until then no 1cycle run can start."""
+    p = KrakenTrainParams(quit="early", epochs=30, schedule="1cycle")
     assert p.min_epochs == 30
-    cmd = train_cmd(KETOS, params=p, training_manifest="t", evaluation_manifest=None,
-                    checkpoint_dir="c")
-    assert cmd[cmd.index("--min-epochs") + 1] == "30"
+
+
+# ── 1cycle is refused outright on this kraken (#96) ─────────────────────────
+
+def test_a_1cycle_run_cannot_be_built():
+    """Every kraken run before 2026-09-15 trained at a near-constant lrate/25:
+    kraken passes OneCycleLR a steps_per_epoch counted in samples, so the cycle
+    is batch_size times too long and the warmup would end after ~2,304 epochs."""
+    with pytest.raises(KetosCommandError) as exc:
+        train_cmd(KETOS, params=KrakenTrainParams(schedule="1cycle"),
+                  training_manifest="t", evaluation_manifest=None, checkpoint_dir="c")
+    assert "lrate/25" in str(exc.value) and "#96" in str(exc.value)
+
+
+def test_the_refusal_names_what_to_use_instead():
+    """A refusal that does not say what to do instead is an obstacle, not a guard."""
+    with pytest.raises(KetosCommandError) as exc:
+        train_cmd(KETOS, params=KrakenTrainParams(schedule="1cycle"),
+                  training_manifest="t", evaluation_manifest=None, checkpoint_dir="c")
+    assert "cosine" in str(exc.value) and "constant" in str(exc.value)
+
+
+def test_a_stored_1cycle_job_still_loads():
+    """The literal stays in the type: eleven job records on the share were written
+    with it, and a params model that refused to parse them would make the runs
+    that produced our published numbers unreadable."""
+    assert KrakenTrainParams(schedule="1cycle").schedule == "1cycle"
+
+
+def test_the_other_schedules_are_untouched():
+    for schedule in ("constant", "cosine", "exponential", "step", "reduceonplateau"):
+        cmd = train_cmd(KETOS, params=KrakenTrainParams(schedule=schedule),
+                        training_manifest="t", evaluation_manifest=None, checkpoint_dir="c")
+        assert cmd[cmd.index("--schedule") + 1] == schedule
 
 
 def test_one_cycle_respects_an_explicit_min_epochs():

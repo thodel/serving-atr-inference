@@ -21,7 +21,7 @@ def test_minimal_request_gets_the_agreed_defaults():
     assert req.engine == "kraken"
     assert req.base_model is None
     assert req.params.spec == KRAKEN_PLUS_SPEC
-    assert (req.params.batch_size, req.params.schedule, req.params.lrate) == (256, "1cycle", 1e-4)
+    assert (req.params.batch_size, req.params.schedule, req.params.lrate) == (256, "cosine", 1e-4)
     assert req.params.weights_format == "coreml"  # until #36 lands
     assert req.datasets[0].partition == 0.9 and req.datasets[0].seed == 42
 
