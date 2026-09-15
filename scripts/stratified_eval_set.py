@@ -3,88 +3,22 @@
 
     python scripts/stratified_eval_set.py <job-dir> --per-source 40 --out eval.jsonl
 
-Why this exists: `evaluate_qlora` scores the first `--max-samples` lines of a
-job's `val.jsonl`, and a multi-dataset job writes that file one dataset after
-another. For `20260910T110352Z-qwen3vl-german-pages-v3`, **196 of the first 200
-validation pages are from the Zurich Rats- und Richtebücher** — so its test-stage
-CER describes one source out of five, and none of the Königsfelden pages that
-carry most of the corpus's notation (docs/CHURRO_PLAN.md §2). The in-training
-`eval_loss` is unaffected; it runs over the whole validation set.
-
-Every arm of the CHURRO comparison is scored on the file this writes, so they
-all see the same pages.
-
-**Attributing a page to its source.** The pool index at the front of a page name
-is not unique across datasets: `_prepare_multi` starts each dataset at the count
-of pages *written* so far, while skipped pages still consume indices, so a
-dataset begins inside the previous one's range. The Transkribus `docId` in the
-page name is reliable — one document never spans two datasets — so each document
-is assigned by the pages of it that fall in a range no other dataset can reach,
-and pages of documents with no such page are left out rather than guessed.
+The logic lives in :mod:`atr_serving.training.eval_subset`, which the test stage
+now uses as well (#120) — this script stays because the CHURRO arms are scored
+outside a job, on a file that has to be identical across arms, and because an
+already-finished job can be rescored without repeating it.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import random
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
+from atr_serving.training.eval_subset import attribute, page_key, source_spans, stratify
 
-def source_spans(dataset_counts: list[dict]) -> list[tuple[str, int, int]]:
-    """(source, first, end) — the index range only that source can occupy."""
-    spans, start, prev_skipped = [], 0, 0
-    for dc in dataset_counts:
-        name = dc["hf_repo"].split("image-text_")[-1]
-        spans.append((name, start + prev_skipped, start + dc["pages_written"]))
-        start += dc["pages_written"]
-        prev_skipped = dc.get("pages_skipped", 0)
-    return spans
-
-
-def page_key(image: str) -> tuple[int, str]:
-    """(pool index, Transkribus docId) from ``data/pages/<index>_<docId>_…``."""
-    parts = image.rsplit("/", 1)[-1].split("_")
-    return int(parts[0]), parts[1]
-
-
-def attribute(images: list[str], spans: list[tuple[str, int, int]],
-              extra_images: list[str] = ()) -> dict[str, str]:
-    """image -> source, for every image whose document can be placed.
-
-    ``extra_images`` (the training side) vote too: a document whose validation
-    pages all sit in an ambiguous range is often placed by its training pages.
-    """
-    def core(i: int) -> str | None:
-        for name, a, b in spans:
-            if a <= i < b:
-                return name
-        return None
-
-    votes: dict[str, Counter] = defaultdict(Counter)
-    for image in [*images, *extra_images]:
-        index, doc = page_key(image)
-        owner = core(index)
-        if owner:
-            votes[doc][owner] += 1
-    doc_owner = {d: v.most_common(1)[0][0] for d, v in votes.items() if len(v) == 1}
-    return {img: doc_owner[page_key(img)[1]] for img in images
-            if page_key(img)[1] in doc_owner}
-
-
-def stratify(rows: list[dict], owner: dict[str, str], per_source: int,
-             seed: int) -> list[dict]:
-    by_source: dict[str, list[dict]] = defaultdict(list)
-    for row in rows:
-        if row["image"] in owner:
-            by_source[owner[row["image"]]].append(row)
-    rng = random.Random(seed)
-    picked: list[dict] = []
-    for source in sorted(by_source):
-        pool = sorted(by_source[source], key=lambda r: r["image"])
-        picked += rng.sample(pool, min(per_source, len(pool)))
-    return picked
+__all__ = ["attribute", "page_key", "source_spans", "stratify", "main"]
 
 
 def main(argv: list[str] | None = None) -> int:

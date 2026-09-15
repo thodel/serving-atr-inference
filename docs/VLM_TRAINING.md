@@ -183,6 +183,38 @@ reached and **the question was not answered** — that is not the same as a pass
 - **`eval_samples: 200`** because generation costs ~1 s per sample. A full
   validation split would take longer than the training.
 
+#### Which 200 (#120)
+
+Until 2026-09-15 they were the **first** 200 lines of `val.jsonl`, and that file
+is written one dataset after another — so for a multi-dataset job they were the
+first dataset's pages. `20260910T110352Z-qwen3vl-german-pages-v3` reported
+CER 0.9756 over 196 pages of the Zurich Rats- und Richtebücher and four of
+everything else, a number about one source out of five. The in-training
+`eval_loss` was never affected: it runs over the whole validation set.
+
+The test stage now writes `data/val_eval.jsonl` before it scores, holding an
+**equal share of each source** — `eval_samples // sources` pages, drawn with the
+job's seed. Pages are attributed to their dataset through the index ranges in
+`progress.dataset_counts`, which is why the subset is planned by the runner and
+not inside the evaluator: only the runner knows those counts. A page whose
+document cannot be placed unambiguously is left out rather than guessed
+(`atr_serving.training.eval_subset`).
+
+Three things follow that are worth knowing when reading a report:
+
+- `eval_selection` says how the pages were chosen — `stratified`, `random` (one
+  attributable source, e.g. a single-dataset job) or `all` (the validation set
+  fits the cap). A CER is not comparable with one drawn differently.
+- `by_source` carries a full metric block per source. One figure over five
+  sources describes none of them: v3's material read at 0.38 on the St. Galler
+  Missiven and 1.91 on the Rats- und Richtebücher (#125).
+- The draw is reproducible from the seed, so a baseline run and a fine-tune of
+  the same job score the same pages.
+
+A finished job can be rescored without repeating it:
+`python scripts/stratified_eval_set.py <job-dir> --per-source 40 --out eval.jsonl`,
+which is also how the CHURRO arms are scored on one identical file.
+
 ### 5. Timing — read this before committing the GPU
 
 Measured on the 325 K-line German corpus, `batch_size: 4`:

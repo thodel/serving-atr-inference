@@ -41,6 +41,7 @@ from atr_serving.training.contracts import (
     utcnow,
 )
 from atr_serving.training.cropping import write_crops
+from atr_serving.training.eval_subset import plan_eval_subset
 from atr_serving.training.manifests import read_manifest
 from atr_serving.training.overlay import upsert_entry
 from atr_serving.training.promote import PromotionResult
@@ -183,6 +184,37 @@ class Pipeline(BasePipeline):
         return adapter
 
     # ── test ────────────────────────────────────────────────────────────────
+    def _eval_subset(self, job: TrainJob, val_jsonl: Path) -> Path:
+        """Write the pages the test stage will score, as ``data/val_eval.jsonl``.
+
+        The stage can afford ``eval_samples`` generations, not a whole validation
+        set, and it used to take the first ones — which for a multi-dataset run is
+        the head of the first dataset (#120). The subset is chosen here rather
+        than inside the evaluator because only the runner knows the per-dataset
+        page counts the attribution needs, and writing it to a file makes the
+        choice inspectable after the fact and identical for a baseline run scored
+        against the same job.
+        """
+        paths = self.store.paths(job.id)
+        rows = [json.loads(line) for line in
+                val_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
+        train_jsonl = paths.data / "train.jsonl"
+        train_images = [json.loads(line)["image"] for line in
+                        train_jsonl.read_text(encoding="utf-8").splitlines()
+                        if line.strip()] if train_jsonl.is_file() else []
+        subset = plan_eval_subset(
+            rows,
+            cap=job.request.params.eval_samples,
+            seed=job.request.params.seed,
+            dataset_counts=[dc.model_dump() for dc in job.progress.dataset_counts],
+            train_images=train_images,
+        )
+        logger.info(subset.summary)
+        out = paths.data / "val_eval.jsonl"
+        out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in subset.rows),
+                       encoding="utf-8")
+        return out
+
     def _test(self, job: TrainJob, adapter: Path, val_jsonl: Path,
               record: StageRecord) -> Metrics:
         paths = self.store.paths(job.id)
@@ -191,7 +223,8 @@ class Pipeline(BasePipeline):
         self._run(job, "test",
                   evaluate_cmd(self.settings.runner_python(self.engine),
                                params=params, base_model=job.request.base_model,
-                               adapter_dir=adapter, val_jsonl=val_jsonl,
+                               adapter_dir=adapter,
+                               val_jsonl=self._eval_subset(job, val_jsonl),
                                data_root=paths.root, report=report),
                   record)
         if not report.exists():

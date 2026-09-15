@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 
 from atr_serving.training.textmetrics import score_pairs
@@ -78,9 +79,21 @@ def main(argv: list[str] | None = None) -> int:
     # the trainer would have moved the failure from the first batch of `train` to
     # the first sample of `test`.
     root = Path(args.data_root)
-    samples = list(read_jsonl(args.val_manifest))[: args.max_samples]
-    if not samples:
+    pool = list(read_jsonl(args.val_manifest))
+    if not pool:
         raise SystemExit(f"{args.val_manifest} has no samples to evaluate")
+    # A seeded draw, never the head (#120): the manifest is written in
+    # materialisation order, one dataset and one page after another, so its first
+    # `max_samples` lines are whatever happened to be compiled first — for the
+    # German corpus, 196 of the first 200 pages came from a single source.
+    if len(pool) > args.max_samples:
+        samples = random.Random(args.seed).sample(
+            sorted(pool, key=lambda s: s.image), args.max_samples)
+        selection = f"seeded draw of {args.max_samples} from {len(pool)}, seed {args.seed}"
+    else:
+        samples = pool
+        selection = f"all {len(pool)} samples of {Path(args.val_manifest).name}"
+    print(f"eval selection: {selection}", flush=True)
 
     processor = AutoProcessor.from_pretrained(args.checkpoint, trust_remote_code=True)
     model = VisionEncoderDecoderModel.from_pretrained(args.checkpoint)
@@ -111,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         "checkpoint": args.checkpoint,
         "granularity": "line",
         "eval_cap": args.max_samples,
-        "val_total": sum(1 for _ in read_jsonl(args.val_manifest)),
+        "eval_selection": selection,
+        "val_total": len(pool),
         "examples": examples,
     })
     out = Path(args.report)

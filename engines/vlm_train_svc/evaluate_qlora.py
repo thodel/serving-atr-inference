@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
+from collections import defaultdict
 from pathlib import Path
 
 from atr_serving.training.churro_xml import (
@@ -206,9 +208,23 @@ def main(argv: list[str] | None = None) -> int:
 
     set_seed(args.seed)
     root = Path(args.data_root)
-    samples = list(read_jsonl(args.val_jsonl))[: args.max_samples]
-    if not samples:
+    pool = list(read_jsonl(args.val_jsonl))
+    if not pool:
         raise SystemExit(f"{args.val_jsonl} has no samples to evaluate")
+    # Never the head (#120). The runner normally hands us a subset it already
+    # chose — stratified over the datasets, which it alone can do — and then this
+    # takes all of it. A file scored by hand, or one larger than the cap for any
+    # other reason, is drawn from at random rather than truncated: the order of
+    # val.jsonl is materialisation order, one dataset after another, so its first
+    # 200 pages were one source out of five for the German corpus.
+    if len(pool) > args.max_samples:
+        samples = random.Random(args.seed).sample(
+            sorted(pool, key=lambda s: s.image), args.max_samples)
+        selection = f"seeded draw of {args.max_samples} from {len(pool)}, seed {args.seed}"
+    else:
+        samples = pool
+        selection = f"all {len(pool)} samples of {Path(args.val_jsonl).name}"
+    print(f"eval selection: {selection}", flush=True)
 
     model, processor = load_model(args)
     churro = args.template == "churro-xml"
@@ -247,6 +263,18 @@ def main(argv: list[str] | None = None) -> int:
 
     score = score_pairs(pairs)
     report = score.as_report()
+    # Per source, when the subset says which source each page came from. This is
+    # the number the headline CER hides: v3 read the St. Galler Missiven at 0.38
+    # and the Rats- und Richtebücher at 1.91, and one figure for both describes
+    # neither (#120, #125).
+    by_source: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for sample, pair in zip(samples, pairs):
+        if sample.source:
+            by_source[sample.source].append(pair)
+    report["by_source"] = {
+        name: {k: v for k, v in score_pairs(rows).as_report().items() if k != "examples"}
+        for name, rows in sorted(by_source.items())
+    } or None
     # Layout-free, notation kept: line breaks in our ground truth are partly a
     # segmentation artefact (78 % one-word "lines" in the Rats- und Richtebücher),
     # and a model writing real lines pays CER ~0.13 for that alone.
@@ -272,7 +300,10 @@ def main(argv: list[str] | None = None) -> int:
         "max_pixels": args.max_pixels or "processor default",
         # Named so a reader cannot mistake a capped run for a full one.
         "eval_cap": args.max_samples,
-        "val_total": sum(1 for _ in read_jsonl(args.val_jsonl)),
+        # How the scored pages were chosen. A CER is not comparable with one
+        # drawn differently, and before #120 nothing in the report said so.
+        "eval_selection": selection,
+        "val_total": len(pool),
         "max_new_tokens": args.max_new_tokens,
         # The number that turns a silent halving into a visible one. A CER is
         # meaningless when the model was cut off, and nothing else in this report

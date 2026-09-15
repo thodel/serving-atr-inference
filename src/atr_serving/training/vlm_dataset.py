@@ -83,9 +83,20 @@ class Sample:
     #: The PageXML this came from — kept so a sample is traceable to its page, and
     #: so the train/val split can be verified to be page-disjoint after the fact.
     page: str | None = None
+    #: Which dataset of a multi-dataset run this page belongs to, once the test
+    #: stage has attributed it (#120). Set only on the evaluation subset, so a
+    #: per-source CER can be reported without re-deriving the attribution.
+    source: str | None = None
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
+        raw = asdict(self)
+        # Omitted when unknown rather than written as null: train.jsonl and
+        # val.jsonl are compared byte-for-byte against cached artefacts, and an
+        # extra key on every line of every run would invalidate all of them for a
+        # field only the evaluation subset uses.
+        if raw["source"] is None:
+            del raw["source"]
+        return json.dumps(raw, ensure_ascii=False)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Sample":
@@ -96,6 +107,7 @@ class Sample:
                 source_type=raw.get("source_type", "line"),
                 bbox=list(raw["bbox"]) if raw.get("bbox") else None,
                 page=raw.get("page"),
+                source=raw.get("source"),
             )
         except KeyError as exc:
             raise VlmDatasetError(f"sample is missing {exc.args[0]!r}: {raw!r}") from None
