@@ -56,27 +56,47 @@ class PageSource(Protocol):
     ) -> Iterator[dict]: ...
 
 
-#: How often to retry a hub call that answers 429, and the cap on the wait it
-#: asks for. The hub states its own backoff ("Retry after 9 sec"); anything much
-#: longer than this means the limit is not going to clear on this attempt.
+#: How often to retry a hub call that answers 429, and the cap on the wait.
+#:
+#: The cap used to be 60 s, sized for the hub's own "Retry after 9 sec". The
+#: hub has a second 429 that states no backoff at all and names a **window**
+#: instead — "quota of 1000 api requests per 5 minutes period" — and against
+#: that a 60-second cap is a guarantee of failure: the wait expires while the
+#: window is still running. It now has to fit a window with slack.
 HUB_RETRIES = 5
-HUB_RETRY_CAP_S = 60.0
+HUB_RETRY_CAP_S = 420.0
 
 _RETRY_AFTER = re.compile(r"retry\s+after\s+(\d+)\s*sec", re.IGNORECASE)
+#: "you hit the quota of 1000 api requests per 5 minutes period"
+_QUOTA_WINDOW = re.compile(
+    r"quota of\s+[\d,]+\s+api requests per\s+(\d+)\s*(second|minute|hour)",
+    re.IGNORECASE,
+)
+_WINDOW_S = {"second": 1, "minute": 60, "hour": 3600}
 
 
 def _retry_after(exc: BaseException) -> float | None:
-    """Seconds the hub asked us to wait, or None when this is not a rate limit.
+    """Seconds to wait before trying again, or None when this is not a 429.
 
     Matched on the message rather than the exception type: `datasets` wraps hub
     errors on the way out, and the message survives the wrapping while the class
     does not.
+
+    Two shapes, and they want different waits. When the hub states a backoff it
+    is answered literally. When it names a quota window instead, the wait is the
+    **window**: coming back in five seconds to a five-minute quota is not a
+    retry, it is a second failure.
     """
     text = str(exc)
     if "429" not in text and "rate limit" not in text.lower():
         return None
-    match = _RETRY_AFTER.search(text)
-    return float(match.group(1)) if match else 5.0
+    stated = _RETRY_AFTER.search(text)
+    if stated:
+        return float(stated.group(1))
+    window = _QUOTA_WINDOW.search(text)
+    if window:
+        return float(int(window.group(1)) * _WINDOW_S[window.group(2).lower()])
+    return 5.0
 
 
 def with_hub_retry(call, *, attempts: int = HUB_RETRIES, sleep=None):
@@ -92,6 +112,16 @@ def with_hub_retry(call, *, attempts: int = HUB_RETRIES, sleep=None):
     back, not a reason to discard the run — and the limit is easy to reach
     honestly, since verifying a four-dataset corpus lists every repo and sizes
     1,800 shards before a single page is read.
+
+    **What retrying cannot do.** ``call`` is re-run whole, so a call that spends
+    more requests than the quota allows spends them again on every attempt and
+    can never get through. The first v4 attempt is the case: resolving 1,185
+    Königsfelden project directories costs 1,185 tree requests against a quota of
+    1,000 per five minutes, and five retries turned a failure into a slower
+    failure. That is a cost problem and belongs to the caller — here, to
+    ``collapse_complete_selection`` — not to a backoff. The log says which shape
+    of 429 was seen, so the difference is visible in the journal instead of
+    having to be inferred from how long the stage took to die.
     """
     sleep = time.sleep if sleep is None else sleep
     last: BaseException | None = None
@@ -103,8 +133,12 @@ def with_hub_retry(call, *, attempts: int = HUB_RETRIES, sleep=None):
             if wait is None or attempt == attempts:
                 raise
             wait = min(wait * attempt, HUB_RETRY_CAP_S)
-            logger.warning("hub rate limit (attempt {}/{}), waiting {:.0f}s: {}",
-                           attempt, attempts, wait, str(exc)[:120])
+            logger.warning(
+                "hub rate limit (attempt {}/{}), waiting {:.0f}s — the call is "
+                "re-run whole, so this only helps if the quota, not this call, "
+                "was the problem: {}",
+                attempt, attempts, wait, str(exc)[:160],
+            )
             sleep(wait)
             last = exc
     raise last  # unreachable; the loop either returns or raises
