@@ -215,6 +215,43 @@ A finished job can be rescored without repeating it:
 `python scripts/stratified_eval_set.py <job-dir> --per-source 40 --out eval.jsonl`,
 which is also how the CHURRO arms are scored on one identical file.
 
+#### What survives a crash (#119)
+
+`20260909T190659Z-qwen3vl-german-pages-v2` trained 8 h 50 m, reached step 628 of
+2,352, died in a network outage and left an **empty** checkpoint directory:
+`save_strategy="epoch"` with `epochs: 1` is a single write after the last step.
+
+An epoch of 100 steps or more now saves on **steps** instead, at ~5 % of an epoch
+(floor 50, ceiling 500 — for the German corpus, 784 steps per epoch, that is every
+50 steps or roughly 45 minutes). A crash costs at most that interval, and the
+checkpoint carries optimizer state, so `trainer.train(resume_from_checkpoint=…)`
+picks it up when the stage is run again against the same output directory. A
+half-written checkpoint is skipped in favour of the previous one:
+`trainer_state.json` is written last, which is what makes it the marker.
+
+A short epoch keeps epoch-end saves. A checkpoint at step 50 of 52 buys nothing
+the epoch-end write is not about to provide, and moving would cost the smoke runs
+their best-model selection for no gain.
+
+**The price, and how it is paid back.** transformers refuses
+`load_best_model_at_end` unless `save_strategy` and `eval_strategy` match, and
+eval has to stay on epochs — the continuation callback (#88) counts one
+evaluation as one epoch, so a steps-based eval would end a `max_epochs: 3` run
+after three evaluations, a few hundred steps in. So a steps-saving run keeps the
+best **adapter** itself, at `<checkpoint-dir>/best`, refreshed whenever
+`eval_loss` improves, and copies it over the final one when training ends. That
+matters because a continuation run stops *because* the loss stopped improving:
+its last weights are by construction not the ones to serve. What is genuinely
+given up is restoring the best *optimizer* state, which nothing here has ever
+resumed from.
+
+`save_steps` in the request still overrides the derived interval.
+
+When a train stage fails, the job record now says what is on disk — a resumable
+checkpoint, a recovery snapshot (adapter only), the best adapter so far, or
+nothing at all. Hours of GPU time usually leave something behind now, and an
+operator should not have to walk the checkpoint directory to find out.
+
 ### 5. Timing — read this before committing the GPU
 
 Measured on the 325 K-line German corpus, `batch_size: 4`:

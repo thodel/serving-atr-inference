@@ -20,6 +20,7 @@ import argparse
 import json
 import math
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from atr_serving.training.continuation import ContinuationPolicy, should_stop
@@ -224,6 +225,152 @@ def recovery_interval(steps_per_epoch: int) -> int:
         return 0
     return max(RECOVERY_MIN_STEPS,
                min(RECOVERY_MAX_STEPS, steps_per_epoch // RECOVERY_FRACTION))
+
+
+@dataclass
+class CheckpointPlan:
+    """How often the Trainer writes a checkpoint, and what that costs.
+
+    ``TrainingArguments`` kwargs plus the reasoning, so the decision can be
+    unit-tested and printed instead of being read out of a conditional
+    expression in the middle of a 40-line constructor.
+    """
+
+    kwargs: dict
+    save_steps: int
+    #: Does the Trainer restore the best epoch at the end? It cannot when saving
+    #: on steps — transformers requires ``save_strategy`` and ``eval_strategy``
+    #: to match, and eval has to stay on epochs (see `make_recovery_callback`).
+    keeps_best: bool
+    reason: str
+
+
+def checkpoint_plan(steps_per_epoch: int, ceiling_epochs: int,
+                    requested_save_steps: int = 0) -> CheckpointPlan:
+    """Decide between epoch-end and step checkpoints (#119).
+
+    ``save_strategy="epoch"`` is one write per epoch, which for the corpus runs
+    is one write every several hours and — at ``epochs: 1`` — one write at the
+    very end. ``20260909T190659Z-qwen3vl-german-pages-v2`` trained 8 h 50 m,
+    reached step 628, and left an empty directory when the network went away.
+
+    So a long epoch saves on **steps**, at the same ~5 % interval the recovery
+    snapshot used, and the price is ``load_best_model_at_end``: transformers
+    refuses to restore the best model unless the two strategies match, and eval
+    cannot move to steps because the continuation callback (#88) counts one
+    evaluation as one epoch. That price is paid back in
+    :func:`make_best_adapter_callback`, which keeps the best *adapter* — which is
+    the only part of a checkpoint that is ever served — beside the checkpoints
+    itself. What is genuinely given up is restoring the best optimizer state, and
+    nothing here has ever resumed from a best model.
+
+    A short epoch keeps epoch-end saves: a checkpoint at step 50 of 52 buys
+    nothing the epoch-end write is not about to provide, and it would take
+    best-model selection away from the smoke runs for free.
+    """
+    if requested_save_steps > 0:
+        every = requested_save_steps
+        reason = f"--save-steps {every}, as requested"
+    elif steps_per_epoch < 2 * RECOVERY_MIN_STEPS:
+        return CheckpointPlan(
+            kwargs=dict(save_strategy="epoch", load_best_model_at_end=True),
+            save_steps=0, keeps_best=True,
+            reason=f"an epoch is only {steps_per_epoch} steps; saving at its end "
+                   "keeps best-model selection and loses at most that",
+        )
+    else:
+        every = recovery_interval(steps_per_epoch)
+        reason = (f"every {every} of {steps_per_epoch} steps per epoch "
+                  f"({ceiling_epochs} at most), so a crash costs at most that many")
+    return CheckpointPlan(
+        kwargs=dict(save_strategy="steps", save_steps=every, load_best_model_at_end=False),
+        save_steps=every, keeps_best=False, reason=reason,
+    )
+
+
+def make_best_adapter_callback(out_dir, greater_is_better: bool = False):
+    """Keep the best-scoring adapter at ``<out_dir>/best``.
+
+    This is what ``load_best_model_at_end`` would have done, restricted to the
+    part that is ever used: the LoRA weights. It has to be done by hand because
+    saving on steps rules that flag out (:func:`checkpoint_plan`), and without it
+    a continuation run (#88) would end on the epoch *after* the best one — the
+    run stops when the loss stopped improving, so the last epoch is by
+    construction not the one to ship.
+
+    Written to a staging directory and renamed, for the same reason as the
+    recovery snapshot: a crash during the write must not leave a directory that
+    is neither the old adapter nor the new one.
+    """
+    import shutil
+
+    from transformers import TrainerCallback
+
+    dest = Path(out_dir) / "best"
+    staging = Path(out_dir) / ".best-writing"
+
+    class KeepBestAdapter(TrainerCallback):
+        def __init__(self) -> None:
+            self.best: float | None = None
+
+        def on_evaluate(self, args, state, control, metrics=None, model=None, **kwargs):
+            value = (metrics or {}).get("eval_loss")
+            if value is None or model is None:
+                return control
+            value = float(value)
+            improved = (self.best is None
+                        or (value > self.best if greater_is_better else value < self.best))
+            if not improved:
+                return control
+            try:
+                shutil.rmtree(staging, ignore_errors=True)
+                model.save_pretrained(staging)
+                (staging / "best.json").write_text(json.dumps({
+                    "eval_loss": value,
+                    "global_step": state.global_step,
+                    "epoch": state.epoch,
+                }, indent=2), encoding="utf-8")
+                shutil.rmtree(dest, ignore_errors=True)
+                staging.rename(dest)
+                self.best = value
+                print(f"best adapter so far: eval_loss {value:.4f} at step "
+                      f"{state.global_step} -> {dest}", flush=True)
+            except OSError as exc:
+                # As with the recovery snapshot: never fail a run over its net.
+                print(f"best-adapter snapshot failed at step {state.global_step}: {exc}",
+                      flush=True)
+            return control
+
+    return KeepBestAdapter()
+
+
+def promote_best_adapter(out_dir: Path) -> str | None:
+    """Copy ``<out_dir>/best`` over the final adapter, and say so.
+
+    The last state of a continuation run is not the state to serve. Returns a
+    line for the log, or None when there is nothing to promote — a single-epoch
+    run has one evaluation, so its best and its last are the same weights.
+    """
+    import shutil
+
+    best = Path(out_dir) / "best"
+    marker = best / "best.json"
+    if not marker.is_file():
+        return None
+    try:
+        meta = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    copied = 0
+    for item in sorted(best.iterdir()):
+        if item.is_dir() or item.name == "best.json":
+            continue
+        shutil.copyfile(item, Path(out_dir) / item.name)
+        copied += 1
+    if not copied:
+        return None
+    return (f"promoted the best adapter (eval_loss {meta.get('eval_loss')} at step "
+            f"{meta.get('global_step')}) over the final one")
 
 
 def make_recovery_callback(out_dir, every: int):
@@ -448,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
     steps_per_epoch = max(1, math.ceil(
         len(train_ds) / (args.batch_size * args.accumulate_grad_batches)))
     warmup = warmup_kwarg(args.warmup_ratio, steps_per_epoch * ceiling_epochs)
+    plan = checkpoint_plan(steps_per_epoch, ceiling_epochs, args.save_steps)
+    print(f"checkpoints: {plan.kwargs['save_strategy']} — {plan.reason}", flush=True)
 
     trainer = Trainer(
         model=model,
@@ -480,10 +629,7 @@ def main(argv: list[str] | None = None) -> int:
             # where there is exactly one evaluation and so no best model to
             # select — and where being unable to resume costs days.
             eval_strategy="epoch",
-            **(dict(save_strategy="steps", save_steps=args.save_steps,
-                    load_best_model_at_end=False)
-               if args.save_steps else
-               dict(save_strategy="epoch", load_best_model_at_end=True)),
+            **plan.kwargs,
             save_total_limit=2,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
@@ -513,17 +659,26 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"continuation: off, training exactly {args.epochs} epoch(s)", flush=True)
 
-    # The Trainer saves at epoch boundaries, which for a one-epoch corpus run is a
-    # single write at the very end (#119). This is the thing in between.
-    steps_per_epoch = max(1, math.ceil(
-        len(train_ds) / max(1, args.batch_size * args.accumulate_grad_batches)))
-    every = recovery_interval(steps_per_epoch)
-    if every:
-        trainer.add_callback(make_recovery_callback(out_dir, every))
-        print(f"recovery: a snapshot every {every} of {steps_per_epoch} steps "
-              f"per epoch -> {out_dir / 'recovery'}", flush=True)
+    if plan.keeps_best:
+        # Epoch-end saves: the gap between them is the exposure, and an adapter-only
+        # snapshot in between is cheap enough to close most of it (#119).
+        every = recovery_interval(steps_per_epoch)
+        if every:
+            trainer.add_callback(make_recovery_callback(out_dir, every))
+            print(f"recovery: a snapshot every {every} of {steps_per_epoch} steps "
+                  f"per epoch -> {out_dir / 'recovery'}", flush=True)
+        else:
+            print(f"recovery: off, an epoch is only {steps_per_epoch} steps", flush=True)
     else:
-        print(f"recovery: off, an epoch is only {steps_per_epoch} steps", flush=True)
+        # A full checkpoint every `plan.save_steps` already contains the adapter, so
+        # a second copy of the same weights on the same schedule is only I/O. What
+        # the Trainer will not do in this mode is keep the best one.
+        print(f"recovery: off, the Trainer itself saves every {plan.save_steps} steps",
+              flush=True)
+        if ceiling_epochs > 1:
+            trainer.add_callback(make_best_adapter_callback(out_dir))
+            print(f"best-adapter: kept at {out_dir / 'best'} on every improvement",
+                  flush=True)
 
     # Resume if this output directory already holds a *usable* checkpoint.
     # ``resume_from_checkpoint=True`` would raise when there is none, and "no
@@ -540,6 +695,12 @@ def main(argv: list[str] | None = None) -> int:
     # and falls back to checkpoint-* only when a run did not get this far.
     trainer.model.save_pretrained(out_dir)
     processor.save_pretrained(out_dir)
+    # ...and then, if we kept the best epoch ourselves, put it back on top. A
+    # continuation run stops *because* the loss stopped improving, so its last
+    # weights are not the ones to serve.
+    promoted = promote_best_adapter(out_dir)
+    if promoted:
+        print(promoted, flush=True)
     (out_dir / "training_summary.json").write_text(
         json.dumps({"base_model": args.base_model,
                     "prompt": args.prompt,

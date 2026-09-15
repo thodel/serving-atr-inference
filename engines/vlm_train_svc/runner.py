@@ -48,6 +48,7 @@ from atr_serving.training.overlay import upsert_entry
 from atr_serving.training.promote import PromotionResult
 from atr_serving.training.runner_base import BasePipeline, StageFailed, run_job
 from atr_serving.training.vlm_cmd import (
+    describe_survivors,
     evaluate_cmd,
     find_adapter,
     parse_eval_report,
@@ -241,7 +242,6 @@ class Pipeline(BasePipeline):
     def _train(self, job: TrainJob, train_jsonl: Path, val_jsonl: Path,
                record: StageRecord) -> Path:
         params = job.request.params
-        paths = self.store.paths(job.id)
         # Local scratch, not the share: the trainer saves a checkpoint per epoch
         # via temp-file + rename, which is cross-device on CIFS — the same reason
         # the kraken pipeline keeps ketos' checkpoints off the share.
@@ -251,13 +251,19 @@ class Pipeline(BasePipeline):
         job.progress.epochs = params.epochs
         self.store.save(job)
 
-        self._run(job, "train",
-                  train_cmd(self.settings.runner_python(self.engine),
-                            params=params, base_model=job.request.base_model,
-                            train_jsonl=train_jsonl, val_jsonl=val_jsonl,
-                            data_root=self._corpus_root(train_jsonl),
-                            output_dir=out_dir),
-                  record)
+        try:
+            self._run(job, "train",
+                      train_cmd(self.settings.runner_python(self.engine),
+                                params=params, base_model=job.request.base_model,
+                                train_jsonl=train_jsonl, val_jsonl=val_jsonl,
+                                data_root=self._corpus_root(train_jsonl),
+                                output_dir=out_dir),
+                      record)
+        except StageFailed as exc:
+            # Hours of GPU time usually leave something behind now (#119). Saying
+            # what, on the record that reports the failure, is the difference
+            # between a run somebody can resume and one thrown away by hand.
+            raise StageFailed(f"{exc}\n\n{describe_survivors(out_dir)}") from exc
         adapter = find_adapter(out_dir)
         if adapter is None:
             raise StageFailed(
