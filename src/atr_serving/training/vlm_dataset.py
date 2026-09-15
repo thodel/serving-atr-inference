@@ -447,11 +447,19 @@ def apply_visual_budget(processor, max_pixels: int) -> AppliedBudget:
             "Qwen3-VL is 16384 tokens per image"
         )
 
+    # Set **every** knob this processor has, not the first one found. Qwen2.5-VL
+    # carries both: ``size={"longest_edge", "shortest_edge"}`` *and* a
+    # ``max_pixels`` attribute — and ``smart_resize`` consults ``max_pixels``. So
+    # writing only ``size.longest_edge`` left the budget at the model's default
+    # while the read-back said otherwise. CHURRO phase 0 proved it the only way
+    # that counts: R4 asked for 2,097,152 pixels against R1's 4,014,080 and the
+    # two runs produced byte-identical output (#128).
+    set_knobs: list[str] = []
     size = getattr(image_processor, "size", None)
     if isinstance(size, dict) and "longest_edge" in size:
         size["longest_edge"] = max_pixels
         image_processor.size = size
-        knob, read_back = "size.longest_edge", image_processor.size.get("longest_edge")
+        set_knobs.append("size.longest_edge")
     elif size is not None and hasattr(size, "longest_edge"):
         # transformers 5.x. ``size`` stopped being a plain dict and became a
         # ``SizeDict`` object that does not answer to mapping access, so the
@@ -461,22 +469,31 @@ def apply_visual_budget(processor, max_pixels: int) -> AppliedBudget:
         # the whole reason this function refuses instead of proceeding (#86).
         size.longest_edge = max_pixels
         image_processor.size = size
-        knob = "size.longest_edge"
-        read_back = getattr(getattr(image_processor, "size", None), "longest_edge", None)
-    elif getattr(image_processor, "max_pixels", None) is not None:
+        set_knobs.append("size.longest_edge")
+
+    if getattr(image_processor, "max_pixels", None) is not None:
         image_processor.max_pixels = max_pixels
-        knob, read_back = "max_pixels", image_processor.max_pixels
-    else:
+        set_knobs.append("max_pixels")
+
+    if not set_knobs:
         raise VisualBudgetError(
             f"{type(image_processor).__name__} has neither size['longest_edge'] nor "
             "max_pixels; there is no knob here to bound visual tokens with"
         )
 
-    if read_back != max_pixels:
-        raise VisualBudgetError(
-            f"set {knob}={max_pixels} but it reads back as {read_back!r} — the budget "
-            "did not take, and training would run at the model's default"
-        )
+    for name in set_knobs:
+        if name == "max_pixels":
+            read_back = getattr(image_processor, "max_pixels", None)
+        else:
+            current = getattr(image_processor, "size", None)
+            read_back = (current.get("longest_edge") if isinstance(current, dict)
+                         else getattr(current, "longest_edge", None))
+        if read_back != max_pixels:
+            raise VisualBudgetError(
+                f"set {name}={max_pixels} but it reads back as {read_back!r} — the "
+                "budget did not take, and training would run at the model's default"
+            )
+    knob = "+".join(set_knobs)
 
     patch = getattr(image_processor, "patch_size", None)
     merge = getattr(image_processor, "merge_size", None)

@@ -284,6 +284,23 @@ class TestApplyVisualBudget:
         assert applied.knob == "max_pixels"
         assert applied.cell_px == 28 and applied.visual_tokens == 256
 
+    def test_a_processor_with_both_knobs_gets_both(self):
+        """CHURRO's processor, and the reason R4 measured nothing (#128).
+
+        Qwen2.5-VL declares ``size={"longest_edge", "shortest_edge"}`` *and*
+        ``max_pixels``, and ``smart_resize`` reads ``max_pixels``. Setting only
+        the first knob left the budget at the model's default while the read-back
+        confirmed the write: R4 asked for 2,097,152 pixels against R1's
+        4,014,080 and the two runs produced byte-identical output.
+        """
+        processor = FakeProcessor(FakeImageProcessor(
+            size={"longest_edge": 4014080, "shortest_edge": 401408},
+            max_pixels=4014080, patch_size=14, merge_size=2))
+        applied = apply_visual_budget(processor, 2097152)
+        assert processor.image_processor.max_pixels == 2097152
+        assert processor.image_processor.size["longest_edge"] == 2097152
+        assert applied.knob == "size.longest_edge+max_pixels"
+
     def test_a_processor_with_no_knob_is_refused(self):
         processor = FakeProcessor(FakeImageProcessor(patch_size=16, merge_size=2))
         with pytest.raises(VisualBudgetError, match="neither"):
