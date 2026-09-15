@@ -216,3 +216,26 @@ def inspect(job_pids: dict | None = None) -> list:
         if card is not None:
             card.processes.append(process)
     return cards
+
+
+def card_memory(index: int) -> tuple[int, int] | None:
+    """``(free MiB, total MiB)`` for one card, or None when nvidia-smi cannot say.
+
+    Deliberately separate from :func:`inspect`: sizing a launch needs two numbers
+    for one card, not the whole per-process picture, and it runs on the request
+    path where a full inspection would be paid for nothing.
+
+    The index is the **physical** card. ``CUDA_VISIBLE_DEVICES`` renames it to 0
+    for the child process, but the memory that has to fit is the memory of the
+    card the child will actually land on.
+    """
+    try:
+        rows = _smi("index,memory.free,memory.total", per_app=False)
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return None
+    for row in rows:
+        idx, free, total = (row + [""] * 3)[:3]
+        if _int(idx) == index:
+            free_mib, total_mib = _int(free), _int(total)
+            return (free_mib, total_mib) if total_mib > 0 else None
+    return None

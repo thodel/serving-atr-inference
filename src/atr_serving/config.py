@@ -88,6 +88,20 @@ class Settings(BaseSettings):
     # profiling overhead left NEGATIVE KV cache. 0.70 (~32 GB) leaves ~8 GB for KV
     # and still ~14 GB for the small engines (kraken/trocr) on GPU 1.
     vllm_gpu_memory_utilization: float = 0.70
+    # …and 0.70 is a constant that knows neither the model nor the card. On
+    # 2026-09-14 a 12 GB model failed to start three times running on a card that
+    # had 45 GB total and 19 free, because 0.70 of the total is 31 GB. With
+    # autosizing the launcher asks the registry how big the model is and the
+    # driver how much is free, and computes the fraction per launch; the constant
+    # above stays as the fallback for a model with no vram_mb and for a host where
+    # nvidia-smi cannot be read. See manager.plan_gpu_budget.
+    vllm_autosize: bool = True
+    # vram_mb is the weights; vLLM wants a KV cache, activation scratch and CUDA
+    # graphs out of the same allocation.
+    vllm_vram_headroom: float = 1.6
+    # Left to the card on top of the model's share: this process's CUDA context,
+    # fragmentation, and growth in the small engines sharing the card.
+    vllm_vram_reserve_mb: int = 2048
     vllm_trust_remote_code: bool = True
     # Qwen3-VL defaults to 262k context; the KV cache for that won't fit alongside
     # 17 GB of weights on GPU 1. Cap it — OCR/HTR needs nothing close.

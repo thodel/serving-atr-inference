@@ -242,6 +242,39 @@ minute or more). A 404 means the id is not in the registry the running gateway
 read; a 502 means the model manager could not bring it up — check the gateway's
 journal for the `Launching vLLM:` line and what the subprocess printed after it.
 
+### A 502 that is about memory
+
+The three 502s of 2026-09-14 were one question — how much of GPU 1 may this model
+take? — answered three times by a constant that knows neither the model nor the
+card:
+
+```
+ValueError: Free memory on device (18.94/44.45 GiB) < desired GPU memory
+  utilization (0.7, 31.11 GiB)
+```
+
+then, after lowering it by hand to 0.35 and waiting out the weights:
+
+```
+ValueError: ... 2.25 GiB KV cache is needed, 2.22 GiB is available.
+  Based on the available memory, the estimated maximum model length is 16160
+```
+
+One percent short, a minute in. The launcher now sizes each launch from
+`vram_mb` and `nvidia-smi` instead, and logs its arithmetic (see
+[DEPLOY.md](DEPLOY.md#how-much-of-the-card-a-model-gets)):
+
+```
+vLLM qwen3vl-german-xix-v1 gpu budget: 0.42 = 19200 of 45516 MiB
+  (12000 MiB weights x 1.6 for KV cache), 31047 MiB free
+```
+
+So a memory 502 now arrives **before** the weights load, and names free and total.
+When it does, the memory is genuinely gone: `GET /gpu` says who has it. Twice that
+has been an orphaned training process — a `[Not Found]` row holding 8 766 MiB
+belonging to a python that had already exited — which `kill -9` on its pid
+releases.
+
 ## Residency: why callers should iterate model-major
 
 All three are `residency: lazy` on GPU 1 (GPU 0 is shared with the RAG service).
