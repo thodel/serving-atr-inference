@@ -40,6 +40,7 @@ from atr_serving.training.contracts import (
     TrainJob,
     utcnow,
 )
+from atr_serving.training.artefact_cache import key_for_specs
 from atr_serving.training.cropping import write_crops
 from atr_serving.training.eval_subset import plan_eval_subset
 from atr_serving.training.manifests import read_manifest
@@ -83,6 +84,88 @@ class Pipeline(BasePipeline):
         if train.is_file() and val.is_file():
             return train, val
         return None
+
+    # ── reusing a compiled corpus (#109) ────────────────────────────────────
+    #: An entry has to contain ``data/``: samples name their images as
+    #: ``data/pages/<file>.jpg``, relative to a corpus root.
+    ARTEFACT_INNER = "data"
+
+    @staticmethod
+    def _corpus_root(jsonl: Path) -> Path:
+        """Where the ``data/pages/…`` in a sample resolves from.
+
+        Derived from the manifest, not from the job. While a job compiles its own
+        corpus the two are the same; once a corpus is reused out of the cache the
+        manifest lives there and the job does not. One path serves both, which is
+        the property that let this backend join the cache at all.
+        """
+        return jsonl.parent.parent
+
+    def _cache_key(self, job: TrainJob):
+        """This backend's compiled corpus is reusable — since #117.
+
+        It was held out of the cache on the grounds that "the JSONL samples name
+        image paths inside the job directory". That stopped being true when #117
+        gave the trainer an explicit ``--data-root``: the samples have named
+        ``data/pages/<file>.jpg`` relative to that root ever since, and the whole
+        of ``data/`` moves as a unit. The docstring outlived the reason and kept
+        every page-level run re-materializing 36 GB — v4 paid 80 minutes for it
+        three times on 15.09.
+
+        What ``key_for_specs`` already covers is the selection and the split.
+        What it cannot know is what ``_compile`` does afterwards, so the three
+        knobs that change its output go in ``extra``. ``granularity`` is taken
+        from the **params**, not from the specs: the specs carry one too, and
+        compile reads the params'.
+        """
+        params = job.request.params
+        return key_for_specs(job.request.datasets, self.engine, extra={
+            "granularity": params.granularity,
+            "max_sample_chars": VLM_MAX_SAMPLE_CHARS[params.granularity],
+            "min_train_chars": params.min_train_chars,
+        })
+
+    def _adopt_cached(self, job: TrainJob, entry) -> tuple[Path, Path]:
+        """Train against the corpus where it lies, in the cache.
+
+        Nothing is copied back. The samples resolve against the entry, which is on
+        local NVMe rather than the CIFS share — so a reused corpus is not only
+        free to prepare but faster to read than the one the producing job made.
+        """
+        data = entry.path / self.ARTEFACT_INNER
+        train, val = data / "train.jsonl", data / "val.jsonl"
+        pages = data / "pages"
+        missing = [str(f) for f in (train, val) if not f.is_file()]
+        if missing or not pages.is_dir() or not any(pages.iterdir()):
+            raise StageFailed(
+                f"cached artefact {entry.key[:12]} is not a usable corpus: "
+                f"missing {missing or 'pages/'}")
+        return train, val
+
+    def _cacheable(self, job: TrainJob, train_jsonl: Path, val_jsonl: Path
+                   ) -> Path | None:
+        """The whole ``data/`` directory this run compiled.
+
+        A directory rather than a file list, unlike kraken: the images sit under
+        ``pages/`` and a flat list would lose that, and with it every sample's
+        path. It costs one copy of ~36 GB from the share to ``/home``.
+
+        The job keeps its own copy. kraken deletes its arrows once the manifests
+        point at the cache, because nothing reads them afterwards; here
+        ``pages_train.lst`` and ``pages_val.lst`` still name these files by
+        absolute path, and a later look at what a run trained on should not find
+        an empty directory. Only the job that *builds* an entry pays that
+        duplication — a job that reuses one never materializes pages at all.
+        """
+        data = self.store.paths(job.id).data
+        pages = data / "pages"
+        if not (data / "train.jsonl").is_file() or not (data / "val.jsonl").is_file():
+            logger.info("artefact cache: {} has no compiled corpus to store", data)
+            return None
+        if not pages.is_dir() or not any(pages.iterdir()):
+            logger.info("artefact cache: no materialized pages under {}", pages)
+            return None
+        return data
 
     def _compile(self, job: TrainJob, pages_train: Path, pages_val: Path,
                  record: StageRecord) -> tuple[Path, Path]:
@@ -172,7 +255,8 @@ class Pipeline(BasePipeline):
                   train_cmd(self.settings.runner_python(self.engine),
                             params=params, base_model=job.request.base_model,
                             train_jsonl=train_jsonl, val_jsonl=val_jsonl,
-                            data_root=paths.root, output_dir=out_dir),
+                            data_root=self._corpus_root(train_jsonl),
+                            output_dir=out_dir),
                   record)
         adapter = find_adapter(out_dir)
         if adapter is None:
@@ -198,7 +282,9 @@ class Pipeline(BasePipeline):
         paths = self.store.paths(job.id)
         rows = [json.loads(line) for line in
                 val_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
-        train_jsonl = paths.data / "train.jsonl"
+        # Beside the validation set, wherever that is — the job's data directory
+        # on the run that compiled it, the cache entry on a run that reused it.
+        train_jsonl = val_jsonl.with_name("train.jsonl")
         train_images = [json.loads(line)["image"] for line in
                         train_jsonl.read_text(encoding="utf-8").splitlines()
                         if line.strip()] if train_jsonl.is_file() else []
@@ -225,7 +311,7 @@ class Pipeline(BasePipeline):
                                params=params, base_model=job.request.base_model,
                                adapter_dir=adapter,
                                val_jsonl=self._eval_subset(job, val_jsonl),
-                               data_root=paths.root, report=report),
+                               data_root=self._corpus_root(val_jsonl), report=report),
                   record)
         if not report.exists():
             raise StageFailed(

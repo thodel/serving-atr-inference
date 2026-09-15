@@ -282,10 +282,18 @@ def test_commands_use_the_vlm_venv_and_the_compiled_jsonl(store, settings):
 
     train = runner.command("train")
     assert train[0] == expected_python
-    assert train[train.index("--train-jsonl") + 1] == str(data / "train.jsonl")
-    assert train[train.index("--val-jsonl") + 1] == str(data / "val.jsonl")
     assert train[train.index("--base-model") + 1] == "Qwen/Qwen3-VL-8B-Instruct"
-    assert train[train.index("--data-root") + 1] == str(store.paths(job.id).root)
+
+    # The corpus is stored in the artefact cache as compile finishes, and the run
+    # that filled it trains against it there — one path, exercised on the run
+    # that builds an entry as well as on the runs that hit it (#109). What has to
+    # hold either way is that --data-root is the directory the manifests resolve
+    # against, not the job.
+    train_jsonl = Path(train[train.index("--train-jsonl") + 1])
+    val_jsonl = Path(train[train.index("--val-jsonl") + 1])
+    assert train_jsonl.name == "train.jsonl" and val_jsonl.parent == train_jsonl.parent
+    assert train[train.index("--data-root") + 1] == str(train_jsonl.parent.parent)
+    assert (train_jsonl.parent.parent / "data" / "pages").is_dir()
 
     test = runner.command("test")
     assert test[0] == expected_python
@@ -556,3 +564,105 @@ def test_a_floor_that_empties_the_training_set_fails_the_job(store, settings):
                        FakeRunner(), request)
     assert job.status == "failed"
     assert "min_train_chars" in (job.error or "")
+
+
+# ── reusing a compiled corpus (#109) ─────────────────────────────────────────
+
+def _corpus_of(runner) -> Path:
+    """Where the train command says the corpus is."""
+    train = runner.command("train")
+    return Path(train[train.index("--train-jsonl") + 1]).parent
+
+
+def test_the_compiled_corpus_is_stored_in_the_cache(store, settings):
+    """The backend was held out of the cache on a reason that expired.
+
+    "The VLM backend's JSONL samples name image paths inside the job directory"
+    stopped being true when #117 gave the trainer an explicit --data-root: the
+    samples have named data/pages/<file>.jpg relative to that root ever since.
+    The docstring outlived the reason, and every page-level run re-materialized
+    36 GB — v4 paid 80 minutes for it three times on 15.09.2026.
+    """
+    runner = FakeRunner()
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), runner)
+    corpus = _corpus_of(runner)
+
+    assert corpus != store.paths(job.id).data          # it trained out of the cache
+    assert corpus.name == "data"                       # …and the layout survived
+    assert (corpus / "pages").is_dir()
+    assert job.progress.artefact and "built by this job" in job.progress.artefact
+
+
+def test_a_second_job_skips_prepare_and_compile(store, settings):
+    """The point of the whole thing: the same selection is materialized once."""
+    first = FakeRunner()
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), first)
+
+    second = FakeRunner()
+    source = FakeSource({"train": 4, "eval": 2})
+    job = run_pipeline(store, settings, source, second)
+
+    assert job.status == "completed", job.error
+    logs = {s.name: (s.log or "") for s in job.stages}
+    assert logs["prepare"].startswith("skipped:") and logs["compile"].startswith("skipped:")
+    assert _corpus_of(second) == _corpus_of(first)
+    assert "reused" in (job.progress.artefact or "")
+
+
+def test_a_reused_corpus_is_what_data_root_points_at(store, settings):
+    """A hit that trained against the cache but resolved images against the job
+    would read every sample from a directory that was never written."""
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+
+    runner = FakeRunner()
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), runner)
+    for stage in ("train", "test"):
+        cmd = runner.command(stage)
+        root = Path(cmd[cmd.index("--data-root") + 1])
+        assert root == _corpus_of(runner).parent
+        assert (root / "data" / "pages").is_dir()
+    # …and the job that reused it never materialized pages of its own. The
+    # directory may exist — the job lays out its own data/ regardless — but
+    # nothing was written into it, which is the 36 GB and the 80 minutes.
+    own_pages = store.paths(job.id).data / "pages"
+    assert not own_pages.exists() or not any(own_pages.iterdir())
+
+
+def test_a_different_granularity_does_not_share_a_corpus(store, settings):
+    """compile reads ``params.granularity``, so the key has to carry it.
+
+    Serving a page corpus to a line run would train on whole scans labelled as
+    lines, and nothing downstream would notice.
+    """
+    from atr_serving.training.contracts import VlmTrainParams
+
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+
+    other = FakeRunner()
+    job = run_pipeline(
+        store, settings, FakeSource({"train": 4, "eval": 2}), other,
+        request=request_with(params=VlmTrainParams(granularity="page")))
+    logs = {s.name: (s.log or "") for s in job.stages}
+    assert not logs["compile"].startswith("skipped:")
+    assert any((store.paths(job.id).data / "pages").iterdir())
+
+
+def test_the_sample_length_cap_is_part_of_the_key(store, settings):
+    """drop_long_samples runs inside compile, so a corpus is cut to a cap.
+
+    Reusing one built under a different cap would train on a selection nobody
+    asked for — and #110 is what that cap is for.
+    """
+    from atr_serving.training.contracts import VLM_MAX_SAMPLE_CHARS, VlmTrainParams
+    from vlm_train_svc.runner import Pipeline
+
+    pipeline = Pipeline(store, settings, runner=FakeRunner(),
+                        source=FakeSource({"train": 4, "eval": 2}))
+    job = store.create(request_with())
+    line = pipeline._cache_key(job)
+    assert line.describes["extra"]["granularity"] == "line"      # the params default
+    assert line.describes["extra"]["max_sample_chars"] == VLM_MAX_SAMPLE_CHARS["line"]
+    assert "min_train_chars" in line.describes["extra"]
+
+    page = store.create(request_with(params=VlmTrainParams(granularity="page")))
+    assert pipeline._cache_key(page).digest != line.digest

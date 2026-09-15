@@ -662,6 +662,11 @@ class BasePipeline(ABC):
         )
 
     # ── reusing a compiled corpus (#109) ────────────────────────────────────
+    #: Subdirectory to store a cacheable artefact under, when the backend's own
+    #: files resolve against a root one level above them. None stores the files
+    #: at the top of the entry, which is what kraken's arrows want.
+    ARTEFACT_INNER: str | None = None
+
     def _cache(self) -> ArtefactCache | None:
         """The artefact cache, or None when this box has it switched off."""
         if not getattr(self.settings, "artefact_cache", False):
@@ -771,7 +776,8 @@ class BasePipeline(ABC):
             # succeeded, and `_adopt_cached` removes them only once this job's
             # manifests point at the cache. A failed move would otherwise leave a
             # job holding manifests for arrows that are no longer anywhere.
-            entry = cache.put(key, source, job_id=job.id, payload={
+            entry = cache.put(key, source, job_id=job.id,
+                              inner=self.ARTEFACT_INNER, payload={
                 "train_lines": job.progress.train_lines,
                 "lines_written": job.progress.lines_written,
                 "pages_written": job.progress.pages_written,
@@ -797,9 +803,13 @@ class BasePipeline(ABC):
     def _skip_stage(self, job: TrainJob, name: JobStage, why: str | None) -> None:
         """Record a stage that did not have to run, rather than one that did.
 
-        A skipped stage must not look like a completed one on the job record: the
-        difference between "compiled in 0 seconds" and "reused an artefact" is the
-        first thing anyone debugging a surprising CER needs to see.
+        The difference between "compiled in 0 seconds" and "reused an artefact" is
+        the first thing anyone debugging a surprising CER needs to see. It is
+        carried in ``log``, not in ``status``: ``StageRecord.status`` has no
+        ``skipped`` value, and adding one would change a contract every consumer
+        of the job API reads. So the status stays ``completed`` — the stage's work
+        is done — and ``log`` says how, naming the artefact and the job that built
+        it.
         """
         record = StageRecord(name=name, status="completed",
                              started_at=utcnow(), finished_at=utcnow(),

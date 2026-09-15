@@ -258,9 +258,17 @@ class ArtefactCache:
 
     # ── writing ─────────────────────────────────────────────────────────────
     def put(self, key: ArtefactKey, source: str | Path | Sequence[str | Path], *,
-            job_id: str | None = None, move: bool = False,
+            job_id: str | None = None, move: bool = False, inner: str | None = None,
             payload: dict[str, Any] | None = None) -> CacheEntry:
         """Store ``source`` under ``key``: a directory, or the files to collect.
+
+        ``inner`` names a subdirectory to put the copy under, so the entry can
+        reproduce a layout its consumer depends on. The VLM backend needs it: its
+        samples name images as ``data/pages/<file>.jpg`` relative to a corpus
+        root, so an entry has to *contain* a ``data`` directory for that path to
+        resolve against ``entry.path``. Copying the job's ``data`` directory
+        straight in would put ``pages`` at the top and leave every sample pointing
+        one level above the entry.
 
         The **file-list form is the one the trainer uses**, and it exists because
         of where this box puts things: ``jobs_root`` is on the CIFS share and the
@@ -279,23 +287,29 @@ class ArtefactCache:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
 
+        if inner and (Path(inner).is_absolute() or ".." in Path(inner).parts):
+            raise ArtefactCacheError(f"inner must be a plain relative name: {inner!r}")
+        target = staging / inner if inner else staging
+
         if isinstance(source, (str, Path)):
             source = Path(source)
             if not source.is_dir():
                 raise ArtefactCacheError(f"not a directory: {source}")
+            if inner:
+                target.parent.mkdir(parents=True, exist_ok=True)
             if move:
-                shutil.move(str(source), str(staging))
+                shutil.move(str(source), str(target))
             else:
-                shutil.copytree(source, staging)
+                shutil.copytree(source, target)
         else:
             files = [Path(f) for f in source]
             missing = [f for f in files if not f.is_file()]
             if not files or missing:
                 raise ArtefactCacheError(
                     f"cannot store {len(files)} file(s): {missing or 'none given'}")
-            staging.mkdir(parents=True)
+            target.mkdir(parents=True)
             for one in files:
-                (shutil.move if move else shutil.copy2)(str(one), str(staging / one.name))
+                (shutil.move if move else shutil.copy2)(str(one), str(target / one.name))
 
         size = sum(f.stat().st_size for f in staging.rglob("*") if f.is_file())
         (staging / self.MANIFEST).write_text(json.dumps({
