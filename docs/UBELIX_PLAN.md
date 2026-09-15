@@ -1645,3 +1645,87 @@ touched this.
 length, or a cap on their share), leaving validation as it is so the numbers stay
 comparable. That is one prepare-stage change, and it should be tried before any
 further hyperparameter work on this corpus.
+
+---
+
+## 17. The medieval CER was a parser bug, not a model or a corpus
+
+`min_train_chars` (§16) was a fix for a symptom. It helped — CER 0.5322 → 0.4995,
+`length_ratio` 0.479 → 0.586, one variable changed against the same seed, the same
+split and the same `val.jsonl` by symlink — but nothing like the amount §16
+predicted. Chasing the remainder found the actual cause, and it was neither the
+model nor the data.
+
+### What the validation images showed
+
+The first four validation examples split into two unrelated failures:
+
+* `REF "a"` → the model wrote `berlin`; `REF "i"` → it wrote `der Statt`. Those
+  crops are not lines at all but near-square blocks holding fragments of three
+  lines, and the model read them correctly. Bad crops, bad references.
+* `REF "Hanns pfister Jacob slossers knecht"` → the model wrote `Hanns`. That crop
+  is a **clean, full-width line**, completely legible, with a correct reference.
+
+The second kind dominates the error (3,587 of 8,266 characters missing), and it
+cannot be blamed on crop geometry.
+
+### The measurement that pointed at the references
+
+Sampling crop aspect ratios against reference length: medieval samples with 4-9
+character references sit on crops of median aspect **7.24 : 1** — a full-width
+line that should hold ~30 characters. The 19th-century corpus's 4-9 character
+references sit on crops of **1.63 : 1**, genuinely small images. Restricted to
+proper line crops (aspect ≥ 5:1), **36.3 %** of medieval training samples carry
+less than a third of the median transcription density.
+
+Wide line, almost no text. So: truncated transcriptions on intact images.
+
+### The cause, in our own code
+
+Transkribus exports word segmentation as `<Word>` children, each with its own
+`TextEquiv/Unicode`, and those come **before** the line's own `TextEquiv` in
+document order. Taking the first `Unicode` under a `TextLine` therefore returns
+word 1 and drops the rest of the line.
+
+On one medieval page, `000002_1610663_0114_60532792.xml`:
+
+```
+OLD 'un'      -> NEW 'un Bud du xv ß iij der'
+OLD 'hützer'  -> NEW 'hützer artz hers wip Eid xvj ß'
+OLD 'tor'     -> NEW 'tor Basmatter von wungen der altt Eid ij lb'
+page total: 246 chars -> 1,760 chars (7.2x)
+```
+
+`'hützer'` and `'tor'` are exactly the references seen on the wide crops above.
+
+### The control that settles it
+
+60 random pages from each corpus, old parser against new:
+
+| corpus | old | new | ratio |
+|---|---:|---:|---:|
+| medieval | 50,673 chars | 74,408 chars | **1.47×** |
+| 19th century | 62,913 chars | 62,913 chars | **1.00×** |
+
+The 19th-century corpus has no word-level `TextEquiv` and was never affected —
+which is precisely why it reached 1.00 % CER on identical code, and why the
+medieval/19th-century gap was never about the difficulty of medieval script.
+
+The medieval corpus lost roughly a third of its characters, concentrated in the
+lines that carry word segmentation. A model trained on that learns to write the
+first word and stop, which is the behaviour every medieval run has shown.
+
+### Status
+
+Fixed in `33f55fc` ("A transcribed line is the line, not its first word", #125)
+with `24ec2c5` bumping the artefact cache key so nothing compiled before it is
+reused. Both landed 2026-09-14, after the medieval corpus was prepared on
+2026-09-10 — so **every medieval run so far, v2 included, trained and scored on
+truncated references**. The four published medieval CERs measure this bug.
+
+**What follows:** the medieval corpus must be prepared again from scratch — the
+clone trick in §16 cannot help, because the damage is in the compiled JSONL.
+`min_train_chars` should go back to 0 for that run until the fixed corpus has been
+measured: it was built against a distribution that no longer exists, and the short
+lines it removes may be legitimate once the references are whole. It stays in the
+codebase as an option, defaulting to off.
