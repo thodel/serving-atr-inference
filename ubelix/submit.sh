@@ -35,5 +35,9 @@ for d in req.datasets:
 PY
 
 bash -n "$SBATCH_FILE"
-echo "submitting $SBATCH_FILE"
-sbatch "$SBATCH_FILE"
+echo "submitting $SBATCH_FILE with SPEC=$SPEC"
+# Pass the spec we just validated. Without this the validation is theatre: a
+# file with a mandatory `SPEC=${SPEC:?}` dies on the compute node the moment it
+# starts (prep 15207246, 0 s), and — worse, because it is silent — a file with a
+# `SPEC=${SPEC:-default}` validates the spec you named and then runs the default.
+sbatch --export=ALL,SPEC="$SPEC" "$SBATCH_FILE"
