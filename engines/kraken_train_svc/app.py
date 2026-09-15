@@ -67,6 +67,12 @@ from atr_serving.training.settings import TrainerSettings, get_settings
 
 RUNNING_STATUSES = ("preparing", "compiling", "training", "testing", "registering")
 
+#: The stages that actually put a job on the card. ``prepare`` and ``compile``
+#: are disk and CPU — v3 spent three and a half hours there — and blocking every
+#: inference request for that long would be a worse fault than the one the claim
+#: exists to prevent.
+GPU_STAGES = frozenset({"train", "test"})
+
 
 # ── wiring (overridable in tests via app.state) ─────────────────────────────
 def _settings() -> TrainerSettings:
@@ -284,6 +290,31 @@ async def health() -> JSONResponse:
                  "running": len([j for j in jobs if j.status in RUNNING_STATUSES]),
                  "queued": len([j for j in jobs if j.status == "queued"])},
     })
+
+
+@app.get("/gpu-claim")
+async def gpu_claim() -> JSONResponse:
+    """Whether a job holds the training GPU right now.
+
+    The gateway asks this before it launches a vLLM model, so that inference
+    cannot take the card out from under a run in progress (#129). It exists
+    separately from ``/jobs`` for one blunt reason: ``/jobs`` on this box is
+    868 KB, and this sits on the gateway's launch path.
+
+    Reported as a claim, not as free memory, because memory is the wrong
+    question. VRAM use fluctuates during training; a gap between two peaks is
+    not an invitation. ``stage is None`` on a running job counts as a claim —
+    the record has not said what it is doing, and guessing "not the GPU" is the
+    guess that costs a multi-day run.
+    """
+    claims = [
+        {"id": j.id, "status": j.status, "stage": j.stage}
+        for j in _store().list()
+        if j.status in RUNNING_STATUSES and (j.stage is None or j.stage in GPU_STAGES)
+    ]
+    return JSONResponse({"gpu": _settings().gpu,
+                         "claimed": bool(claims),
+                         "jobs": claims})
 
 
 @app.post("/jobs", status_code=202)

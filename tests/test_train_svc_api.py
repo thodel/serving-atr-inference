@@ -719,3 +719,56 @@ class TestCurveWhileRunning:
 
     def test_an_unknown_job_is_still_a_404(self, client):
         assert client.get("/jobs/20260101T000000Z-nope/curve").status_code == 404
+
+
+# ── the GPU claim the gateway asks about (#129) ──────────────────────────────
+
+def _set_stage(client, job_id, status, stage):
+    store = store_of(client)
+    job = store.load(job_id)
+    job.status, job.stage = status, stage
+    store.save(job)
+
+
+def test_no_job_no_claim(client):
+    body = client.get("/gpu-claim").json()
+    assert body["claimed"] is False and body["jobs"] == []
+
+
+def test_training_claims_the_card(client):
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    _set_stage(client, job_id, "training", "train")
+    body = client.get("/gpu-claim").json()
+    assert body["claimed"] is True
+    assert body["jobs"] == [{"id": job_id, "status": "training", "stage": "train"}]
+
+
+def test_testing_claims_the_card_too(client):
+    """The test stage loads the model and generates — same card, same claim."""
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    _set_stage(client, job_id, "testing", "test")
+    assert client.get("/gpu-claim").json()["claimed"] is True
+
+
+def test_compiling_does_not_claim_the_card(client):
+    """v3 spent three and a half hours in prepare and compile, on CPU and disk.
+
+    Blocking every inference request for that long would be a worse fault than
+    the one the claim prevents.
+    """
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    _set_stage(client, job_id, "compiling", "compile")
+    assert client.get("/gpu-claim").json()["claimed"] is False
+
+
+def test_a_running_job_with_no_stage_claims_the_card(client):
+    """Guessing "not the GPU" from a silent record is the guess that costs a run."""
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    _set_stage(client, job_id, "training", None)
+    assert client.get("/gpu-claim").json()["claimed"] is True
+
+
+def test_a_finished_job_releases_the_card(client):
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    _set_stage(client, job_id, "completed", None)
+    assert client.get("/gpu-claim").json()["claimed"] is False

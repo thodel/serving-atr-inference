@@ -32,7 +32,7 @@ from atr_serving.api.schemas import (
 )
 from atr_serving.clients import EngineError, get_engine_client, get_kraken_client, get_vllm_client
 from atr_serving.config import Settings
-from atr_serving.manager import ManagerError
+from atr_serving.manager import GpuBusyError, ManagerError
 from atr_serving.pipeline import recognize_lines, recognize_page_vllm
 from atr_serving.registry import ModelSpec, Registry
 
@@ -211,6 +211,11 @@ async def _ensure_vllm_port(request: Request, model: str) -> int:
     """Make a vLLM model resident (may launch/evict) and return its port."""
     try:
         return await run_in_threadpool(_manager(request).ensure_resident, model)
+    except GpuBusyError as exc:
+        # 503, not 502: nothing is broken. The card is busy and the same request
+        # will work once it is not (#129).
+        raise HTTPException(status_code=503, detail=str(exc),
+                            headers={"Retry-After": "300"}) from exc
     except ManagerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

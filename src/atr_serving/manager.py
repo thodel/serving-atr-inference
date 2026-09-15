@@ -35,6 +35,16 @@ class ManagerError(RuntimeError):
     """Raised when a vLLM model cannot be made resident."""
 
 
+class GpuBusyError(ManagerError):
+    """The card is claimed by a training run, so no model is launched.
+
+    Separate from :class:`ManagerError` because the answer to the caller is
+    different: nothing is broken, the box is busy, and the same request will
+    work later. The route turns this into 503 with a ``Retry-After`` rather than
+    the 502 a genuine launch failure gets.
+    """
+
+
 @runtime_checkable
 class VllmHandle(Protocol):
     port: int
@@ -289,6 +299,7 @@ class ModelManager:
             logger.warning("vLLM {} unhealthy; relaunching", model_id)
             self._drop(model_id)
 
+        self._refuse_while_training(spec)
         self._make_room_for(spec)
         port = self._ports.acquire()
         try:
@@ -300,6 +311,71 @@ class ModelManager:
         self._resident[model_id] = _Resident(spec, handle, port)
         logger.info("vLLM resident: {} on :{} (gpu {})", model_id, port, self.settings.vllm_gpu)
         return port
+
+    # ── the card is not ours alone ───────────────────────────────────────────
+    def _refuse_while_training(self, spec: ModelSpec) -> None:
+        """Do not launch onto a card a training run is using (#129).
+
+        The incident: a vLLM instance serving qwen3vl-german-xix-v1 held 18.4 GB
+        of GPU 1 for fifteen hours, and v4 could not start — the trainer's own
+        preflight caught that one and queued the job, which is the guard working
+        in the *other* direction. Nothing guarded this direction, so a single
+        inference request arriving during a 33-hour run would have loaded a model
+        beside it and taken the run down with an OOM at the next peak.
+
+        Two questions, in order of how much they know:
+
+        1. **Does a job claim the card?** The trainer answers, and its answer is
+           definite. It is asked about the claim rather than about free memory,
+           because VRAM dips between peaks and a dip is not room.
+        2. **Is there physically space?** Asked when the first question cannot be
+           answered, and asked anyway when it can be answered with "no claim" —
+           launching into a card that is full is what produced the incidents this
+           manager exists for, training or no training.
+
+        Unreachable trainer means the first question is skipped, loudly, and the
+        second decides. The alternative — refusing all inference whenever the
+        trainer is down — would trade a rare, recoverable fault for a constant
+        one.
+        """
+        claim = self._gpu_claim()
+        if claim is not None and claim.get("claimed"):
+            jobs = ", ".join(
+                f"{j.get('id')} ({j.get('stage') or 'stage unknown'})"
+                for j in claim.get("jobs", [])
+            ) or "a training job"
+            raise GpuBusyError(
+                f"GPU {self.settings.vllm_gpu} is claimed by {jobs}; not launching "
+                f"{spec.id} beside it. Models already resident keep serving; this "
+                "one becomes available when the run finishes."
+            )
+
+        free_total = gpu_probe.card_memory(self.settings.vllm_gpu)
+        if free_total is None:
+            return                      # nvidia-smi cannot say; the launch decides
+        free_mb, _ = free_total
+        need = spec.vram_mb + self.settings.vllm_vram_reserve_mb
+        if free_mb < need:
+            raise GpuBusyError(
+                f"GPU {self.settings.vllm_gpu} has {free_mb} MB free, {spec.id} needs "
+                f"{need} MB (model {spec.vram_mb} + {self.settings.vllm_vram_reserve_mb} "
+                "reserve). Not launching into a card that cannot hold it."
+            )
+
+    def _gpu_claim(self) -> dict | None:
+        """The trainer's answer, or None when it did not give one."""
+        url = f"{self.settings.train_url.rstrip('/')}/gpu-claim"
+        try:
+            response = httpx.get(url, timeout=self.settings.gpu_claim_timeout_s)
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:  # noqa: BLE001 — any failure means "no answer"
+            logger.warning(
+                "trainer did not answer {} ({}); launching on free VRAM alone, so a "
+                "training run on GPU {} is unprotected right now",
+                url, exc, self.settings.vllm_gpu,
+            )
+            return None
 
     def _used_mb(self) -> int:
         return sum(r.spec.vram_mb for r in self._resident.values())

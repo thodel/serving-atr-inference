@@ -145,3 +145,37 @@ def test_a_server_that_reports_no_finish_reason_is_not_called_truncated(client):
     was missing would teach people to ignore the flag."""
     client.app.state.vllm_client.finish_reason = None
     assert _post_recognize(client, "qwen3vl-8b-hebrew").json()["truncated"] is False
+
+
+# ── a card held by a training run (#129) ─────────────────────────────────────
+
+class BusyManager(FakeManager):
+    def ensure_resident(self, model_id: str) -> int:
+        from atr_serving.manager import GpuBusyError
+        raise GpuBusyError(
+            "GPU 1 is claimed by 20260915T053651Z-qwen3vl-german-pages-v4 (train); "
+            "not launching qwen3vl-8b-hebrew beside it."
+        )
+
+
+class BrokenManager(FakeManager):
+    def ensure_resident(self, model_id: str) -> int:
+        from atr_serving.manager import ManagerError
+        raise ManagerError("vLLM process exited (code 1) during startup")
+
+
+def test_a_card_held_by_training_answers_503_with_a_reason(client: TestClient):
+    """Not 502: nothing is broken, and the same request works after the run."""
+    client.app.state.model_manager = BusyManager()
+    r = _post_recognize(client, "qwen3vl-8b-hebrew")
+    assert r.status_code == 503
+    assert "qwen3vl-german-pages-v4" in r.json()["detail"]
+    assert r.headers["Retry-After"] == "300"
+
+
+def test_a_launch_that_really_failed_is_still_502(client: TestClient):
+    """The distinction the separate exception exists to keep."""
+    client.app.state.model_manager = BrokenManager()
+    r = _post_recognize(client, "qwen3vl-8b-hebrew")
+    assert r.status_code == 502
+    assert "exited" in r.json()["detail"]
