@@ -759,14 +759,29 @@ def test_testing_claims_the_card_too(client):
     assert client.get("/gpu-claim").json()["claimed"] is True
 
 
-def test_compiling_does_not_claim_the_card(client):
-    """v3 spent three and a half hours in prepare and compile, on CPU and disk.
+def test_preparing_claims_the_card_too(client):
+    """The rule that cost v4 on 15.09.
 
-    Blocking every inference request for that long would be a worse fault than
-    the one the claim prevents.
+    prepare and compile touch no GPU, so they did not claim it — and a vLLM model
+    launched at 08:53 during v4's prepare was still holding 16.5 GB when the train
+    stage began at 09:52. The run died three minutes later, wanting 850 MiB with
+    841 MiB free. A few hours of cold starts is the cheaper loss.
     """
     job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    _set_stage(client, job_id, "preparing", "prepare")
+    assert client.get("/gpu-claim").json()["claimed"] is True
+
+
+def test_compiling_claims_the_card_too(client):
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
     _set_stage(client, job_id, "compiling", "compile")
+    assert client.get("/gpu-claim").json()["claimed"] is True
+
+
+def test_a_queued_job_does_not_claim_the_card(client):
+    """Nothing is running yet, and the trainer's own preflight guards the start."""
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    _set_stage(client, job_id, "queued", None)
     assert client.get("/gpu-claim").json()["claimed"] is False
 
 

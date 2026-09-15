@@ -327,7 +327,10 @@ class ModelManager:
 
         1. **Does a job claim the card?** The trainer answers, and its answer is
            definite. It is asked about the claim rather than about free memory,
-           because VRAM dips between peaks and a dip is not room.
+           because VRAM dips between peaks and a dip is not room — and it claims
+           from its first stage, not from the one that loads the model, because a
+           model launched during a job's prepare is still resident when its train
+           begins. That is how v4 died on 15.09.
         2. **Is there physically space?** Asked when the first question cannot be
            answered, and asked anyway when it can be answered with "no claim" —
            launching into a card that is full is what produced the incidents this

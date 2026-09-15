@@ -68,10 +68,8 @@ from atr_serving.training.settings import TrainerSettings, get_settings
 
 RUNNING_STATUSES = ("preparing", "compiling", "training", "testing", "registering")
 
-#: The stages that actually put a job on the card. ``prepare`` and ``compile``
-#: are disk and CPU — v3 spent three and a half hours there — and blocking every
-#: inference request for that long would be a worse fault than the one the claim
-#: exists to prevent.
+#: The stages that put a job on the card *while it runs*. Kept for reporting —
+#: the claim no longer gates on it, see :func:`_claim_from`.
 GPU_STAGES = frozenset({"train", "test"})
 
 
@@ -319,10 +317,33 @@ def compute_gpu_claim() -> dict:
 
 
 def _claim_from(jobs) -> dict:
+    """A running job claims the card from its first stage, not from ``train``.
+
+    This gated on ``GPU_STAGES`` for half a day, on the reasoning that prepare and
+    compile are disk and CPU and blocking inference through them — three and a
+    half hours for v3 — would be the worse fault. On 15.09. that reasoning cost a
+    run:
+
+        08:32  v4 enters prepare        claimed: false, by this rule
+        08:53  gateway launches vLLM    16.5 GB, correctly allowed
+        09:52  v4 enters train          the model is still resident
+        09:55  CUDA OOM, 850 MiB wanted, 841 MiB free
+
+    The hole was named in #129 when the rule was written — "a model already
+    resident when training starts stays resident" — and left open anyway. It is
+    not a trade between inference latency and training throughput; it is a trade
+    between a few hours of cold starts and a 33-hour run, and it was made the
+    wrong way round.
+
+    So a job claims the card as soon as it is running. Together with the trainer's
+    own preflight, which refuses to *start* a job onto an occupied card, the loop
+    closes: the card must be clear when a run begins, and nothing new may land on
+    it afterwards. Models already resident keep serving throughout — what is
+    refused is a launch.
+    """
     claims = [
         {"id": j.id, "status": j.status, "stage": j.stage}
-        for j in jobs
-        if j.status in RUNNING_STATUSES and (j.stage is None or j.stage in GPU_STAGES)
+        for j in jobs if j.status in RUNNING_STATUSES
     ]
     return {"claimed": bool(claims), "jobs": claims}
 
