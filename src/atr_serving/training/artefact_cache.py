@@ -73,7 +73,14 @@ EVICT_MIN_IDLE_HOURS = 72.0
 #: Bumped whenever the meaning of the key changes, so old entries are never
 #: served under new semantics. Cheaper than a migration and impossible to get
 #: subtly wrong.
-KEY_VERSION = 1
+#:
+#: 2 — 33f55fc. Everything compiled before it was built from ``line_texts``,
+#: which returned a word-segmented line's **first word** and dropped the rest:
+#: 28 % of the v3 corpus, 63 % of the Rats- und Richtebücher (#125). The specs
+#: did not change, so nothing else would tell a cached artefact apart from a
+#: correct one — including the kraken and TrOCR line crops, which carried the
+#: same mislabelling through ``line_boxes``.
+KEY_VERSION = 2
 
 
 @dataclass(frozen=True)
