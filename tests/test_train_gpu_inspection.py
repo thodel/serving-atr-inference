@@ -134,9 +134,18 @@ AUTH = {"X-API-Key": KEY}
 
 
 class _Trainer:
+    """A trainer on this box that predates ``GET /gpu`` (#137).
+
+    Its 404 is what sends the route to the local reading these tests are about;
+    tests/test_train_remote_trainer.py covers a trainer that answers /gpu.
+    """
+
     def __init__(self, jobs=None, raises=None):
         self.jobs = jobs or []
         self.raises = raises
+
+    async def gpu(self):
+        raise TrainerError(404, "Not Found")
 
     async def list_jobs(self):
         if self.raises:

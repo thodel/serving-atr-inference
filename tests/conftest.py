@@ -16,6 +16,13 @@ builds, would publish that checkout's ``config/models.yaml`` to the live share
 (edits and branch included) and read the live ``trained/``. Reproduced in the
 #138 review: a ``.env`` with only that line published the curated registry on
 import, and a merge_loras test picked up a registration from the share.
+
+The trainer's address (#137) is the same trap. After the cutover idhefix's
+``.env`` names asteraix in ``ATR_TRAIN_URL``; every ``Settings()`` in the suite
+would then treat the trainer as remote, and the #129 launch-guard tests would
+pass or fail for a reason that has nothing to do with the code. Its key would be
+sent wherever a test pointed a client. A test that wants a remote trainer or a
+key passes ``train_url``/``train_api_key`` to ``Settings`` itself.
 """
 
 from __future__ import annotations
@@ -28,6 +35,9 @@ import pytest
 # reads "" as off. Set at import: conftest is loaded before any test module, so
 # this is in place before one of them imports atr_serving.app.
 os.environ["ATR_REGISTRY_ROOT"] = ""
+TRAIN_URL_DEFAULT = "http://127.0.0.1:8204"
+os.environ["ATR_TRAIN_URL"] = TRAIN_URL_DEFAULT
+os.environ["ATR_TRAIN_API_KEY"] = ""
 
 
 @pytest.fixture(autouse=True)
@@ -48,3 +58,9 @@ def _shared_registry_is_off_unless_a_test_turns_it_on(monkeypatch):
     than handing the ``.env`` value to every test after it. A test that wants
     the feature passes ``registry_root`` to ``Settings`` itself."""
     monkeypatch.setenv("ATR_REGISTRY_ROOT", "")
+
+
+@pytest.fixture(autouse=True)
+def _trainer_is_local_and_keyless_unless_a_test_says_otherwise(monkeypatch):
+    monkeypatch.setenv("ATR_TRAIN_URL", TRAIN_URL_DEFAULT)
+    monkeypatch.setenv("ATR_TRAIN_API_KEY", "")

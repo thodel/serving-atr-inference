@@ -1,40 +1,56 @@
 """``/train/*`` — thin proxy to the training service (#35).
 
-The gateway stays ML-dependency-free: it validates the request envelope, forwards
-to ``atr-train`` on ``127.0.0.1:8204``, and returns what comes back. No training
-logic lives here.
+The gateway stays ML-dependency-free: it forwards to ``atr-train`` at
+``Settings.train_url`` — since the split (#137) on asteraix, over the network —
+and returns what comes back. No training logic lives here, and nothing is
+imported from ``atr_serving.training``: that package moves to its own repository,
+and a test pins this module to HTTP alone.
 
-This proxy is the **only** route in. The trainer binds ``127.0.0.1`` and the
-``ufw`` rule opens ``:8200`` alone to the client host, so a caller on
-``tei.dh.unibe.ch`` (agentic_historian) reaches training through here or not at
-all — with the same shared ``X-API-Key`` it already uses for ``/ocr``.
+This proxy is the **only** route in for callers. ufw opens ``:8200`` alone to
+``tei.dh.unibe.ch``, so agentic_historian's bot and the ATR-MCP reach training
+through here with the same ``X-API-Key`` they use for ``/ocr`` — and neither had
+to change when the trainer moved. The gateway authenticates *itself* to the
+trainer with a second, separate key (``ATR_TRAIN_API_KEY``, shared with asteraix):
+asteraix's ufw does not filter high ports, so the trainer checks the key and its
+own client allowlist.
 
 Errors are passed through with their status. The trainer's failures name their
-own fix (507 = full filesystem, 500 = network TMPDIR, 409 = already terminal),
-and flattening them to a generic 502 would discard exactly that.
+own fix (507 = full filesystem, 500 = network TMPDIR, 409 = already terminal,
+503 = a setting it lacks), and flattening them to a generic 502 would discard
+exactly that. Three exceptions, each because passing through would mislead:
+a timeout is a 504 naming the URL; a 401/403 from the trainer is a 502, because
+the caller's key was fine and the gateway's was not; and a 422's field errors
+lose pydantic's ``input`` echo of the whole request body.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
-from pydantic import ValidationError
+from loguru import logger
 
 from atr_serving.api.auth import require_api_key
-from atr_serving.clients import EngineError, TrainerError, get_trainer_client
-from atr_serving.training.backends import BACKENDS
-from atr_serving.training.contracts import TrainRequest
+from atr_serving.clients import (
+    EngineError,
+    TrainerError,
+    TrainerTimeout,
+    get_trainer_client,
+)
+from atr_serving.config import is_loopback_url
 
 router = APIRouter(prefix="/train", tags=["training"],
                    dependencies=[Depends(require_api_key)])
 
-#: Engines with a training backend. Taken from the backend registry rather than
-#: written out here, so adding a backend cannot leave the proxy rejecting jobs the
-#: trainer would happily run. Whether a backend's venv is actually *built* on this
-#: box is the trainer's business — it answers 503 with the command that fixes it,
-#: and only it can know.
-SUPPORTED_ENGINES = tuple(sorted(BACKENDS))
+#: How long the trainer's engine list is trusted. It changes when the trainer is
+#: redeployed, not between two submits, and one extra round trip per job across
+#: the network buys nothing.
+ENGINES_TTL_S = 60.0
+#: The engine check is a courtesy — the trainer validates anyway — so it gets a
+#: short leash rather than the client's 30 s default, and a trainer too slow to
+#: answer /health in time is forwarded to unchecked.
+ENGINES_TIMEOUT_S = 5.0
 
 
 def _client(request: Request):
@@ -43,18 +59,65 @@ def _client(request: Request):
     return client if client is not None else get_trainer_client(request.app.state.settings)
 
 
-async def _forward(coro) -> Any:
-    """Await a trainer call, mapping its failures onto HTTP.
+def _http_error(exc: EngineError) -> HTTPException:
+    """A trainer failure as the HTTP answer the caller should see.
 
     A transport failure is a 502 naming the URL — never a fabricated job id or an
     empty-looking success, the same rule #21 established for recognition.
     """
+    if isinstance(exc, TrainerError):
+        return HTTPException(status_code=exc.status_code, detail=exc.detail)
+    if isinstance(exc, TrainerTimeout):
+        return HTTPException(status_code=504, detail=str(exc))
+    return HTTPException(status_code=502, detail=str(exc))
+
+
+async def _forward(coro) -> Any:
+    """Await a trainer call, mapping its failures onto HTTP."""
     try:
         return await coro
-    except TrainerError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except EngineError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise _http_error(exc) from exc
+
+
+async def _trainer_engines(request: Request) -> list[str] | None:
+    """The engines the trainer's request model accepts, or None if it did not say.
+
+    Taken from the trainer's ``/health`` rather than from a list here: the old
+    proxy imported the backend registry, which after the split (#137) would be a
+    copy of another repository's code, kept in agreement by hand. None — an
+    unreachable trainer, or one older than the ``engines`` field — skips the
+    check; the trainer validates the request itself either way. Both outcomes are
+    cached, so an unreachable trainer costs the 5 s once a minute, not per submit.
+    """
+    state = request.app.state
+    cached = getattr(state, "trainer_engines", None)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < ENGINES_TTL_S:
+        return cached[1]
+    engines = None
+    try:
+        health = await _client(request).health(timeout=ENGINES_TIMEOUT_S)
+    except EngineError as exc:
+        logger.warning("trainer /health gave no engine list ({}); forwarding "
+                       "without the engine check", exc)
+    else:
+        listed = health.get("engines") if isinstance(health, dict) else None
+        # An empty list is read as "not said", not as "accepts nothing": refusing
+        # every job on the strength of a malformed health body would be the
+        # gateway inventing policy.
+        if isinstance(listed, list) and listed:
+            engines = sorted(str(e) for e in listed)
+    state.trainer_engines = (now, engines)
+    return engines
+
+
+def _literal_message(allowed: list[str]) -> str:
+    """pydantic's wording for a Literal mismatch, so both refusals read alike."""
+    quoted = [f"'{a}'" for a in allowed]
+    if len(quoted) == 1:
+        return f"Input should be {quoted[0]}"
+    return f"Input should be {', '.join(quoted[:-1])} or {quoted[-1]}"
 
 
 @router.post("/jobs", status_code=202)
@@ -68,28 +131,23 @@ async def submit_job(request: Request, response: Response, body: dict = Body(...
 
     The check itself lives in the trainer (#46), not here: this proxy's contract
     is that no training logic lives in it, and a check it owned would be one a
-    direct call to ``:8204`` could skip.
+    direct call to the trainer could skip.
     """
-    engine = body.get("engine", "kraken")
-    if engine not in SUPPORTED_ENGINES:
-        raise HTTPException(
-            status_code=400,
-            detail=(f"engine {engine!r} cannot be trained here. Supported: "
-                    f"{list(SUPPORTED_ENGINES)}. A TrOCR backend is planned "
-                    "(docs/TRAINING_PLAN.md §7) but not wired."),
-        )
-    # Validate here as well as in the trainer: a malformed request should be
-    # refused before a job directory exists, and the caller gets the field-level
-    # reason instead of a job that fails in prepare.
-    try:
-        TrainRequest.model_validate(body)
-    except ValidationError as exc:
-        # include_context=False: pydantic puts the raw ValueError in ``ctx``, which
-        # FastAPI cannot serialise — the response would 500 while reporting a 422.
-        raise HTTPException(
-            status_code=422,
-            detail=exc.errors(include_url=False, include_context=False),
-        ) from exc
+    # Only an engine the caller named is checked. An absent one takes the
+    # trainer's default, which pydantic does not validate — refusing it here would
+    # refuse something the trainer accepts.
+    if "engine" in body:
+        engines = await _trainer_engines(request)
+        if engines is not None and body["engine"] not in engines:
+            # The same 422 the trainer's own model would give, minus ``input``.
+            # This was a 400 whose text said a TrOCR backend was "planned but not
+            # wired" — false since #44, and read by whoever had just been refused.
+            raise HTTPException(status_code=422, detail=[{
+                "type": "literal_error", "loc": ["body", "engine"],
+                "msg": _literal_message(engines)}])
+    # No envelope validation here any more (#137): the trainer validates the body
+    # as its route signature, so a malformed request is still refused before a
+    # job directory exists, and its 422 comes back through ``_forward``.
     if verify_only:
         # A dry run answers, it does not act. 200 rather than the route's 202,
         # because 202 means "accepted for processing" and nothing was; and 200
@@ -128,12 +186,7 @@ async def get_curve(request: Request, job_id: str) -> dict:
 
 @router.get("/gpu")
 async def gpu(request: Request) -> dict:
-    """What holds GPU memory, and whether the trainer knows about it.
-
-    Read-only, and deliberately not a proxy: the cards are on *this* box, so the
-    gateway reads them directly rather than asking the trainer to. What it does
-    take from the trainer is the job list, because the useful column is not the
-    memory figure — it is whether a process belongs to a job at all.
+    """What holds GPU memory on the training box, and whether the trainer knows it.
 
     Four fields carry the incidents this exists for. ``orphaned`` is a pid holding
     memory with no ``/proc`` entry: the data-loader worker that kept a dead
@@ -149,24 +202,64 @@ async def gpu(request: Request) -> dict:
 
     A card with 0 % utilisation and no free memory is the shape of the problem;
     both numbers are here so nobody has to ssh in to see it.
+
+    **The trainer reads its own cards** (``GET /gpu``, #137), because the cards
+    that matter are the ones next to its job pids. This route used to read *this*
+    box's nvidia-smi and match the trainer's pids against *this* box's ``/proc``;
+    with the trainer on asteraix, a pid collision would mark a local stranger as
+    ``registered`` to a foreign job and drop it from ``unaccounted_mib`` — the
+    failure #414 exists to show, produced silently. So a remote trainer is never
+    answered with a local reading. Only an older trainer on this box, which has no
+    ``/gpu`` (404) or is not answering, still gets the local reading: there the
+    cards are the right ones.
+    """
+    train_url = request.app.state.settings.train_url
+    local = is_loopback_url(train_url)
+    try:
+        return await _client(request).gpu()
+    except EngineError as exc:
+        if not local:
+            if isinstance(exc, TrainerError) and exc.status_code == 404:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(f"the training service at {train_url} has no /gpu (an "
+                            "older trainer?), and this gateway's own cards are on a "
+                            "different machine — a local reading would describe the "
+                            "wrong one. Update the trainer."),
+                ) from exc
+            raise _http_error(exc) from exc
+        if not (isinstance(exc, TrainerError) and exc.status_code == 404):
+            logger.warning("trainer /gpu failed ({}); reading this box's cards "
+                           "instead", exc)
+        # A trainer that answered at all may still list its jobs. One that timed
+        # out or refused the connection will not a moment later, and asking again
+        # would only double the wait.
+        return await _local_reading(request, ask_trainer=isinstance(exc, TrainerError))
+
+
+async def _local_reading(request: Request, *, ask_trainer: bool) -> dict:
+    """This box's cards, with pids attributed from the trainer's job list.
+
+    Correct only while the trainer runs on this box; :func:`gpu` guarantees that.
     """
     from atr_serving import gpu as gpu_probe
 
     job_pids: dict = {}
-    try:
-        listing = await _forward(_client(request).list_jobs())
-        for job in (listing or {}).get("jobs", []):
-            pid = job.get("pid")
-            if pid:
-                job_pids[int(pid)] = job.get("id")
-    except HTTPException:
-        # The trainer being unreachable must not hide the cards. Everything is
-        # then reported unregistered, which is honest: nothing is known to belong
-        # to a job, and the response says the attribution is missing.
-        job_pids = {}
-        attribution = False
-    else:
-        attribution = True
+    attribution = False
+    if ask_trainer:
+        try:
+            listing = await _forward(_client(request).list_jobs())
+            for job in (listing or {}).get("jobs", []):
+                pid = job.get("pid")
+                if pid:
+                    job_pids[int(pid)] = job.get("id")
+        except HTTPException:
+            # The trainer being unreachable must not hide the cards. Everything is
+            # then reported unregistered, which is honest: nothing is known to
+            # belong to a job, and the response says the attribution is missing.
+            job_pids = {}
+        else:
+            attribution = True
 
     try:
         cards = gpu_probe.inspect(job_pids)

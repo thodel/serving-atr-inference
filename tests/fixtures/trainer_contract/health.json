@@ -1,0 +1,33 @@
+{
+  "status": "ok",
+  "host": "dhserver03",
+  "engines": ["kraken", "trocr", "vllm"],
+  "available_engines": ["kraken", "vllm"],
+  "gpu": 0,
+  "gpus": [
+    {"index": 0, "free_mb": 20986, "total_mb": 46068},
+    {"index": 1, "free_mb": 45589, "total_mb": 46068}
+  ],
+  "jobs_root": "/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/jobs-asteraix",
+  "backends": {
+    "kraken": {
+      "runner": "kraken_train_svc.runner",
+      "venv": "/home/tobias/Repo/training-atr-models/.venvs/kraken-train",
+      "available": true,
+      "min_free_vram_mb": 12000
+    },
+    "vllm": {
+      "runner": "vlm_train_svc.runner",
+      "venv": "/home/tobias/Repo/training-atr-models/.venvs/vlm-train",
+      "available": true,
+      "min_free_vram_mb": 24000
+    },
+    "trocr": {
+      "runner": "trocr_train_svc.runner",
+      "venv": "/home/tobias/Repo/training-atr-models/.venvs/trocr-train",
+      "available": false,
+      "min_free_vram_mb": 12000
+    }
+  },
+  "jobs": {"total": 49, "running": 1, "queued": 0}
+}

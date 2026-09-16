@@ -34,9 +34,10 @@ class FakeLauncher:
         return h
 
 
-def make_manager(budget: int = 24000):
+def make_manager(budget: int = 24000, **overrides):
     reg = load_registry(REPO_ROOT / "config" / "models.yaml")
-    settings = Settings(vllm_vram_budget_mb=budget, vllm_gpu=1, vllm_port_base=8210)
+    settings = Settings(vllm_vram_budget_mb=budget, vllm_gpu=1, vllm_port_base=8210,
+                        **overrides)
     launcher = FakeLauncher()
     return ModelManager(reg, settings, launcher=launcher, sleep=lambda _s: None), launcher
 
@@ -98,14 +99,18 @@ def test_shutdown_terminates_all():
 
 # ── the card is not ours alone (#129) ────────────────────────────────────────
 
-def _claim(monkeypatch, payload):
-    """What the trainer answers at /gpu-claim, or an exception for "no answer"."""
+def _claim(monkeypatch, payload, seen=None):
+    """What the trainer answers at /gpu-claim, or an exception for "no answer".
+
+    ``seen`` collects ``(url, headers)`` per call."""
     class Response:
         def raise_for_status(self): pass
         def json(self): return payload
 
-    def fake_get(url, timeout=None):
+    def fake_get(url, timeout=None, headers=None):
         assert url.endswith("/gpu-claim")
+        if seen is not None:
+            seen.append((url, headers))
         if isinstance(payload, Exception):
             raise payload
         return Response()
@@ -251,6 +256,71 @@ def test_a_definite_no_claim_only_needs_the_model_to_fit(monkeypatch):
     m, launcher = make_manager()
     assert m.ensure_resident(LIGHTON) == 8210
     assert launcher.starts == [(LIGHTON, 8210, 1)]
+
+
+# ── the trainer moved (#137) ─────────────────────────────────────────────────
+
+ASTERAIX = "http://130.92.59.242:8204"
+
+
+def test_the_gateway_no_longer_asks_a_remote_trainer_about_a_local_card(monkeypatch):
+    """A run holding a card on asteraix must not refuse launches onto idhefix's.
+
+    Once ATR_TRAIN_URL named asteraix, the 24-hour VLM run there would have
+    answered ``holding`` to every launch here. The guard answers for a remote
+    trainer itself, without a call, and the fit check decides.
+    """
+    from loguru import logger
+
+    from atr_serving.manager import GpuBusyError
+
+    def no_call(*args, **kwargs):
+        raise AssertionError("the remote trainer was asked about a local card")
+
+    monkeypatch.setattr("atr_serving.manager.httpx.get", no_call)
+    said: list[str] = []
+    sink = logger.add(lambda m: said.append(m.record["message"]), level="INFO")
+    try:
+        _free_vram(monkeypatch, 7636)
+        m, launcher = make_manager(train_url=ASTERAIX)
+        # 7636 MB is the 15.09. figure the "trainer did not answer" bar refuses.
+        # Here there is nothing to be unsure about, so fitting is enough.
+        assert m.ensure_resident(LIGHTON) == 8210
+
+        _free_vram(monkeypatch, 4000)
+        with pytest.raises(GpuBusyError, match="4000 MB free"):
+            m.ensure_resident(HEBREW)            # the fit check still refuses
+    finally:
+        logger.remove(sink)
+    assert launcher.starts == [(LIGHTON, 8210, 1)]
+    assert len([s for s in said if "not on this box" in s]) == 1   # once, not per launch
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8204", "http://localhost:8204",
+                                 "http://[::1]:8204"])
+def test_a_local_trainer_is_still_asked_about_the_card(monkeypatch, url):
+    """Until #139 removes it, the claim still protects a run on this box."""
+    from atr_serving.manager import GpuBusyError
+
+    seen: list = []
+    _claim(monkeypatch, {"claimed": True, "holding": True,
+                         "jobs": [{"id": "v4", "stage": "train", "holding": True}]},
+           seen=seen)
+    _free_vram(monkeypatch, 40000)
+    m, launcher = make_manager(train_url=url, train_api_key="trainer-secret")
+    with pytest.raises(GpuBusyError, match="v4"):
+        m.ensure_resident(HEBREW)
+    assert launcher.starts == []
+    assert seen == [(f"{url}/gpu-claim", {"X-API-Key": "trainer-secret"})]
+
+
+def test_a_keyless_local_trainer_gets_no_key_header(monkeypatch):
+    seen: list = []
+    _claim(monkeypatch, {"claimed": False, "holding": False, "jobs": []}, seen=seen)
+    _free_vram(monkeypatch, 40000)
+    m, _ = make_manager()
+    m.ensure_resident(HEBREW)
+    assert seen == [("http://127.0.0.1:8204/gpu-claim", {})]
 
 
 def test_release_lazy_drops_the_evictable_and_keeps_the_pinned(monkeypatch):

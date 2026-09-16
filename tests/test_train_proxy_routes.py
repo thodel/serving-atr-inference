@@ -6,6 +6,9 @@ happens when the trainer is unreachable or refuses: the caller must learn which,
 and must never receive a job id for a job that was not created.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -25,6 +28,9 @@ BODY = {
 }
 JOB = {"job_id": "20260807T120000Z-kraken-thun-missiven-v1", "status": "queued",
        "queued_reason": None}
+#: What a current trainer's /health says (the contract fixture, #137).
+HEALTH = json.loads((Path(__file__).parent / "fixtures" / "trainer_contract"
+                     / "health.json").read_text())
 
 
 class FakeTrainer:
@@ -61,6 +67,16 @@ class FakeTrainer:
 
     #: Overridable per test; the default is a spec that checked out.
     verify_result = {"valid": True, "checked": True, "errors": []}
+    #: The engine check's source (#137). Counted apart from ``calls``, which
+    #: record what reached the trainer's job routes.
+    health_result = HEALTH
+    health_calls = 0
+
+    async def health(self, timeout=None):
+        self.health_calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return self.health_result
 
     async def verify(self, body):
         return await self._answer("verify", body, result=self.verify_result)
@@ -122,12 +138,16 @@ def test_list_get_log_cancel_delete(client, trainer):
 
 
 # ── validation happens before a job exists ──────────────────────────────────
-def test_unknown_engine_is_a_400_naming_what_is_supported(client, trainer):
+def test_unknown_engine_is_a_422_naming_what_is_supported(client, trainer):
     """`trocr` was the example here until #44 gave it a backend; `party` is a
-    real engine the gateway serves but cannot train, which is the same shape."""
+    real engine the gateway serves but cannot train, which is the same shape.
+
+    A 400 with free text until #137; now the 422 the trainer's own model gives,
+    with the list taken from the trainer's /health."""
     resp = client.post("/train/jobs", json={**BODY, "engine": "party"}, headers=AUTH)
-    assert resp.status_code == 400
-    assert "kraken" in resp.json()["detail"]
+    assert resp.status_code == 422
+    (error,) = resp.json()["detail"]
+    assert error["loc"] == ["body", "engine"] and "'kraken'" in error["msg"]
     assert trainer.calls == []  # nothing was submitted
 
 
@@ -137,11 +157,25 @@ def test_a_trocr_job_reaches_the_trainer_now_that_it_has_a_backend(client, train
     assert [c[0] for c in trainer.calls] == ["submit"]
 
 
-def test_malformed_request_is_422_with_the_offending_field(client, trainer):
-    resp = client.post("/train/jobs", json={**BODY, "model_id": "Not A Slug"}, headers=AUTH)
+#: The trainer's refusal of a bad model_id, as the client hands it on (#137).
+BAD_SLUG = TrainerError(422, [{
+    "type": "value_error", "loc": ["body"],
+    "msg": "Value error, model_id 'Not A Slug' must match ^[a-z0-9][a-z0-9._-]*$ "
+           "(it becomes a directory name and a registry id)"}])
+
+
+def test_malformed_request_is_422_with_the_offending_field():
+    """The gateway validated the envelope itself until #137. The trainer does it
+    now, as its route signature — so still before a job directory exists — and
+    its 422 comes back with the field named and no job id."""
+    trainer = FakeTrainer(BAD_SLUG)
+    resp = make_client(trainer).post(
+        "/train/jobs", json={**BODY, "model_id": "Not A Slug"}, headers=AUTH)
     assert resp.status_code == 422
     assert "model_id" in str(resp.json()["detail"])
-    assert trainer.calls == []
+    assert isinstance(resp.json()["detail"], list)
+    assert "job_id" not in resp.json()
+    assert [c[0] for c in trainer.calls] == ["submit"]
 
 
 def test_a_dataset_selecting_nothing_still_reaches_the_trainer(client, trainer):
@@ -178,13 +212,15 @@ def test_verify_only_reports_an_invalid_spec_as_200_with_valid_false(trainer_fac
     assert [c[0] for c in trainer.calls] == ["verify"]
 
 
-def test_verify_only_still_refuses_a_malformed_envelope(client, trainer):
-    """Envelope validation runs first; a dry run of a request that could never be
-    submitted is still a 422, and reaches the trainer not at all."""
-    resp = client.post("/train/jobs", params={"verify_only": "true"},
-                       json={**BODY, "model_id": "Not A Slug"}, headers=AUTH)
+def test_verify_only_still_refuses_a_malformed_envelope():
+    """A dry run of a request that could never be submitted is still a 422, not
+    the dry run's 200 — the trainer's refusal wins over the route's status."""
+    trainer = FakeTrainer(BAD_SLUG)
+    resp = make_client(trainer).post(
+        "/train/jobs", params={"verify_only": "true"},
+        json={**BODY, "model_id": "Not A Slug"}, headers=AUTH)
     assert resp.status_code == 422
-    assert trainer.calls == []
+    assert [c[0] for c in trainer.calls] == ["verify"]
 
 
 # ── failure passthrough ─────────────────────────────────────────────────────

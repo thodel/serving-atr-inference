@@ -10,7 +10,12 @@ from loguru import logger
 from atr_serving import __version__
 from atr_serving.api.routes import router
 from atr_serving.api.train_routes import router as train_router
-from atr_serving.config import DEFAULT_INSECURE_KEY, Settings, get_settings
+from atr_serving.config import (
+    DEFAULT_INSECURE_KEY,
+    Settings,
+    get_settings,
+    is_loopback_url,
+)
 from atr_serving.manager import ModelManager
 from atr_serving.registry import Registry, load_registry
 from atr_serving.shared_registry import RegistryWatch
@@ -28,6 +33,14 @@ def _check_auth_hardening(settings: Settings) -> None:
         )
     if not settings.require_auth and exposed:
         logger.warning("SECURITY: auth disabled (ATR_REQUIRE_AUTH=false) on exposed host {}.", settings.host)
+    if not settings.train_api_key and not is_loopback_url(settings.train_url):
+        # Said at startup because the first sign otherwise is a 502 on the next
+        # /train/* call — and the trainer on asteraix refuses every keyless call.
+        logger.warning(
+            "ATR_TRAIN_URL={} is not on this box but ATR_TRAIN_API_KEY is empty; the "
+            "trainer will refuse every /train/* call. Set it to the trainer's value.",
+            settings.train_url,
+        )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

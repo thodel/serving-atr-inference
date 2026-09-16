@@ -27,7 +27,7 @@ import httpx
 from loguru import logger
 
 from atr_serving import gpu as gpu_probe
-from atr_serving.config import Settings
+from atr_serving.config import Settings, is_loopback_url
 from atr_serving.registry import ModelSpec, Registry
 
 
@@ -274,6 +274,7 @@ class ModelManager:
         # insertion/use order == LRU order (front = least recently used)
         self._resident: "OrderedDict[str, _Resident]" = OrderedDict()
         self._ports = _PortPool(settings.vllm_port_base)
+        self._said_trainer_is_remote = False
 
     # ── introspection ────────────────────────────────────────────────────────
     def resident_model_ids(self) -> list[str]:
@@ -397,10 +398,31 @@ class ModelManager:
             )
 
     def _gpu_claim(self) -> dict | None:
-        """The trainer's answer, or None when it did not give one."""
+        """The trainer's answer, or None when it did not give one.
+
+        Asked only of a trainer on this box (#137). Once ``train_url`` points at
+        asteraix, its claim describes a card there: a run holding it would refuse
+        every vLLM launch here — a day of inference given away for a card nobody
+        on this box touches — and a free card there would say nothing about this
+        one. A remote trainer is answered for with a definite "no claim", so the
+        ordinary fit check below decides, as it does for any launch the trainer
+        has no stake in. The coordination itself goes in #139.
+        """
+        if not is_loopback_url(self.settings.train_url):
+            if not self._said_trainer_is_remote:
+                # Once, not per launch: it is a property of the deployment.
+                logger.info("trainer at {} is not on this box; vLLM launches are "
+                            "checked against free VRAM only", self.settings.train_url)
+                self._said_trainer_is_remote = True
+            return {"holding": False, "claimed": False, "jobs": [], "trainer": "remote"}
         url = f"{self.settings.train_url.rstrip('/')}/gpu-claim"
+        # A trainer on loopback accepts callers without a key today; a newer one
+        # would not, and sending the shared key costs nothing.
+        key = self.settings.train_api_key
+        headers = {"X-API-Key": key} if key else {}
         try:
-            response = httpx.get(url, timeout=self.settings.gpu_claim_timeout_s)
+            response = httpx.get(url, timeout=self.settings.gpu_claim_timeout_s,
+                                 headers=headers)
             response.raise_for_status()
             return response.json()
         except Exception as exc:  # noqa: BLE001 — any failure means "no answer"

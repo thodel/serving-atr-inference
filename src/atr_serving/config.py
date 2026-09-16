@@ -10,9 +10,11 @@ same firewall, no TLS) — see README §Security.
 
 from __future__ import annotations
 
+import ipaddress
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -83,9 +85,26 @@ class Settings(BaseSettings):
     #: without a redeploy.
     party_second_opinion: bool = True
     # The training service (#34). Not a recognition engine — it is reached only by
-    # the /train/* proxy (#35), which is the ONLY way in: atr-train binds
-    # 127.0.0.1 and the ufw rule opens :8200 alone to the client host.
+    # the /train/* proxy (#35), and callers (the Discord bot, the ATR-MCP) know
+    # nothing but :8200: ufw opens that port alone to tei.
+    #
+    # Since the split (#137) the trainer lives on asteraix, and after the cutover
+    # this is ``http://130.92.59.242:8204``. Whether the host part is loopback
+    # decides two things (see :func:`is_loopback_url`): whether /train/gpu may
+    # fall back to reading *this* box's cards, and whether the vLLM launcher asks
+    # the trainer's /gpu-claim at all — a claim on asteraix says nothing about a
+    # card on idhefix.
     train_url: str = "http://127.0.0.1:8204"
+    #: Sent as ``X-API-Key`` on every call to ``train_url``. **Shared** with the
+    #: trainer, which reads the same variable name (ATR_TRAIN_API_KEY) and refuses
+    #: every route but /health without it once it listens beyond loopback: on
+    #: asteraix ufw does not filter high ports, so the application is the only
+    #: guard. Deliberately NOT ``api_key``: that one authenticates callers of this
+    #: gateway, this one authenticates the gateway to the trainer, and one leaked
+    #: value should not open both directions (training-atr-models#9).
+    #: Empty = no header, which is what the in-repo trainer on 127.0.0.1 expects.
+    #: ``repr=False`` keeps it out of any log line that prints the settings.
+    train_api_key: str = Field("", repr=False)
     # vLLM instances are dynamic (one per resident VLM); discovered via the
     # ModelManager in Phase 3, not statically configured here.
 
@@ -135,8 +154,9 @@ class Settings(BaseSettings):
     vllm_max_model_len: int | None = 16384
     vllm_startup_timeout_s: int = 300  # 8B load + CUDA graph capture can exceed 180s
     #: How long to wait for the trainer to say whether a job claims the GPU
-    #: (#129). Short on purpose: this sits on the launch path, the trainer is
-    #: on this box, and no answer falls back to the free-VRAM check.
+    #: (#129). Short on purpose: this sits on the launch path, and no answer falls
+    #: back to the free-VRAM check. Only used while ``train_url`` is loopback — a
+    #: remote trainer is not asked at all (#137).
     gpu_claim_timeout_s: float = 2.0
     #: How many line crops are recognised at once in the line pipeline. The loop was
     #: strictly sequential: a 79-line page cost 79 round trips at ~0.58s, ~46s, which
@@ -169,6 +189,30 @@ class Settings(BaseSettings):
     # the vision tower, which vLLM can't serve as a runtime LoRA. scripts/merge_loras.py
     # bakes each adapter into its base here; the launcher serves the merged dir if present.
     vllm_merged_dir: Path = Path.home() / "atr-cache" / "vllm-merged"
+
+
+def is_loopback_url(url: str) -> bool:
+    """Whether ``url`` names this machine: ``localhost`` or a loopback address.
+
+    The one test for "is the trainer on this box" (#137), shared by the
+    /train/gpu fallback and the vLLM launch guard so the two cannot disagree.
+    Textual, no DNS: the configured values are literal addresses, and a lookup on
+    the launch path is a new way to hang. Anything else — a hostname, this box's
+    own public address, a URL without a scheme — counts as remote. That is the
+    safe reading for /train/gpu (it refuses rather than describing the wrong
+    machine); for the launch guard it means the trainer is not asked, which is
+    only right because the in-repo trainer binds 127.0.0.1 and is reachable under
+    no other name.
+    """
+    host = urlsplit(url).hostname
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 _settings: Settings | None = None

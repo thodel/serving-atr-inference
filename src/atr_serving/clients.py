@@ -249,36 +249,140 @@ class TrainerError(EngineError):
     The trainer's errors are *actionable* — 507 names a full filesystem, 500 a
     network TMPDIR, 409 an already-terminal job — and collapsing them into a
     generic 502 would throw away the part that tells the caller what to fix.
+
+    ``detail`` is the JSON value as the trainer sent it — a string, or for a 422
+    the list of field errors — not its ``str()``. Flattening a list turned it into
+    a Python repr nobody can index (#137).
     """
 
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(self, status_code: int, detail: Any) -> None:
         super().__init__(f"trainer error {status_code}: {detail}")
         self.status_code = status_code
         self.detail = detail
 
 
-class TrainerClient:
-    """Async client for the training service. Used only by the /train/* proxy."""
+class TrainerTimeout(EngineError):
+    """The trainer did not answer in time. The proxy makes this a 504.
 
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    Kept apart from "unreachable" for the reason #81 gave for the engines: a slow
+    answer and a closed port send the reader to different places, and across the
+    network (#137) a slow answer is the likelier of the two.
+    """
+
+
+class TrainerAuthError(EngineError):
+    """The trainer refused the **gateway** (401/403). The proxy makes this a 502.
+
+    Not a :class:`TrainerError`, so it is never passed through: the caller's own
+    key was accepted by this gateway before anything was forwarded, and a 401
+    handed back reads as "your key is wrong" — agentic_historian's atr_status.py
+    says exactly that on a 401. What is wrong is this gateway's configuration.
+    """
+
+
+#: The fields of a pydantic error worth passing on. ``input`` echoes the whole
+#: normalised request body — for a kraken job that includes the injected VGSL
+#: spec — and ``ctx``/``url`` add nothing a caller can act on.
+_ERROR_FIELDS = ("type", "loc", "msg")
+
+
+def readable_detail(detail: Any) -> Any:
+    """A trainer error body, with pydantic error lists reduced to what reads.
+
+    Strings and dicts pass unchanged. A list keeps its shape — one entry per
+    field error — so a caller can still index ``detail[0]["loc"]``.
+    """
+    if not isinstance(detail, list):
+        return detail
+    return [{k: item[k] for k in _ERROR_FIELDS if k in item}
+            if isinstance(item, dict) else item
+            for item in detail]
+
+
+def _scrub(value: Any, secret: str) -> Any:
+    """``value`` with ``secret`` blanked wherever it appears as text.
+
+    The trainer does not echo the key; this makes that a property of the gateway
+    rather than a promise of the other side, because anything here ends up in an
+    HTTP response or a log line.
+    """
+    if not secret:
+        return value
+    if isinstance(value, str):
+        return value.replace(secret, "***")
+    if isinstance(value, list):
+        return [_scrub(v, secret) for v in value]
+    if isinstance(value, dict):
+        return {k: _scrub(v, secret) for k, v in value.items()}
+    return value
+
+
+class TrainerClient:
+    """Async client for the training service. Used only by the /train/* proxy.
+
+    The key travels in the ``X-API-Key`` header and nowhere else: not in the URL,
+    not in a log line, not in an exception message. ``transport`` is a test seam
+    (``httpx.MockTransport``), so the whole path from route to wire is testable
+    without a trainer.
+    """
+
+    def __init__(self, base_url: str, api_key: str = "", timeout: float = 30.0,
+                 transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._api_key = api_key
+        self._transport = transport
 
-    async def _request(self, method: str, path: str, **kwargs) -> Any:
+    def __repr__(self) -> str:
+        return f"TrainerClient({self.base_url!r}, key={'set' if self._api_key else 'unset'})"
+
+    async def _request(self, method: str, path: str, *, timeout: float | None = None,
+                       **kwargs) -> Any:
         url = f"{self.base_url}{path}"
+        timeout = self.timeout if timeout is None else timeout
+        headers = {"X-API-Key": self._api_key} if self._api_key else {}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, headers=headers,
+                                         transport=self._transport) as client:
                 resp = await client.request(method, url, **kwargs)
+        except httpx.TimeoutException as exc:
+            # Before RequestError, which it subclasses. httpx timeouts stringify
+            # to "" more often than not, so the message is built, not forwarded.
+            logger.error("trainer did not answer within {}s at {}", timeout, url)
+            raise TrainerTimeout(
+                f"training service did not answer within {timeout:g}s at {url}"
+            ) from exc
         except httpx.RequestError as exc:
-            logger.error("trainer unreachable at {}: {}", url, exc)
-            raise EngineError(f"training service unreachable at {url}: {exc}") from exc
+            reason = _scrub(str(exc), self._api_key)
+            logger.error("trainer unreachable at {}: {}", url, reason)
+            raise EngineError(f"training service unreachable at {url}: {reason}") from exc
         if resp.status_code >= 400:
             try:
-                detail = resp.json().get("detail", resp.text)
-            except Exception:  # noqa: BLE001 — a non-JSON error body is still a body
-                detail = resp.text
-            raise TrainerError(resp.status_code, str(detail))
+                body = resp.json()
+            except ValueError:  # a non-JSON error body is still a body
+                body = None
+            detail = body.get("detail", resp.text) if isinstance(body, dict) else resp.text
+            detail = _scrub(readable_detail(detail), self._api_key)
+            if resp.status_code in (401, 403):
+                message = self._refusal(resp.status_code, url, detail)
+                logger.error("{}", message)
+                raise TrainerAuthError(message)
+            raise TrainerError(resp.status_code, detail)
         return resp.json()
+
+    def _refusal(self, status: int, url: str, detail: Any) -> str:
+        """Why the trainer turned the gateway away, in terms of the setting to fix."""
+        if status == 401:
+            cause = ("this gateway's ATR_TRAIN_API_KEY is "
+                     + ("set but does not match the trainer's" if self._api_key
+                        else "empty")
+                     + " — both machines must hold the same value")
+        else:
+            cause = ("this gateway's address is not in the trainer's "
+                     "ATR_TRAIN_ALLOWED_CLIENTS")
+        return (f"training service at {url} refused the gateway with {status} "
+                f"({detail}): {cause}. Not the caller's key — the gateway accepted "
+                "that before forwarding; this is the gateway's own configuration.")
 
     async def submit(self, body: dict[str, Any]) -> dict:
         return await self._request("POST", "/jobs", json=body)
@@ -299,8 +403,12 @@ class TrainerClient:
     async def delete(self, job_id: str) -> dict:
         return await self._request("DELETE", f"/jobs/{job_id}")
 
-    async def health(self) -> dict:
-        return await self._request("GET", "/health")
+    async def health(self, timeout: float | None = None) -> dict:
+        return await self._request("GET", "/health", timeout=timeout)
+
+    async def gpu(self) -> dict:
+        """The trainer's own reading of its cards (#137). Older trainers answer 404."""
+        return await self._request("GET", "/gpu")
 
     async def curve(self, job_id: str) -> dict:
         return await self._request("GET", f"/jobs/{job_id}/curve")
@@ -312,4 +420,4 @@ class TrainerClient:
 
 def get_trainer_client(settings) -> TrainerClient:
     """Factory used by routes; a seam for tests to monkeypatch."""
-    return TrainerClient(settings.train_url)
+    return TrainerClient(settings.train_url, api_key=settings.train_api_key)

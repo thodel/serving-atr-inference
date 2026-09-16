@@ -283,9 +283,13 @@ bash scripts/make_venvs.sh vlm-train            # only needed for the vllm backe
 curl -s localhost:8204/health | jq .backends    # which backends this box can actually run
 ```
 
-The gateway proxies `/train/*` to the training service on `:8204`; that service binds
-`127.0.0.1` and the `ufw` rule opens only `:8200` to the client host, so **this proxy
-is the only way in**. Same `X-API-Key` as recognition.
+The gateway proxies `/train/*` to the training service at `ATR_TRAIN_URL` — `:8204` on
+this box, or on asteraix after the split (#137). The `ufw` rule opens only `:8200` to the
+client host, so **this proxy is the only way in** for callers, with the same `X-API-Key`
+as recognition. The gateway authenticates itself to the trainer with a second, separate
+key, `ATR_TRAIN_API_KEY`, which both machines must hold (see `.env.example`); if the
+trainer refuses it, the caller gets `502`, not `401`. `GET /train/gpu` is the trainer's
+reading of its own cards; only an older trainer on this box gets the local reading.
 
 | Endpoint | Returns | Use |
 |---|---|---|
