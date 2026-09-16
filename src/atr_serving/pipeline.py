@@ -174,6 +174,73 @@ async def recognize_page_vllm(image, content_type, spec, vllm_client, max_tokens
     )
 
 
+def order_lines(seg) -> list[int]:
+    """Indices into ``seg.lines``, in reading order.
+
+    Three sources, most trustworthy first.
+
+    1. **The segmenter's own order.** kraken computes one per page and this
+       pipeline discarded it along with the regions.
+    2. **Region order.** Lines grouped by the region they sit in, regions taken
+       top to bottom then left to right, lines inside a region in the order the
+       segmenter emitted them. This is what makes a marginal note read as a
+       marginal note instead of interrupting a sentence in the body.
+    3. **As segmented.** No regions, no order: the old behaviour, which is
+       correct for a plain single-column page and was being applied to every
+       page regardless.
+
+    Measured on the Lassberg letters (2026-09-16): dense pages with marginalia
+    came back with plenty of characters in an order that was not the text —
+    ``lassberg-letter-1345`` returned 2257 of them, unreadable, while a clean
+    single-column page of the same run read fine. That difference is this
+    function.
+    """
+    lines = list(getattr(seg, "lines", []) or [])
+    count = len(lines)
+    if count < 2:
+        return list(range(count))
+
+    try:
+        given = [int(i) for i in (getattr(seg, "reading_order", None) or [])]
+    except (TypeError, ValueError):
+        # The contract says list[int] and pydantic enforces it on the wire, but
+        # this also runs against whatever a future segmenter hands over in
+        # process. An unusable order is a fallback, never an exception that
+        # costs the page.
+        logger.warning("unusable reading order from {} — falling back",
+                       getattr(seg, "segmented_by", "?"))
+        given = []
+    if sorted(given) == list(range(count)):
+        return given
+    if given:
+        logger.warning("reading order from {} is not a permutation of {} line(s) — "
+                       "falling back to region order",
+                       getattr(seg, "segmented_by", "?"), count)
+
+    regions = {r.id: r for r in (getattr(seg, "regions", None) or [])}
+    if not regions or not any(getattr(ln, "regions", None) for ln in lines):
+        return list(range(count))
+
+    def region_key(region_id: str) -> tuple[float, float]:
+        bbox = getattr(regions.get(region_id), "bbox", None)
+        # Top to bottom, then left to right. A region the segmenter gave no
+        # geometry sorts last rather than first: better to append a block of
+        # unknown placement than to open the page with it.
+        return (bbox[1], bbox[0]) if bbox else (float("inf"), float("inf"))
+
+    def line_key(index: int) -> tuple[float, float, int]:
+        ids = [str(r) for r in (getattr(lines[index], "regions", None) or [])]
+        # A line in no region keeps its place relative to the page rather than
+        # being swept to the end: its own y, against the regions' y.
+        if not ids:
+            bbox = getattr(lines[index], "bbox", None)
+            return (bbox[1] if bbox else float("inf"), bbox[0] if bbox else 0.0, index)
+        top, left = min(region_key(i) for i in ids)
+        return (top, left, index)
+
+    return sorted(range(count), key=line_key)
+
+
 async def recognize_lines(
     image, filename, content_type, model_id, engine, segmenter, recognize_line: RecognizeLine,
     concurrency: int = 1,
@@ -190,6 +257,10 @@ async def recognize_lines(
     **Order is reconstructed from the index, never from completion.** Concurrent
     results arrive out of order, and a transcription whose lines are shuffled is
     worse than a slow one — it would be wrong in a way that reads as plausible.
+
+    Which index, though, is `order_lines`: the segmenter's own reading order when
+    it offers one, else region by region. Cropping follows that sequence, so the
+    assembled page reads in it.
     """
     t0 = time.perf_counter()
     seg = await segmenter.segment(image, filename, content_type, mode="baseline")
@@ -198,7 +269,8 @@ async def recognize_lines(
     # Crop first, synchronously: cropping is CPU-bound and shares one PIL image, so
     # there is nothing to overlap, and doing it up front keeps the index stable.
     crops: list[tuple[int, object, bytes]] = []
-    for ln in seg.lines:
+    for position in order_lines(seg):
+        ln = seg.lines[position]
         crop = crop_line(pil, ln)
         if crop is not None:
             crops.append((len(crops), ln, _png_bytes(crop)))
@@ -213,8 +285,15 @@ async def recognize_lines(
 
     out_lines: list[Line] = []
     texts: list[str] = []
-    for _idx, ln, txt in sorted(done, key=lambda r: r[0]):
-        out_lines.append(Line(order=ln.order, bbox=ln.bbox, baseline=ln.baseline, text=txt))
+    for position, (_idx, ln, txt) in enumerate(sorted(done, key=lambda r: r[0])):
+        # ``order`` is the position in the **reading** order, not the index the
+        # segmenter happened to emit. Keeping the segmenter's number here would
+        # leave a consumer that sorts by ``order`` — the obvious thing to do with
+        # a field of that name — reconstructing exactly the sequence this
+        # function exists to replace.
+        out_lines.append(Line(order=position, bbox=ln.bbox, baseline=ln.baseline,
+                              text=txt,
+                              regions=[str(r) for r in (getattr(ln, "regions", None) or [])]))
         texts.append(txt)
     return RecognitionResult(
         model=model_id, engine=engine, text="\n".join(texts), lines=out_lines,

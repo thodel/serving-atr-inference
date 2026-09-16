@@ -17,11 +17,29 @@ class Line(BaseModel):
     bbox: list[float] | None = None            # [x0,y0,x1,y1]
     text: str | None = None
     confidence: float | None = None
+    #: Ids of the regions this line sits in, from the segmenter. A line in a
+    #: margin and a line in the body are the same kind of object to a recogniser
+    #: and different things in a document; without this the page is one flat list
+    #: and a marginal note lands mid-sentence.
+    regions: list[str] = Field(default_factory=list)
+
+
+class Region(BaseModel):
+    """A block the segmenter found: a text area, a margin, a header."""
+
+    id: str
+    type: str = "text"
+    bbox: list[float] | None = None            # [x0,y0,x1,y1]
 
 
 class SegmentResponse(BaseModel):
     lines: list[Line]
     segmented_by: str
+    regions: list[Region] = Field(default_factory=list)
+    #: The segmenter's own reading order, as indices into ``lines``. kraken
+    #: computes one and this pipeline threw it away; a segmenter that offers none
+    #: leaves this empty and the caller falls back to region order.
+    reading_order: list[int] = Field(default_factory=list)
 
 
 class SecondOpinion(BaseModel):
