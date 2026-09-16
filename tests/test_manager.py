@@ -149,14 +149,17 @@ def test_models_already_resident_keep_serving_while_a_run_holds_the_card(monkeyp
     assert m.ensure_resident(HEBREW) == port        # no launch, no refusal
 
 
-def test_prepare_and_compile_do_not_claim_the_card(monkeypatch):
-    """The trainer decides this, and answers claimed=false; the gateway obeys.
+def test_the_gateway_obeys_a_no_claim_answer(monkeypatch):
+    """Which jobs claim the card is the trainer's decision, not this one's.
 
-    v3 spent three and a half hours in prepare and compile. Blocking inference
-    for that long would be a worse fault than the one this prevents.
+    This test was named `test_prepare_and_compile_do_not_claim_the_card` and said
+    so in its docstring, which stopped being true in 0b59bcd: a job claims the
+    card from its first stage, because a model launched during v4's prepare was
+    still resident when its train began and took the run down. The assertion was
+    always about the gateway obeying the answer it is given, so only the name was
+    ever wrong — which is how a test comes to document a policy the code reversed.
     """
-    _claim(monkeypatch, {"claimed": False,
-                         "jobs": []})            # a compiling job is not listed
+    _claim(monkeypatch, {"claimed": False, "jobs": []})
     _free_vram(monkeypatch, 40000)
     m, launcher = make_manager()
     assert m.ensure_resident(HEBREW) == 8210
