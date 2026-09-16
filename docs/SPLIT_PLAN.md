@@ -202,9 +202,11 @@ Was es kostet:
 - **Nachladen ist unscharf.** CIFS-Clients cachen Attribute (`actimeo`); eine
   mtime-Prüfung kann um diese Frist nachhinken. Nach einem 24-Stunden-Lauf
   unerheblich.
-- **Der Share ist nicht immer da** (Ende August zwei Wochen offline). Ein
-  Trainer, der eine Registry-ID auflösen muss und keine Registry findet, muss
-  laut scheitern — nicht wie `load_heldout` still mit einer leeren weitermachen.
+- **Eine fehlende Registry muss laut scheitern.** Der Share ist sehr stabil —
+  der Ausfall Ende August war eine angekündigte Wartung —, die Forderung hängt
+  also nicht an der Häufigkeit, sondern an der Richtigkeit: ein Trainer, der eine
+  Registry-ID auflösen muss und keine findet, darf nicht wie `load_heldout` still
+  mit einer leeren weitermachen.
 
 | Issue | Inhalt |
 |---|---|
