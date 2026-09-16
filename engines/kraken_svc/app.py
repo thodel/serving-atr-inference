@@ -29,7 +29,7 @@ from kraken import blla, rpred
 from loguru import logger
 from PIL import Image
 
-from atr_serving.contracts import Line, RecognitionResult, SegmentResponse
+from atr_serving.contracts import Line, RecognitionResult, Region, SegmentResponse
 from atr_serving.kraken_loader import load_recognition_model, resolve_weights
 
 KRAKEN_VERSION = _pkg_version("kraken")
@@ -143,6 +143,58 @@ def _geom(line) -> tuple[list[list[float]] | None, list[float] | None]:
     return bl, bbox
 
 
+def _line_regions(line) -> list[str]:
+    """Region ids this line belongs to, as strings.
+
+    ``BaselineLine.regions`` is a list of ids in kraken 7. Read through
+    ``getattr`` because a segmenter that does not do regions is a supported
+    answer, not a crash.
+    """
+    return [str(r) for r in (getattr(line, "regions", None) or [])]
+
+
+def _regions(seg) -> list[Region]:
+    """The blocks kraken found, flattened out of its ``{type: [region]}`` map.
+
+    kraken has computed these on every page this service has ever segmented and
+    the response never carried them, so every caller saw one flat list of lines
+    and had to guess at the order. The type is kept — a margin and a body are
+    both regions and only one of them belongs in the running text.
+    """
+    found = getattr(seg, "regions", None) or {}
+    groups = found.items() if hasattr(found, "items") else [("text", found)]
+    out: list[Region] = []
+    for kind, items in groups:
+        for region in items or []:
+            _, bbox = _geom(region)
+            out.append(Region(
+                id=str(getattr(region, "id", f"{kind}-{len(out)}")),
+                type=str(kind), bbox=bbox))
+    return out
+
+
+def _reading_order(seg, line_count: int) -> list[int]:
+    """kraken's own reading order, if it produced a usable one.
+
+    ``line_orders`` is a list of orders; the first is kraken's preferred. It is
+    validated as a **permutation** of the line indices before being handed on,
+    because an order that drops or repeats an index would silently lose or
+    duplicate text — a corpus wrong in a way that reads as fluent.
+    """
+    orders = getattr(seg, "line_orders", None) or []
+    for order in orders:
+        try:
+            candidate = [int(i) for i in order]
+        except (TypeError, ValueError):
+            continue
+        if sorted(candidate) == list(range(line_count)):
+            return candidate
+        logger.warning(
+            "kraken reading order covers {} of {} line(s) — ignoring it",
+            len(set(candidate)), line_count)
+    return []
+
+
 def _record_text(rec) -> str:
     return getattr(rec, "prediction", None) or str(rec)
 
@@ -176,8 +228,10 @@ async def segment(image: UploadFile = File(...), mode: str = Form(default="basel
     lines = []
     for idx, ln in enumerate(seg.lines):
         bl, bbox = _geom(ln)
-        lines.append(Line(order=idx, baseline=bl, bbox=bbox))
-    return SegmentResponse(lines=lines, segmented_by="kraken-blla")
+        lines.append(Line(order=idx, baseline=bl, bbox=bbox, regions=_line_regions(ln)))
+    return SegmentResponse(
+        lines=lines, segmented_by="kraken-blla",
+        regions=_regions(seg), reading_order=_reading_order(seg, len(lines)))
 
 
 @app.post("/recognize", response_model=RecognitionResult)
@@ -204,7 +258,8 @@ async def recognize(
         if conf is not None:
             confs.append(conf)
         bl, bbox = _geom(ln)
-        out.append(Line(order=idx, baseline=bl, bbox=bbox, text=text, confidence=conf))
+        out.append(Line(order=idx, baseline=bl, bbox=bbox, text=text, confidence=conf,
+                        regions=_line_regions(ln)))
         texts.append(text)
 
     return RecognitionResult(
