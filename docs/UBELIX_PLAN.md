@@ -1797,3 +1797,52 @@ costs before building a filter for it. §16 is the cautionary tale.
 
 Published privately as `dh-unibe/qwen3vl-medieval-german-v3` (544 MB, 15 files)
 and copied to the share.
+
+---
+
+## 19. The block crops are not worth filtering — measured, not assumed
+
+§18 named the near-square crops as the next lever. They are not. Measuring first
+was the point of §16's lesson, and this time the measurement came back negative.
+
+### Method
+
+No GPU. The evaluator already writes `eval_report.raw.jsonl` — every prediction,
+not the ten kept for eyeballing — so the 200 scored samples were re-joined to
+their references and their crop dimensions, and re-scored with `score_pairs`, the
+evaluator's own scorer. The decomposition reproduces the reported **CER 0.1120**
+on the full set exactly, which is what says the right 200 samples were recovered.
+
+### Result
+
+| subset (aspect = width / height) | n | ref chars | errors | CER |
+|---|---:|---:|---:|---:|
+| all | 200 | 8,266 | 926 | **0.1120** |
+| block-like, w/h < 3 | 32 | 154 | 60 | 0.3896 |
+| proper lines, w/h ≥ 3 | 168 | 8,112 | 866 | **0.1068** |
+
+The block crops are read badly — CER 0.39 against 0.11 — and that is what made
+them look worth fixing. But they hold **1.9 % of the reference characters** while
+carrying 6.5 % of the errors. Removing them entirely moves the CER from 0.1120 to
+**0.1068**: a gain of 0.005, under 5 % relative.
+
+At the most generous threshold (w/h < 4, 40 samples) it is 0.1054 — still under
+6 %.
+
+**That 6.5 % is a ceiling, not an estimate.** Even a perfect fix — correct
+geometry and correct ground truth for every block crop — cannot recover more than
+the errors they carry, and the small subset's own CER being noisy does not change
+it. So the ceiling holds however the 32 samples fall.
+
+### What this means
+
+The remaining error is on **proper line crops**: 866 errors over 8,112 characters,
+CER 0.1068. That is ordinary handwriting difficulty in 14th–16th century German,
+not a data defect with a cheap fix. Further gains have to come from training —
+more epochs, more corpus, a larger base — or from ground truth that is wrong in
+ways this measurement does not see.
+
+A crop-geometry filter would be real work for under 5 %, and it would also delete
+whatever legitimate short lines fall under the threshold. Not worth it. The
+finding is recorded so the idea does not get proposed again from the same
+plausible-sounding reasoning that produced §16.
