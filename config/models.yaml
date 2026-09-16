@@ -192,6 +192,23 @@ models:
     residency: pinned
     gpu_affinity: 1
 
+  # The 19th-century Kurrent line model. Its sibling above stops at the 18th
+  # century, and a century out of domain is not a detail on this material: the
+  # Lassberg comparison had two models read the same ten pages with the wrong
+  # centuries registered and return text nobody can quote.
+  - id: trocr-kurrent
+    engine: trocr
+    hf_repo: dh-unibe/trocr-kurrent
+    base_model: microsoft/trocr-base-handwritten
+    task: htr
+    level: line
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 1500
+    residency: pinned
+    gpu_affinity: 1
+
   - id: trocr-kurrent-xvi-xvii
     engine: trocr
     hf_repo: dh-unibe/trocr-kurrent-XVI-XVII
