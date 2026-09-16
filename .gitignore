@@ -235,6 +235,10 @@ config/models.local.yaml
 # Training jobs + trained weights (default: ~/atr-cache/..., these cover a local root)
 training_jobs/
 trained/
+# ...except the fixture that shows the shared registry's one-model-per-file layout
+# (#138). The rule above matches it by name, and a suite that passes only because
+# an ignored file happens to be on this disk is green for the wrong reason.
+!tests/fixtures/registry/trained/
 
 # Written into the workspace by the model-discovery Action (#24); the report
 # it produces is a GitHub issue, not a tracked file.

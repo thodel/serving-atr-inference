@@ -1,0 +1,22 @@
+# One trained model per file: <registry_root>/trained/<id>.yaml (#138).
+#
+# - ONE mapping, the same fields as an entry under `models:` in models.yaml —
+#   not a list, and no `models:` key.
+# - The file name is the id. A file whose `id` differs is skipped.
+# - Written by the trainer (training-atr-models#14) as a tmp file in this
+#   directory and then os.replace'd. The gateway reads only `*.yaml` and
+#   ignores dotfiles and `*.tmp`, so a half-written file is never served.
+# - `enabled: false` until the promotion gate has served it once; the gateway
+#   notices the flip without a restart.
+id: example
+engine: kraken
+local_path: /mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/trained/example/example.mlmodel
+enabled: false
+task: htr
+level: page
+languages: [de]
+scripts: [Kurrent]
+centuries: [16, 17]
+vram_mb: 500
+residency: lazy
+gpu_affinity: 1

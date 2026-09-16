@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +44,32 @@ class Settings(BaseSettings):
     #: entries the promotion gate has proven servable (``enabled: true``) are
     #: merged; a missing file is the normal state of a box that has not trained.
     models_overlay: Path = REPO_ROOT / "config" / "models.local.yaml"
+    #: The registry directory on the research share (#138), e.g.
+    #: ``/mnt/wbkolleg_dh_1/Textrecognition_Training/registry``. The gateway
+    #: publishes ``models_config`` there as ``models.yaml`` on startup and serves
+    #: the trainer's ``trained/<id>.yaml`` alongside ``models_overlay``, reloading
+    #: both without a restart. None = off, and the gateway reads exactly what it
+    #: read before. The trainer's ``ATR_TRAIN_MODELS_CONFIG`` must name
+    #: ``<this>/models.yaml`` — one more value the two machines have to agree on.
+    #:
+    #: Absolute and from the environment, not REPO_ROOT-relative like the two
+    #: above: relative to a checkout, two checkouts would each have their own
+    #: registry, which is the problem the shared directory exists to remove.
+    registry_root: Path | None = None
+    #: At most one look at ``trained/`` per this many seconds, triggered by
+    #: requests. A listing on CIFS is cheap but not free, and the client's
+    #: attribute cache makes a change visible late anyway.
+    registry_reload_interval_s: float = 5.0
+
+    @field_validator("registry_root", mode="before")
+    @classmethod
+    def _registry_root_is_absolute(cls, value):
+        # `ATR_REGISTRY_ROOT=` in .env reads as "off", not as the current directory.
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if not Path(value).is_absolute():
+            raise ValueError(f"registry_root must be an absolute path, got {value!r}")
+        return value
 
     # ── Engine backends (gateway -> engine services over localhost) ───────
     # Phase 0 only records them; routes that use them arrive in later phases.

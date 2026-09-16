@@ -40,6 +40,12 @@ router = APIRouter()
 
 
 def _registry(request: Request) -> Registry:
+    # With a shared registry (#138) this is where a new registration is noticed:
+    # every route that resolves a model comes through here. The poll is a clock
+    # read unless a look is due, and the look runs off the request.
+    watch = getattr(request.app.state, "registry_watch", None)
+    if watch is not None:
+        watch.poll(request.app.state)
     return request.app.state.registry
 
 

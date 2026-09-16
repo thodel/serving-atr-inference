@@ -36,8 +36,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from atr_serving.config import get_settings  # noqa: E402
-from atr_serving.registry import load_registry  # noqa: E402
-from atr_serving.training.overlay import OVERLAY_FILENAME, load_overlay, merge  # noqa: E402
+from atr_serving.registry import Registry, load_registry  # noqa: E402
+from atr_serving.shared_registry import TRAINED_DIRNAME, combine, read_trained  # noqa: E402
+from atr_serving.training.overlay import OVERLAY_FILENAME, load_overlay  # noqa: E402
 
 
 # ── is what is on disk actually servable? ────────────────────────────────────
@@ -375,6 +376,30 @@ def _adapter_config_quietly(adapter: str) -> dict:
         return {}
 
 
+def registered_models(settings) -> Registry:
+    """Everything registered, disabled entries included.
+
+    Trained adapters are written `enabled: false` precisely because they are not
+    servable until merged — so include_disabled is not a loophole here, it is the
+    whole point. They come from two places while the old trainer is still
+    running: the gitignored local overlay, and the shared registry's `trained/`
+    (#138) when `ATR_REGISTRY_ROOT` is set. Precedence is the gateway's.
+    """
+    reg = load_registry(settings.models_config)
+    overlay_path = Path(settings.models_config).parent / OVERLAY_FILENAME
+    shared = []
+    if settings.registry_root is not None:
+        shared = read_trained(settings.registry_root)
+        if shared is None:
+            # Said here and not left to the listing: otherwise `--only <our model>`
+            # answers "no matching vLLM LoRA model", which blames the id.
+            print(f"cannot read {Path(settings.registry_root) / TRAINED_DIRNAME} — models "
+                  "registered on the share are missing from this run. Is it mounted?",
+                  file=sys.stderr)
+            shared = []
+    return combine(reg, load_overlay(overlay_path), shared, include_disabled=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", help="merge only this model id")
@@ -385,13 +410,7 @@ def main() -> int:
     args = ap.parse_args()
 
     settings = get_settings()
-    reg = load_registry(settings.models_config)
-    # Locally trained adapters are in the gitignored overlay, and they are written
-    # `enabled: false` precisely because they are not servable until merged — so
-    # include_disabled is not a loophole here, it is the whole point.
-    overlay_path = Path(settings.models_config).parent / OVERLAY_FILENAME
-    reg = merge(reg, load_overlay(overlay_path), include_disabled=True)
-    lora_specs = [s for s in reg.by_engine("vllm") if s.base_model]
+    lora_specs = [s for s in registered_models(settings).by_engine("vllm") if s.base_model]
 
     if args.list:
         for s in lora_specs:
