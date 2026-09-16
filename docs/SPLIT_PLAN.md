@@ -1,276 +1,263 @@
 # Training und Serving trennen — `training-atr-models`
 
-Stand 16.09.2026. Grundlage ist eine Bestandsaufnahme der tatsächlichen
-Kopplung, nicht eine Schätzung; jede Zeilenangabe unten ist nachgeprüft.
+Zweite Fassung, 16.09.2026. Die erste war an sechs Stellen sachlich falsch; sie
+stehen in §0, weil ein Plan, der seine eigenen Irrtümer verschweigt, sie
+weitergibt.
+
+Grundlage: eine Bestandsaufnahme beider Repos und eine Vermessung beider
+Maschinen. Jede Zeilenangabe ist nachgeprüft.
 
 ---
 
-## 0. Was die Trennung wirklich kostet
+## 0. Was die erste Fassung falsch hatte
 
-Die verbreitete Annahme wäre: „die beiden Hälften sind verwoben". Sie sind es
-**im Code kaum**. Nachgezählt:
-
-| Richtung | Umfang |
+| Behauptung (1. Fassung) | Wirklich |
 |---|---|
-| `training/` → Serving | **ein** Modul: `atr_serving.registry`, an zwei Stellen (`training/overlay.py:26`, `training/base_models.py:36`) plus vier Engine-Runner |
-| Serving → `training/` | **drei** Stellen: `app.py:16` (`overlay`), `api/train_routes.py:26-27` (`backends`, `contracts`) |
+| „13 Skripte importieren `atr_serving.training`" | **Neun.** `make_split.py`, `smoke_trocr.py`, `check_env.sh` ziehen aus anderen Gründen um — ohne dass vorher ein Import aufzulösen wäre |
+| „`merge_loras.py` spreizt beide Settings-Klassen" | Nur **eine**: `atr_serving.config.get_settings` (`:38`). `TrainerSettings` kommt darin nicht vor. Sobald `overlay.py` serving-seitig ist, hat das Skript **null** Training-Importe |
+| „`eval/` ist serving-seitig mit einem lästigen Training-Import" | `eval/` hat **null** Serving-Importe. Seine Eingabe ist der Artefaktbaum des Trainers. D4 ist durch den Code gedeckt, nicht dagegen |
+| „`textmetrics` wird von beiden Hälften gebraucht → Kandidat für ein geteiltes Paket" | Sein einziger Nicht-Training-Konsument **ist** `eval/`. Zieht `eval/` um, hat `textmetrics` keinen Serving-Konsumenten mehr — die Paketfrage entfällt. **D3 und D4 stützen sich gegenseitig** |
+| „44 trainingsseitige, 13 servingseitige, 8 übergreifende Testdateien" | 72 Dateien: **43** training, **16** serving, **4** Grenzgänger, 2 eval, 6 skriptgetrieben, 1 conftest. Und alle vier Grenzgänger kreuzen über **dasselbe eine Symbol** (`atr_serving.registry`), nicht über acht Kopplungen. Die Grenzarbeit ist etwa halb so gross wie veranschlagt |
+| „Zwei HTTP-Kanten sind die Naht" | **Drei.** `eval/run_eval.py:44` postet an `/recognize` — nach D4 eine dritte Kante, die dieselbe Firewall-Regel und denselben Schlüssel braucht |
 
-Das ist alles. `TrainerSettings` ist bereits eine eigenständige `BaseSettings`
-mit eigenem Präfix (`ATR_TRAIN_`), und `training/` importiert weder `config.py`
-noch `manager.py`, `pipeline.py`, `clients.py` oder `image_io.py`.
+Dazu ein Zitatfehler: `set_enabled` steht in `kraken_train_svc/runner.py:459`, nicht `:415`.
 
-**Die eigentliche Kopplung ist das Dateisystem**, und die ist massiv:
+---
 
-| Was | Wo | Bricht bei Trennung |
+## 1. Die beiden Maschinen, gemessen
+
+| | **idhefix** — Serving | **asteraix** — Training |
 |---|---|---|
-| `models.local.yaml` (Overlay) | Trainer schreibt (`training/settings.py:39`), Gateway liest beim Start (`app.py:42`) | **Ja** — zwei Prozesse, eine Datei |
-| `trained_root` + `local_path` | Trainer kopiert Gewichte hin, Gateway legt den **absoluten Pfad** in `ModelSpec.local_path`, kraken öffnet ihn (`kraken_loader.py:56`) | **Ja** — jeder Pfad zeigt ins Leere |
-| `vllm_merged_dir` | `scripts/merge_loras.py:401` schreibt, `manager.py:85` liest | **Ja** |
-| HF-Cache | `~/.cache/huggingface/hub` → Symlink auf die CIFS-Freigabe | nur wenn der neue Server sie nicht mountet |
-| `REPO_ROOT` | beide Hälften nehmen **einen** Checkout an (`training/settings.py:24`, `config.py`) | **Ja**, per Definition |
+| Adresse | 130.92.59.240 (`srv`, dhserver02) | 130.92.59.242 (`dhserver03`) |
+| GPUs | 2 × A40 46 GB; GPU 1 trägt **dauerhaft 14,4 GB** Serving-Dienste | **2 × A40 46 GB, beide 0 MiB belegt** |
+| Verbund | — | **NVLink, 4 Links à 14,06 GB/s, P2P OK** |
+| CPU / RAM | 48 Kerne / 251 GB | 48 Kerne / 251 GB |
+| OS / Treiber | Ubuntu 24.04.3 / 580.95.05 | identisch |
+| `/mnt/wbkolleg_dh_1` | gemountet | **gemountet, derselbe Share** — die 48 Job-Verzeichnisse von idhefix sind dort sichtbar |
+| Systemplatte | 1,8 TB, 424 GB frei | 1,8 TB, 530 GB frei |
+| `Linger` | `yes` | **`yes`** (16.09. gesetzt, ohne sudo) |
+| HF-Cache | Symlink auf den Share | **Symlink gesetzt**, Schreibtest bestanden |
+| sudo | kein passwortloses | kein passwortloses |
 
-Und zwei HTTP-Kanten, die heute Loopback sind:
-
-- `train_url = http://127.0.0.1:8204` (`config.py:61`) — der `/train/*`-Proxy
-- `gateway_url = http://127.0.0.1:8200` (`training/settings.py:101`) — das
-  Promotion-Gate postet eine Seite an `/ocr`
-
-Beide sind schon HTTP. **Sie sind die Naht.** Die Trennung besteht im Kern
-darin, aus zwei Loopback-Kanten zwei Netzwerkkanten zu machen und alles, was
-heute über eine gemeinsame Platte läuft, ebenfalls über diese Kanten zu führen.
-
----
-
-## 1. Zielarchitektur
-
-```
-   tei.dh.unibe.ch                asterAIx (serving)            <neuer Server> (training)
-   ┌──────────────────┐           ┌────────────────────┐        ┌──────────────────────┐
-   │ agentic_historian│──:8200───▶│ atr-gateway        │─:8204─▶│ atr-train            │
-   │  atr_status.py   │  X-API-Key│  /recognize /ocr   │  mTLS  │  /jobs /gpu /health  │
-   │  atr_watch.py    │           │  /train/*  (Proxy) │  o. VPN│  /gpu (nvidia-smi)   │
-   │  atr_batch.py    │           │  /models           │        │                      │
-   └──────────────────┘           │  /admin/register   │◀───────│  register-Stage      │
-                                  └────────────────────┘  HTTP  └──────────────────────┘
-                                     kraken/trocr/party/vLLM        kraken/trocr/vlm
-                                     GPU 1 nur noch Serving          eigene GPU(s)
-```
-
-**Unverändert bleibt**, und das ist die Vorgabe:
-
-- Der Bot spricht weiter **ausschliesslich** `:8200` an. `atr_status.py:12-15`
-  hält fest, warum: asterAIx bindet den Trainer an `127.0.0.1` und öffnet nur
-  `:8200` zu tei. Nach der Trennung zeigt derselbe Proxy über das Netz — der Bot
-  merkt nichts, weder in `atr_status.py` noch in `atr_watch.py` noch in der
-  Konfiguration.
-- Alle acht `/train/*`-Routen, Pfade und Antwortformate.
-- Die fünf Stages, die Job-IDs, `job.json`, die Log-Endpunkte.
-
-**Neu ist** eine dritte Route am Gateway, `POST /admin/register`, über die der
-Trainer ein fertiges Modell anmeldet, statt eine Datei zu schreiben, die beide
-sehen.
+Das ändert die Ausgangslage: heute teilt sich ein Lauf **31,6 GB** mit den
+Serving-Diensten; auf asteraix stehen **92 GB über NVLink** zur Verfügung.
+Parallele Läufe und grössere Modelle sind damit keine Zukunftsmusik, sondern
+der Grund für den Umzug — und bekommen einen eigenen Epic (T6), damit „umziehen"
+und „ausbauen" sich nicht vermischen.
 
 ---
 
-## 2. Entscheidungen, die vorab zu treffen sind
+## 2. Entscheidungen (getroffen 16.09.2026)
 
-Diese vier ändern den Plan, nicht nur seine Ausführung.
-
-### E1 — Mountet der neue Server die CIFS-Freigabe?
-
-Davon hängt der teuerste Teil ab.
-
-- **Ja**: `jobs_root` und der HF-Cache bleiben, wo sie sind. Die
-  Trainingsdaten (6,6 TB) müssen nicht zweimal existieren, und der Handover der
-  Gewichte kann weiterhin über `trained_root` laufen — der Gateway liest dann
-  einen Pfad, den beide sehen. Aufwand: klein.
-- **Nein**: Datasets werden auf dem neuen Server neu vom Hub gezogen (der
-  HF-Cache liegt heute auf der Freigabe und wird mit `lassberg/vlm_training`
-  geteilt), und die Gewichte müssen über HTTP zum Gateway. Aufwand: Epic T3
-  wächst deutlich.
-
-### E2 — Welcher Server, und wie erreicht ihn asterAIx?
-
-Der Trainer bindet heute auf `127.0.0.1`. Über das Netz braucht es eine
-Authentifizierung, die nicht „niemand kommt dran" heisst. Vorschlag:
-derselbe `X-API-Key`-Mechanismus wie am Gateway, plus Bindung an das
-VPN-Interface. mTLS wäre sauberer und ist mehr Arbeit.
-
-### E3 — Wird die gemeinsame Vokabel ein Paket, oder verschwindet sie?
-
-`ModelSpec` (Serving) und `TrainRequest` (Training) sind heute zwei parallele
-pydantic-Vokabulare, die sich **per Konvention** einig sind — sie teilen keinen
-einzigen Import. `registry.py:16` kennt vier Engines, `contracts.py:103` drei;
-nichts erzwingt den Abgleich.
-
-- **Variante A — geteiltes Paket** (`atr-model-contracts`): korrekt, aber ein
-  drittes Repo, das bei jeder Änderung in beiden Versionen hängt.
-- **Variante B — die Naht wird dünn genug, dass es keins braucht** (empfohlen):
-  der Proxy hört auf, `TrainRequest` ein zweites Mal zu validieren
-  (`train_routes.py:85`), und leitet den Body durch; `SUPPORTED_ENGINES`
-  (`train_routes.py:37`) kommt aus `/health` des Trainers statt aus
-  `training.backends`. Damit fallen **beide** Serving→Training-Importe im
-  Proxy weg. Der dritte (`app.py:16`, Overlay) fällt mit Epic T3.
-
-Variante B bedeutet: der Trainer validiert seine eigenen Anfragen, und der
-Gateway reicht Fehler durch — was `TrainerError` (`clients.py:245`) heute schon
-kann, es hält den Status des Trainers durch statt ihn auf 502 zu plätten.
-
-### E4 — Was passiert mit `eval/` und den 13 `scripts/`?
-
-`eval/` ist Serving-seitig, importiert aber `atr_serving.training.textmetrics`.
-Dreizehn Skripte (`merge_loras`, `publish_to_hub`, `plan_corpus`,
-`stratified_eval_set`, `compare_eval_reports`, `audit_eval_material`, …) hängen
-an `atr_serving.training`. Die meisten gehören klar ins Trainingsrepo. Zwei
-Ausnahmen brauchen eine Entscheidung:
-
-- `scripts/merge_loras.py` **spreizt beide Hälften** und beide Settings-Klassen
-  (`:37-40`, `:388`, `:392`). Es macht aus einem Adapter ein servierbares
-  Modell — das ist Serving-Arbeit auf Training-Output.
-- `textmetrics` (CER/WER samt der invertierten Edit-Konvention) wird von beiden
-  gebraucht. Kandidat für das geteilte Paket, falls E3 → A.
+- **E1 — der Share ist auf asteraix verfügbar.** Nachgewiesen, nicht nur zugesagt.
+- **E2 — Rollen und Namen**: serving = idhefix, training = asteraix. Die
+  Verwechslung hat sich durch 50 Dateien fortgepflanzt (§T0).
+- **E3 — dünne Naht.** Kein geteiltes Vertragspaket. Der Proxy validiert nicht
+  mehr selbst und leitet durch.
+- **E4 — `eval/` zieht mit ins Trainingsrepo.**
 
 ---
 
-## 3. Epics
+## 3. Was die Naht wirklich ist
 
-### T1 — `training-atr-models` existiert und ist grün
+Drei HTTP-Kanten, **keine** geteilte Python-Abhängigkeit:
 
-Das Repo anlegen und den Trainingscode hineinbewegen, **ohne** Verhaltens-
-änderung. Am Ende läuft die Trainingssuite dort, die Servingsuite hier, und
-beide sind grün.
+| Kante | heute | nachher |
+|---|---|---|
+| `/train/*`-Proxy | Gateway → `127.0.0.1:8204` | idhefix → asteraix:8204 |
+| Promotion-Gate | Trainer → `127.0.0.1:8200/ocr` | asteraix → idhefix:8200 |
+| **`eval/`** | `eval/run_eval.py:44` → `127.0.0.1:8200/recognize` | asteraix → idhefix:8200 |
+
+Und **eine vierte, die kein Import ist und den Split still überlebt**:
+`manager._gpu_claim()` (`manager.py:399-412`) holt bei jedem vLLM-Start
+`/gpu-claim` vom Trainer, mit 2 s Timeout, den `config.py:112` mit „the trainer
+is on this box" begründet. Nach dem Split vergleicht dieser Wächter den Anspruch
+einer **fremden** Maschine mit der **eigenen** Karte. Das ist kein Feature, das
+fehlt — das ist ein Wächter, der falsche Auskunft gibt. Er gehört in T5 entfernt,
+nicht in T2 umgebogen.
+
+Was **nicht** geteilt werden muss, entgegen der ersten Fassung:
+
+- **`jobs_root` braucht keine Freigabe.** Der Gateway liest es nie: Logs
+  (`train_routes.py:113`) und Kurven (`:123`) laufen über HTTP, und die
+  Held-out-Seite des Gates quert als Multipart-Bytes (`promote.py:99-106`),
+  nicht als Pfad.
+- **`checkpoint_root` und der Arrow-Cache dürfen nicht auf den Share** — sie
+  liegen lokal, *weil* der Share sie zerbrochen hat (`settings.py:43-50`:
+  cross-device rename; `preflight.py:151-175`: 11½ Stunden verloren).
+
+---
+
+## 4. Epics
+
+### T0 — Die Namensverwechslung auflösen
+
+**Zuerst**, weil jedes später geschriebene Dokument den Fehler sonst weiterträgt.
+
+Der Befund macht es einfacher als befürchtet: **keine** der 176 Fundstellen
+meint die neue Box. Alle meinen 130.92.59.240. Ein stumpfes
+`s/asterAIx/idhefix/` ist für **100 %** der heutigen Treffer sachlich richtig;
+`asteraix` wird an Platzhaltern **eingefügt**, nirgends ersetzt.
 
 | Issue | Inhalt |
 |---|---|
-| T1.1 | Repo anlegen, `pyproject.toml`, CI (dieselbe Matrix wie hier), `.env.example` |
-| T1.2 | `src/atr_serving/training/` → `src/atr_training/` verschieben, samt `engines/{kraken,trocr,vlm}_train_svc/` |
-| T1.3 | Die 44 trainingsseitigen Testdateien mitnehmen, `tests/conftest.py` (Artefakt-Cache-Rail) ebenfalls |
-| T1.4 | `deploy/systemd/atr-train.service`, `docs/DEPLOY.md`-Trainingsteil, `.venvs/{kraken,trocr,vlm}-train` |
-| T1.5 | Die trainingsseitigen `scripts/` und `ubelix/` mitnehmen (E4) |
-| T1.6 | `atr_serving.registry`-Abhängigkeit auflösen: `base_models.py` und `overlay.py` (siehe T3) |
+| T0.1 | Ersetzung in beiden Repos, 50 Dateien. Einschliesslich `agentic_historian/bot.py:778` — das ist ein **im Discord sichtbarer** Slash-Command-Text, kein Kommentar |
+| T0.2 | `docs/asteraix-environment.md` beschreibt die **Serving**-Box → `docs/idhefix-environment.md`. Der Name `asteraix` wird damit frei für die neue Box, die noch keine Dokumentation hat |
+| T0.3 | Drei Sätze, die **eine Box für zwei Rollen** behaupten und aufgeteilt werden müssen, nicht ersetzt: `README.md:20`, `docs/EINFUEHRUNG.md:21`, `docs/TRAINING.md:1` |
+| T0.4 | **Messwerte bleiben idhefix.** Jede Trainingszahl im Repo wurde dort gemessen — CER 0,466 Thun, 0,67 samples/s, die Vorfälle vom 14.09. Sie auf `asteraix` umzuschreiben würde den Messbericht fälschen |
+| T0.5 | `~/.ssh/config`: `srv-train` → .240 ist doppelt irreführend. **Nicht blind umbenennen** — `Host ubelix` hängt mit `ProxyJump` daran (`ubelix/status.sh:9`, `docs/UBELIX_PLAN.md:35`). Alias `idhefix` ist angelegt; die Umstellung von `srv-train` braucht denselben Commit wie die UBELIX-Dateien |
+| T0.6 | `docs/TRAINING_PLAN.md:71` behauptet „**No SSH from the dev machine**" — veraltet, es gibt einen funktionierenden Eintrag. Wer es glaubt, plant den Cutover als „kein Fernzugriff" |
 
-**Tests**: die bestehenden 44 Dateien müssen ohne Änderung ihrer Zusicherungen
-durchlaufen. Ein Import von `atr_serving.*` im neuen Repo ist ein Fehler — ein
-Test, der das Paket in `sys.modules` verbietet, hält das fest.
+**Tests**: `test_no_doc_calls_the_serving_box_asteraix` (Grep-Test über beide
+Repos), `test_the_ubelix_proxyjump_alias_still_resolves`.
+
+**Wichtig**: kein systemd-Unit, keine Env-Variable, kein Port und kein Hostname
+enthält einen Boxnamen. T0 kann **nichts** kaputtmachen. Die einzige echte
+Pfadbindung im ganzen Split ist `serving-atr-inference`, viermal fest in
+`deploy/systemd/atr-train.service` (`:14,:15,:18,:23`) und einmal in
+`.env.example:48` — eine **Repo**-Umbenennung, keine Box-Umbenennung.
+
+### T1 — `training-atr-models` existiert und ist grün
+
+| Issue | Inhalt |
+|---|---|
+| T1.1 | Repo, `pyproject.toml`, CI-Matrix wie hier, `.env.example` |
+| T1.2 | `src/atr_serving/training/` → `src/atr_training/`, `engines/{kraken,trocr,vlm}_train_svc/` mit |
+| T1.3 | Die **43** trainingsseitigen Tests plus `tests/conftest.py`. Achtung: conftest ist `autouse` für alle 72 Dateien, betrifft aber nur `TrainerSettings` — das Serving-Repo bleibt **ohne** conftest, und keiner der verbleibenden Tests liest sie |
+| T1.4 | Die **einzige** Code-Kopplung auflösen: `atr_serving.registry` in `overlay.py:26`, `base_models.py:36` und vier Engine-Runnern. Alle vier Grenzgänger-Tests kreuzen über dasselbe Symbol |
+| T1.5 | Neun Skripte mit Import + drei ohne (`make_split.py`, `smoke_trocr.py`, `check_env.sh`) |
+| T1.6 | `ubelix/` — null Importarbeit, aber **14 Dateien** verdrahten `REPO=$HOME/serving-atr-inference` fest (`submit.sh:15` plus 13 sbatch), je mit `PYTHONPATH=$REPO/src:$REPO/engines` |
+| T1.7 | `deploy/systemd/atr-train.service`, `.venvs/{kraken,trocr,vlm}-train`, `scripts/make_venvs.sh`. Dabei die Lücke schliessen: `scripts/check_venvs.sh:52-61` prüft **`trocr-train` nicht**, obwohl `make_venvs.sh:43` es baut |
+
+**Tests**: die 43 bestehenden Dateien laufen unverändert durch.
+`test_the_training_package_never_imports_atr_serving` — ein Import des anderen
+Pakets lässt die Suite scheitern. Das ist die einzige Zusicherung, die
+verhindert, dass die Naht über Monate wieder zuwächst.
 
 ### T2 — Der Proxy überquert das Netz
 
 | Issue | Inhalt |
 |---|---|
-| T2.1 | `train_url` darf ein entfernter Host sein; Timeouts, Retries und ein ehrlicher 504 statt eines hängenden Requests |
-| T2.2 | Authentifizierung zum Trainer (E2) — `X-API-Key` auf allen `/jobs*`-Routen des Trainers, heute ungeschützt, weil Loopback |
-| T2.3 | `SUPPORTED_ENGINES` aus `/health` des Trainers statt aus `training.backends` (E3-B) |
-| T2.4 | `TrainRequest.model_validate` aus dem Proxy entfernen; der Trainer validiert, der Proxy reicht durch (E3-B) |
-| T2.5 | **`/train/gpu` ist heute hybrid** (`train_routes.py:129-172`): es liest lokal `nvidia-smi` und mischt die Jobliste des Trainers dazu. Nach der Trennung ist „lokal" der falsche Rechner. Die Route muss vollständig zum Trainer proxen, der die Karten hat |
-| T2.6 | `/health` des Gateways: `service_urls()` (`config.py:76`) führt den Trainer als Dienst; über Netz braucht das ein eigenes Timeout, damit ein langsamer Trainingsserver nicht die Health-Antwort blockiert |
+| T2.1 | `train_url` darf entfernt sein; Timeouts und ein ehrlicher 504 statt eines hängenden Requests |
+| T2.2 | **Der Trainer hat heute gar keine Authentifizierung** — kein `Depends`, kein Key, keine Middleware; er verlässt sich vollständig auf den Loopback-Bind. Jede neue Kante quert zu einem ungeschützten Endpunkt. `X-API-Key` auf allen Routen + Bind ans VPN-Interface + `ufw`-Quellregel |
+| T2.3 | Engine-Liste aus `/health`. Anmerkung: der Proxy importiert nicht `SUPPORTED_ENGINES`, sondern das rohe `BACKENDS` (`train_routes.py:26`) und baut das Tupel selbst (`:37`). Und `TrainerClient.health()` (`clients.py:302`) existiert, wurde aber **noch nie aufgerufen** — dies ist der Erstgebrauch einer toten Methode, mit 30 s Default-Timeout |
+| T2.4 | `TrainRequest.model_validate` aus dem Proxy. **Zwei verschiedene Dinge wandern**: der 422 (`:90`, pydantic) und ein separater 400 (`:76`, Engine-Zugehörigkeit, feuert davor). Nur letzterer ändert den Status. Der Text des 400 ist zudem **falsch**: er behauptet „A TrOCR backend is planned … but not wired", obwohl TrOCR seit #44 registriert ist |
+| T2.5 | Gemessen: der Trainer-422 ist `{"detail": [...]}`, und `clients.py:280` macht daraus per `str(detail)` einen Python-Repr, der pydantics vollständiges `input`-Echo mitschleppt — inklusive der injizierten kraken-VGSL-Vorgabe. Der Gateway streift das heute bei `:91` ab. Ohne Ersatz wird die Fehlermeldung **unlesbarer**, nicht nur anders |
+| T2.6 | **`/train/gpu` scheitert nach dem Split still, nicht laut.** Die pids des entfernten Jobs (`:161`) werden gegen das **eigene** `/proc` gelaufen (`gpu.py:205-206`). Eine pid-Kollision markiert einen lokalen Fremdprozess als `registered` mit fremder job_id und nimmt ihn aus `unaccounted_mib` — genau der Fehlerfall, für den #414 existiert |
+| T2.7 | Und es gibt **nichts, wohin man proxen könnte**: der Trainer hat kein `/gpu`. Seine `/health` liefert nur `GpuInfo(index, free_mb, total_mb)`. Die ganze Prozess-Zuordnung (`atr_serving/gpu.py`, 241 Zeilen nvidia-smi, `/proc` und systemd-Units) muss **dupliziert** werden — der Serving-Gateway braucht sie weiterhin für sein vLLM-Budget |
 
-**Tests**: `test_train_proxy_routes.py` bleibt, verliert aber seine
-Training-Importe — es baut die Gateway-App gegen einen **gefakten** Trainer,
-nicht gegen den echten. Neu: ein Test, dass ein nicht erreichbarer Trainer 503
-mit Begründung liefert und nicht 500; einer, dass `/train/gpu` die Karten des
-**Trainings**servers meldet.
+**Tests**: `test_a_remote_trainer_that_times_out_answers_504`,
+`test_a_pid_on_the_training_box_is_never_attributed_to_a_local_process`,
+`test_the_engine_list_comes_from_the_trainer_health`,
+`test_a_validation_error_from_the_trainer_stays_readable`.
 
-### T3 — Der Handover wird eine API statt einer Datei
+### T3 — Der Handover
 
-Der teuerste Epic, und der, der die Trennung erst echt macht.
+Hier hat die erste Fassung am meisten danebengelegen. **Ein geteilter Mount
+allein löst gar nichts:**
 
-| Issue | Inhalt |
-|---|---|
-| T3.1 | `POST /admin/register` am Gateway: nimmt `ModelSpec`-Felder plus die Gewichte-Herkunft, schreibt das Overlay **gatewayseitig** |
-| T3.2 | Die drei `_register`-Implementierungen rufen die Route, statt `upsert_entry` auf eine geteilte Datei zu schreiben |
-| T3.3 | Transport der Gewichte (E1): geteilte Freigabe → nur der Pfad wandert; sonst Upload oder Pull über HTTP |
-| T3.4 | Das Promotion-Gate (`promote.py:87`) bleibt HTTP und funktioniert unverändert — aber `set_enabled` (`kraken_train_svc/runner.py:415`) schreibt heute wieder die geteilte Datei. Wird Teil von T3.1 |
-| T3.5 | `scripts/merge_loras.py` entflechten (E4): der Merge gehört auf die Serving-Seite, ausgelöst durch die Registrierung eines Adapters |
-| T3.6 | `app.py:16` (`from atr_serving.training.overlay import …`) fällt weg — das Overlay-Modul wandert ins Serving-Repo, weil nur noch der Gateway es schreibt |
-
-**Tests**: ein Ende-zu-Ende-Test, der einen Trainingslauf mit gefakten Stages
-bis `register` führt, die HTTP-Registrierung gegen eine Gateway-Testinstanz
-laufen lässt und prüft, dass `/models` das Modell **disabled** zeigt und nach
-dem Gate **enabled**. Dazu ein Test, dass eine fehlgeschlagene Registrierung den
-Job scheitern lässt, statt ein Modell zu verlieren.
-
-### T4 — Was nach der Trennung überflüssig ist
-
-Ehrlich zu benennen, weil es heute erst gebaut wurde:
+- `overlay_path` (`settings.py:39`) und `models_overlay` (`config.py:45`) sind
+  **beide `REPO_ROOT`-relativ**, und `REPO_ROOT` kommt aus `__file__` im
+  jeweiligen Checkout. Zwei Checkouts, **zwei Dateien**, keine auf dem Share —
+  egal was gemountet ist.
+- Und selbst eine wirklich geteilte Datei schlösse den Kreis nicht: der Gateway
+  ruft `load_overlay` **genau einmal**, in `create_app` (`app.py:42`). Es gibt
+  keine Reload-Route. Geteilte Datei plus Neustart ist dieselbe Operation wie
+  keine geteilte Datei plus Neustart.
+- `save_overlay` ist zudem die **einzige nicht-atomar** geschriebene
+  Mehrschreiber-Datei des Repos (`overlay.py:82` `write_text`, gegen
+  `os.replace` in `jobstore.py:226` und `staging.rename` in
+  `artefact_cache.py:354`).
 
 | Issue | Inhalt |
 |---|---|
-| T4.1 | `/gpu-claim` (`kraken_train_svc/app.py:374`), `ModelManager._refuse_while_training`, `GpuBusyError`, `/admin/release-gpu` und `gpu_release.py` **entfernen** — sie koordinieren zwei Prozesse um **eine** Karte, und nach der Trennung gibt es die geteilte Karte nicht mehr |
-| T4.2 | `vllm_vram_budget_mb` und die LRU-Verdrängung bleiben, aber gegen eine Karte, die dem Serving allein gehört — die Budgets sind neu zu setzen |
-| T4.3 | Die VRAM-Vorprüfung des Trainers (`preflight.py`) bleibt und wird wichtiger, weil sie die einzige verbleibende Karte-belegt-Prüfung ist |
+| T3.1 | `POST /admin/register` am Gateway: nimmt die `ModelSpec`-Felder, schreibt das Overlay **gatewayseitig**, atomar |
+| T3.2 | Die drei `_register` rufen die Route statt `upsert_entry` (kraken `runner.py:403,459`; trocr `:199`; vlm `:389`). Erst **danach** stimmt der Satz, dass nur noch der Gateway das Overlay schreibt |
+| T3.3 | `set_enabled` nach dem Gate ebenfalls über die Route (`kraken runner.py:459`) |
+| T3.4 | Registry zur Laufzeit neu laden — sonst braucht jedes trainierte Modell einen Gateway-Neustart |
+| T3.5 | `local_path` über den Share. Zwei Fallen: **vLLM kann daraus nie bedienen** (`resolve_model_path` prüft `vllm_merged_dir/<id>` und fällt auf `hf_repo or id` zurück, **nie** `local_path`), und ein nicht auflösbarer Pfad meldet **keine fehlende Datei** — `kraken_loader.resolve_weights` gibt `None` zurück, und `None` heisst „per DOI aus dem Netz holen" |
+| T3.6 | `merge_loras.py` bleibt **serving-seitig** — jeder Pfad darin ist eine Gateway-Einstellung. Aber `peft_blocker` (`:151-168`) ist **fatal** und verweist auf `.venvs/vlm-train`, „which trained it" — ein venv, das künftig auf der anderen Box liegt. Die Serving-Box muss peft ≥ dem Trainer pinnen, und **nichts erzwingt das über zwei Repos** |
+| T3.7 | `.env`: Gateway und Trainer lesen heute **dieselbe Datei** (`atr-gateway.service:16`, `atr-train.service:15`). Der Split macht aus einer Wahrheitsquelle für `trained_root`, Overlay-Pfad und API-Key **zwei**, auf zwei Maschinen, ohne Vertragstest |
 
-Diese Entfernung erst **nach** dem Cutover, nicht davor: solange beide auf
-asterAIx laufen, ist die Sperre das, was einen Lauf vor einer Inferenzanfrage
-schützt.
+**Tests**: `test_a_registration_over_http_lands_in_the_overlay`,
+`test_the_registry_picks_up_a_model_without_a_restart`,
+`test_an_unresolvable_local_path_fails_loudly_instead_of_fetching_a_doi`,
+`test_the_two_env_files_agree_on_trained_root` (Vertragstest über beide Repos).
 
-### T5 — Cutover
+### T4 — `eval/` zieht mit
+
+Der billigste Epic, und der Code stützt ihn: `eval/` hat **null** Serving-Importe.
 
 | Issue | Inhalt |
 |---|---|
-| T5.1 | Parallelbetrieb: `atr-train` auf dem neuen Server hochziehen, Gateway zeigt noch auf `127.0.0.1` |
-| T5.2 | Ein Smoke-Job (`trocr-thun-smoke`) über die neue Kante, alle fünf Stages, Registrierung inklusive |
-| T5.3 | `ATR_TRAIN_URL` umstellen, Gateway neu starten, `/train/jobs` aus dem Bot heraus prüfen |
-| T5.4 | Der alte Trainer auf asterAIx wird gestoppt, nicht gelöscht — die Job-Historie (44 Records) bleibt lesbar, bis sie migriert ist |
-| T5.5 | Job-Historie migrieren oder bewusst abschneiden (Entscheidung) |
+| T4.1 | `eval/` und `textmetrics` ins Trainingsrepo. Danach hat `textmetrics` **keinen** Serving-Konsumenten mehr — die Frage nach einem geteilten Paket entfällt |
+| T4.2 | `eval/` läuft heute mit dem **Gateway-venv** (`eval/README.md:10`); trainingsseitig braucht es `httpx` in einem eigenen venv |
+| T4.3 | Was `eval/` von der Serving-Seite braucht, ist schmaler als gedacht: **eine Route** (`/recognize`) und **ein Schlüssel**. Nicht die Registry, nicht `models.yaml`, nicht `trained_root` — die Modell-ID ist ein opaker String (`run_eval.py:47`) |
+| T4.4 | Zwei stehengebliebene Unwahrheiten in `eval/README.md`: die Begründung „#52 ist offen" (seit 08.08. beantwortet, ohne `eval/`) und „CER/WER liegen in `eval/metrics.py`" (seit `a8c8009` ein Re-Export) |
+| T4.5 | `tests/test_eval.py` und `test_run_eval_corpus_cer.py` ziehen mit — in der ersten Fassung gar nicht aufgeführt |
+
+### T5 — Cutover und Rückbau
+
+| Issue | Inhalt |
+|---|---|
+| T5.1 | Parallelbetrieb: `atr-train` auf asteraix hoch, Gateway zeigt noch auf Loopback |
+| T5.2 | Smoke-Job (`trocr-thun-smoke`) über die neue Kante, alle fünf Stages inklusive Registrierung |
+| T5.3 | `ATR_TRAIN_URL` umstellen, Gateway neu, `/train/jobs` **aus dem Bot heraus** prüfen |
+| T5.4 | Der alte Trainer auf idhefix wird gestoppt, nicht gelöscht. Die 48 Job-Records liegen ohnehin auf dem Share und sind von asteraix aus schon lesbar — **keine Migration nötig** |
+| T5.5 | **Rückbau der GPU-Koordination**: `/gpu-claim`, `/admin/release-gpu`, `gpu_release.py`, `manager._refuse_while_training`, `GpuBusyError`. Sie koordinieren zwei Prozesse um **eine** Karte. `manager._gpu_claim()` ist dabei der wichtigste Posten — er ist kein Import und würde den Split sonst still überleben |
+| T5.6 | Der Artefakt-Cache **folgt den Daten nicht**. Derselbe Share heisst derselbe Ground Truth und derselbe HF-Cache, aber ein **kalter** `artefact_cache_root` — die ~2,5 h und ~41 GB je Auswahl, für die #109 existiert, werden auf der neuen Box einmal erneut bezahlt |
+
+**T5.5 zuletzt.** Solange beide auf einer Karte laufen, ist die Sperre das, was
+einen 24-Stunden-Lauf vor einer Inferenzanfrage schützt.
+
+### T6 — Wofür der Umzug gemacht wird
+
+Kein Migrationsschritt. Erst **nach** T5, damit der Umzug prüfbar bleibt.
+
+| Issue | Inhalt |
+|---|---|
+| T6.1 | `max_concurrent: 1` → der Scheduler teilt **Karten** zu, statt eine vorauszusetzen. Heute pinnen alle fünf Units `CUDA_VISIBLE_DEVICES=1` und `params.device` ist `cuda:0` |
+| T6.2 | VRAM-Vorprüfung **je Karte** statt global (`preflight.py`) |
+| T6.3 | Ein Modell über beide Karten: NVLink mit 4 Links à 14,06 GB/s und P2P macht 92 GB nutzbar. Damit wäre Qwen3-VL-8B ohne 4-bit trainierbar — eine **Messung**, keine Annahme |
+| T6.4 | Hyperparameter neu bestimmen. `batch_size: 1`, `accumulate_grad_batches: 16`, 4-bit QLoRA sind auf 31,6 GB geteilte Karte abgestimmt |
+| T6.5 | Sechs Kommentare in `src/atr_serving/training/` begründen Verhalten mit **idhefix'** Hardware (`preflight.py:4-9`, `settings.py:119`, `hf_source.py:8`, `contracts.py:305`, `runner_base.py:1113`). Nach dem Umzug beschreiben sie eine Maschine, auf der der Code nicht mehr läuft — insbesondere `preflight.py`s Begründung „GPU 1 is shared with the serving engines", die der Split gerade aufhebt |
 
 ---
 
-## 4. Teststrategie
+## 5. Teststrategie
 
-Die Suite zerfällt heute in 44 trainingsseitige, 13 servingseitige und **acht
-übergreifende** Dateien. Die acht sind die eigentliche Arbeit:
+Drei Testarten, die es heute nicht gibt:
 
-| Datei | Warum übergreifend | Danach |
-|---|---|---|
-| `test_train_proxy_routes.py` | baut die Gateway-App, braucht `training.backends`/`contracts` | gegen einen gefakten Trainer, kein Training-Import |
-| `test_train_gpu_inspection.py` | `/train/gpu` mischt lokales `nvidia-smi` mit der Jobliste | wandert mit T2.5 zum Trainingsrepo |
-| `test_manager.py` | fakt `/gpu-claim` | fällt mit T4.1 grösstenteils weg |
-| `test_training_overlay.py` | `registry.ModelSpec` + `training.overlay` | Serving-Repo (Overlay wird gatewayseitig) |
-| `test_training_promote.py` | Gate über HTTP | bleibt trainingsseitig, Gateway gefakt |
-| `test_training_base_models.py` | liest das echte `config/models.yaml` | Trainingsrepo, mit einer Kopie oder über `/models` |
-| `test_train_svc_api.py` | importiert `atr_serving.registry` an einer Stelle | Import auflösen |
-| `test_merge_loras_preflight.py` | Skript spreizt beide Hälften | folgt der Entscheidung aus E4 |
-
-**Drei neue Testarten**, die es heute nicht gibt und die die Trennung braucht:
-
-1. **Kontrakttests an der Naht.** Beide Repos halten dieselbe Beispielsammlung
-   von `/train/*`-Anfragen und -Antworten vor; der Trainer prüft, dass er sie
-   beantwortet, der Gateway, dass er sie erzeugt und versteht. Ohne das ist
-   E3-B (keine geteilten Typen) ein Versprechen ohne Prüfung.
-2. **Ein Isolationstest je Repo**: ein Import des jeweils anderen Pakets lässt
-   die Suite scheitern. Das ist die einzige Zusicherung, die verhindert, dass
-   die Naht über Monate wieder zuwächst.
-3. **Ein Netzwerkfehler-Test je Route**: Trainer nicht erreichbar, Trainer
-   langsam, Trainer antwortet 500. Heute unnötig (Loopback), danach der
-   häufigste Fehlerfall.
+1. **Isolationstest je Repo** — ein Import des anderen Pakets lässt die Suite
+   scheitern. Die einzige Zusicherung gegen erneutes Zuwachsen.
+2. **Kontrakttests an der Naht** — beide Repos halten dieselbe Sammlung von
+   `/train/*`-Anfragen und -Antworten vor. Ohne sie ist E3 ein Versprechen ohne
+   Prüfung. Besonders: `TrainEngine` (`contracts.py:103`) und die Engine-Liste
+   des Gateways sind heute **von Hand** einig, ohne Test.
+3. **Netzwerkfehler-Tests je Route** — Trainer weg, langsam, 500. Heute
+   unnötig, danach der häufigste Fall.
 
 ---
 
-## 5. Reihenfolge
+## 6. Reihenfolge
 
 ```
-E1–E4 entscheiden
-   └─ T1 (Repo, grün, noch ohne Netz)
-        └─ T2 (Proxy über Netz)   ──┐
-        └─ T3 (Handover als API)  ──┴─ parallel möglich
-             └─ T5 (Cutover)
-                  └─ T4 (Rückbau der GPU-Koordination)
+T0 (Namen)  →  T1 (Repo grün)  →  T2 (Proxy)  ┐
+                                 T3 (Handover) ┼→  T5 (Cutover)  →  T5.5 Rückbau  →  T6 (Ausbau)
+                                 T4 (eval/)    ┘
 ```
-
-T4 **zuletzt**. Solange beide auf einer Karte laufen, ist die heute gebaute
-Sperre das, was einen 24-Stunden-Lauf vor einer Inferenzanfrage schützt.
 
 ---
 
-## 6. Was dieser Plan nicht behandelt
+## 7. Offen
 
-- **Wie viele GPUs der neue Server hat.** Die Hyperparameter (`batch_size: 1`,
-  `accumulate_grad_batches: 16`, `max_seq_len: 4096`) sind auf eine A40 mit
-  46 GB abgestimmt, von denen heute 14,4 GB an Serving-Diensten hängen. Auf
-  einer Karte, die dem Training allein gehört, sind sie neu zu bestimmen — das
-  ist eine eigene Messung, kein Migrationsschritt.
-- **UBELIX.** `ubelix/submit_job.py` und `fanout.py` hängen an `jobs_root` und
-  wandern mit T1.5, aber die Frage, ob der neue Server UBELIX ersetzt oder
-  ergänzt, ist offen.
-- **Die Datenlage.** #98, #125 und #135 sind Korrekturen an dem, was trainiert
-  wird, nicht daran, wo. Sie laufen unabhängig weiter.
+- **Zwei Hosts im selben HF-Cache.** Heute schreiben bereits zwei *Projekte*
+  hinein (dieses und `lassberg/vlm_training`); zwei *Maschinen* ist ungeprüft.
+  Das dokumentierte CIFS-Problem ist Dedup, ausdrücklich „harmless but not
+  optimal" — nicht Nebenläufigkeit. Der Code hält weder Lock-Disziplin noch eine
+  Beobachtung dazu fest: **unbeantwortet, nicht schlecht beantwortet.**
+- **Ob ein laufender Job den Cutover übersteht.** T5.3 stellt `ATR_TRAIN_URL`
+  um; was mit einem Job passiert, der in dem Moment auf idhefix trainiert, ist
+  nicht entschieden.
+- **UBELIX**: zieht mit T1.6 um, aber ob asteraix es ersetzt oder ergänzt, ist
+  offen.
