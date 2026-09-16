@@ -1,5 +1,10 @@
 # Training kraken models on asterAIx
 
+> **Retired on this box (16.09.2026).** Training runs on asteraix (130.92.59.242) in
+> [training-atr-models](https://github.com/thodel/training-atr-models); this repo's
+> in-repo trainer and its `atr-train` unit are no longer installed or started here
+> (#137, #139). What follows describes the retired setup and is kept as history.
+
 Operator runbook for the training subsystem. Full context — architecture,
 design decisions, measured numbers, open issues — lives in
 [`TRAINING_PLAN.md`](TRAINING_PLAN.md). Read that first; this document is the

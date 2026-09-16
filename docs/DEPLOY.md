@@ -279,6 +279,12 @@ its existing `KrakenHTTPClient` uses the legacy `/ocr` alias unchanged.
 
 ## 8. Training service (optional, #34)
 
+> **Retired on this box (16.09.2026).** Training runs on asteraix (130.92.59.242) in
+> [training-atr-models](https://github.com/thodel/training-atr-models); this repo's
+> in-repo trainer and its `atr-train` unit are no longer installed or started here
+> (#137, #139). What follows describes the retired setup and is kept as history.
+
+
 `scripts/make_venvs.sh` also builds `.venvs/kraken-train` (kraken **pinned to 7.0.2**
 plus the HuggingFace data stack) and `install_user_units.sh` installs
 `atr-train.service` on `:8204`. It supervises training only — each job runs as a

@@ -16,7 +16,16 @@ START=1
 
 # Engines + gateway. vLLM is NOT a unit — the ModelManager spawns it as a
 # subprocess (see docs/asteraix-environment.md / IMPLEMENTATION_PLAN.md §8).
-UNITS=(atr-kraken atr-trocr atr-party atr-train atr-gateway)
+#
+# atr-train is NOT here any more. Training moved to asteraix on 16.09.2026
+# (training-atr-models, #137/#139). The in-repo trainer has none of that
+# repo's job-ownership rules (training-atr-models#15): started again on this box
+# against the shared job store, it would mark asteraix's live runs failed on its
+# first tick (their pids are not alive here), start asteraix's queued jobs on
+# this card, and its startup cleanup would delete registrations in progress on
+# the shared trained/. A routine re-run of this script used to do exactly that.
+UNITS=(atr-kraken atr-trocr atr-party atr-gateway)
+RETIRED=(atr-train)
 
 mkdir -p "${UNIT_DST}"
 for u in "${UNITS[@]}"; do
@@ -25,6 +34,16 @@ for u in "${UNITS[@]}"; do
 done
 
 systemctl --user daemon-reload
+
+# Say so, loudly, if a retired unit is still enabled or running here. Not
+# disabled automatically: that is an operator's decision on a live box.
+for u in "${RETIRED[@]}"; do
+  if systemctl --user is-enabled "${u}.service" >/dev/null 2>&1 \
+     || systemctl --user is-active "${u}.service" >/dev/null 2>&1; then
+    echo "WARNING: ${u}.service is retired (training runs on asteraix) but is still"
+    echo "         enabled or running here. Stop it:  systemctl --user disable --now ${u}.service"
+  fi
+done
 
 if ! loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
   echo "WARNING: linger is OFF — user services stop on logout."
@@ -37,7 +56,7 @@ done
 
 if [ "${START}" -eq 1 ]; then
   # Start engines first, gateway last.
-  for u in atr-kraken atr-trocr atr-party atr-train atr-gateway; do
+  for u in atr-kraken atr-trocr atr-party atr-gateway; do
     systemctl --user start "${u}.service" || echo "  (start failed: ${u} — check the venv exists)"
   done
 fi

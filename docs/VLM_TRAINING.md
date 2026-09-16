@@ -1,5 +1,11 @@
 # VLM training — QLoRA fine-tuning on the server
 
+> **Retired on this box (16.09.2026).** Training runs on asteraix (130.92.59.242) in
+> [training-atr-models](https://github.com/thodel/training-atr-models); this repo's
+> in-repo trainer and its `atr-train` unit are no longer installed or started here
+> (#137, #139). What follows describes the retired setup and is kept as history.
+
+
 The second training backend. It reuses the kraken subsystem
 (`docs/TRAINING_PLAN.md`) wholesale — same job envelope, same store, same API,
 same resource guards, same `prepare` stage — and swaps only what a VLM does
