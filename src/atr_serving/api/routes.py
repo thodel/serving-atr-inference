@@ -98,6 +98,25 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
     )
 
 
+@router.post("/admin/release-gpu", tags=["meta"],
+             dependencies=[Depends(require_api_key)])
+async def release_gpu(request: Request) -> dict:
+    """Unload the evictable vLLM models, so a training run can have the card.
+
+    Called by the trainer at the moment a job moves from compile into train
+    (#129). Until then the gateway serves normally on an idle GPU — prepare and
+    compile are disk and CPU, and v5 left the card at 0 % for 74 minutes — and
+    this is what closes the window that killed v4, whose prepare-time model was
+    still resident when training began.
+
+    Pinned models are kept and named. An in-flight request against a dropped
+    model dies with it; that is one recognition request against a run that would
+    otherwise fail hours later.
+    """
+    dropped, kept = await run_in_threadpool(_manager(request).release_lazy)
+    return {"dropped": dropped, "kept": kept}
+
+
 @router.get("/health", response_model=HealthResponse, tags=["meta"])
 async def health(request: Request) -> HealthResponse:
     registry = _registry(request)

@@ -179,3 +179,31 @@ def test_a_launch_that_really_failed_is_still_502(client: TestClient):
     r = _post_recognize(client, "qwen3vl-8b-hebrew")
     assert r.status_code == 502
     assert "exited" in r.json()["detail"]
+
+
+# ── giving the card back (#129) ──────────────────────────────────────────────
+
+class ReleasingManager(FakeManager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.released = 0
+
+    def release_lazy(self):
+        self.released += 1
+        return ["qwen3vl-8b-hebrew"], ["lightonocr-catmus-caroline"]
+
+
+def test_release_gpu_reports_what_it_let_go_of(client: TestClient):
+    client.app.state.model_manager = ReleasingManager()
+    r = client.post("/admin/release-gpu", headers={"X-API-Key": KEY})
+    assert r.status_code == 200
+    assert r.json() == {"dropped": ["qwen3vl-8b-hebrew"],
+                        "kept": ["lightonocr-catmus-caroline"]}
+    assert client.app.state.model_manager.released == 1
+
+
+def test_release_gpu_needs_the_key(client: TestClient):
+    """It unloads models other people are using; it is not an open endpoint."""
+    client.app.state.model_manager = ReleasingManager()
+    assert client.post("/admin/release-gpu").status_code in (401, 403)
+    assert client.app.state.model_manager.released == 0

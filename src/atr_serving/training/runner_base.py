@@ -45,6 +45,7 @@ from atr_serving.training.contracts import (
 )
 from atr_serving.training.convergence import check_convergence
 from atr_serving.training.heldout import load_heldout
+from atr_serving.training.gpu_release import release_gpu
 from atr_serving.training.hf_source import (data_files_for, granularity_files,
                                             keep_projects_for, only_projects)
 from atr_serving.training.jobstore import JobStore
@@ -850,6 +851,20 @@ class BasePipeline(ABC):
             logger.warning("artefact cache: not stored ({})", exc)
             return train_artifact, val_artifact
 
+    def _release_gpu(self) -> None:
+        """Ask the gateway to unload its evictable models before training.
+
+        Never fatal. A gateway that cannot be reached is logged and the run goes
+        on: the VRAM preflight is what actually refuses to start a job onto an
+        occupied card, and it has done so correctly before (15.09., "GPU 1 has
+        12660 MB free, need 24000 MB").
+        """
+        settings = self.settings
+        url = getattr(settings, "gateway_url", "")
+        if not url:
+            return
+        release_gpu(url, getattr(settings, "gateway_api_key", ""))
+
     def _skip_stage(self, job: TrainJob, name: JobStage, why: str | None) -> None:
         """Record a stage that did not have to run, rather than one that did.
 
@@ -988,6 +1003,10 @@ class BasePipeline(ABC):
         one otherwise; the self-edge in TRANSITIONS exists for exactly this.
         """
         self.store.advance(job, "training")
+        # Order matters: advance first, so /gpu-claim already reports `holding`
+        # and the gateway refuses new launches, and only then ask it to let go of
+        # what is there. The other way round leaves a gap a request can land in.
+        self._release_gpu()
         with self._stage(job, "train") as rec:
             model = self._train(job, train_artifact, val_artifact, rec)
 

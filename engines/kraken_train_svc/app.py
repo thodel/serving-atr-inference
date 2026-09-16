@@ -342,10 +342,17 @@ def _claim_from(jobs) -> dict:
     refused is a launch.
     """
     claims = [
-        {"id": j.id, "status": j.status, "stage": j.stage}
+        {"id": j.id, "status": j.status, "stage": j.stage,
+         # On the card *now*, as opposed to spoken for. prepare and compile are
+         # disk and CPU — v5 left the GPU at 0 % for 74 minutes — so the gateway
+         # may serve through them; what it may not do is still hold a model when
+         # `train` begins, and the trainer asks it to let go at that boundary
+         # (atr_serving.training.gpu_release).
+         "holding": j.stage is None or j.stage in GPU_STAGES}
         for j in jobs if j.status in RUNNING_STATUSES
     ]
-    return {"claimed": bool(claims), "jobs": claims}
+    return {"claimed": bool(claims), "jobs": claims,
+            "holding": any(c["holding"] for c in claims)}
 
 
 def refresh_gpu_claim(jobs) -> dict:

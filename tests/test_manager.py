@@ -122,9 +122,10 @@ def test_a_training_run_keeps_the_card(monkeypatch):
     """The incident: an inference request during a 33-hour run would OOM it."""
     from atr_serving.manager import GpuBusyError
 
-    _claim(monkeypatch, {"gpu": 1, "claimed": True,
+    _claim(monkeypatch, {"gpu": 1, "claimed": True, "holding": True,
                          "jobs": [{"id": "20260915T053651Z-qwen3vl-german-pages-v4",
-                                   "status": "training", "stage": "train"}]})
+                                   "status": "training", "stage": "train",
+                                   "holding": True}]})
     _free_vram(monkeypatch, 40000)          # plenty free between two peaks
     m, launcher = make_manager()
     with pytest.raises(GpuBusyError, match="qwen3vl-german-pages-v4"):
@@ -140,12 +141,13 @@ def test_a_busy_card_is_not_a_broken_one(monkeypatch):
 
 def test_models_already_resident_keep_serving_while_a_run_holds_the_card(monkeypatch):
     """Refusing a *launch* must not take down what is already up."""
-    _claim(monkeypatch, {"claimed": False, "jobs": []})
+    _claim(monkeypatch, {"claimed": False, "holding": False, "jobs": []})
     _free_vram(monkeypatch, 40000)
     m, _ = make_manager()
     port = m.ensure_resident(HEBREW)
 
-    _claim(monkeypatch, {"claimed": True, "jobs": [{"id": "v4", "stage": "train"}]})
+    _claim(monkeypatch, {"claimed": True, "holding": True,
+                         "jobs": [{"id": "v4", "stage": "train", "holding": True}]})
     assert m.ensure_resident(HEBREW) == port        # no launch, no refusal
 
 
@@ -170,7 +172,7 @@ def test_a_full_card_is_refused_even_with_no_training(monkeypatch):
     """The other half: launching into a card that cannot hold the model."""
     from atr_serving.manager import GpuBusyError
 
-    _claim(monkeypatch, {"claimed": False, "jobs": []})
+    _claim(monkeypatch, {"claimed": False, "holding": False, "jobs": []})
     _free_vram(monkeypatch, 4000)
     m, launcher = make_manager()
     with pytest.raises(GpuBusyError, match="4000 MB free"):
@@ -203,7 +205,7 @@ def test_an_unreachable_trainer_still_respects_a_full_card(monkeypatch):
 
 def test_a_card_nvidia_smi_cannot_read_is_left_to_the_launch(monkeypatch):
     """No claim and no reading is not evidence of a problem."""
-    _claim(monkeypatch, {"claimed": False, "jobs": []})
+    _claim(monkeypatch, {"claimed": False, "holding": False, "jobs": []})
     _free_vram(monkeypatch, None)
     m, launcher = make_manager()
     assert m.ensure_resident(HEBREW) == 8210
@@ -244,8 +246,42 @@ def test_a_definite_no_claim_only_needs_the_model_to_fit(monkeypatch):
     Another vLLM model resident is not a reason to refuse — that is what the LRU
     budget is for.
     """
-    _claim(monkeypatch, {"claimed": False, "jobs": []})
+    _claim(monkeypatch, {"claimed": False, "holding": False, "jobs": []})
     _free_vram(monkeypatch, 7636)
     m, launcher = make_manager()
     assert m.ensure_resident(LIGHTON) == 8210
     assert launcher.starts == [(LIGHTON, 8210, 1)]
+
+
+def test_release_lazy_drops_the_evictable_and_keeps_the_pinned(monkeypatch):
+    """What the trainer asks for at the stage boundary (#129).
+
+    The window this closes: v4's prepare-time vLLM was still holding 16.5 GB
+    when its train stage began, and the run died three minutes later.
+    """
+    _claim(monkeypatch, {"claimed": False, "holding": False, "jobs": []})
+    _free_vram(monkeypatch, 44000)
+    m, launcher = make_manager(budget=40000)
+    m.ensure_resident(HEBREW)        # lazy
+    m.ensure_resident(LIGHTON)       # pinned
+
+    dropped, kept = m.release_lazy()
+    assert dropped == [HEBREW] and kept == [LIGHTON]
+    assert m.resident_model_ids() == [LIGHTON]
+    assert launcher.handles[HEBREW].terminated
+    assert not launcher.handles[LIGHTON].terminated
+
+
+def test_release_lazy_on_an_empty_gateway_is_not_an_error(monkeypatch):
+    m, _ = make_manager()
+    assert m.release_lazy() == ([], [])
+
+
+def test_a_released_port_can_be_reused(monkeypatch):
+    """_drop returns the port to the pool; a later launch must get one."""
+    _claim(monkeypatch, {"claimed": False, "holding": False, "jobs": []})
+    _free_vram(monkeypatch, 44000)
+    m, _ = make_manager()
+    first = m.ensure_resident(HEBREW)
+    m.release_lazy()
+    assert m.ensure_resident(HEBREW) == first

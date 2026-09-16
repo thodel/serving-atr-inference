@@ -325,12 +325,19 @@ class ModelManager:
 
         Two questions, in order of how much they know:
 
-        1. **Does a job claim the card?** The trainer answers, and its answer is
-           definite. It is asked about the claim rather than about free memory,
-           because VRAM dips between peaks and a dip is not room — and it claims
-           from its first stage, not from the one that loads the model, because a
-           model launched during a job's prepare is still resident when its train
-           begins. That is how v4 died on 15.09.
+        1. **Is a job on the card?** The trainer answers, and its answer is
+           definite. It is asked about that rather than about free memory,
+           because VRAM dips between peaks and a dip is not room.
+
+           Note ``holding``, not ``claimed``: a job in ``prepare`` or ``compile``
+           is running but the card is idle — v5 left it at 0 % for 74 minutes —
+           and refusing every launch through that was an hour of inference given
+           away per run. What made refusing look necessary is that a model
+           launched during prepare was still resident when train began, which is
+           how v4 died on 15.09. That is now handled where it belongs: the
+           trainer asks the gateway to let go at the stage boundary
+           (:mod:`atr_serving.training.gpu_release`), after advancing to
+           ``training`` so nothing new can land in the gap.
         2. **Is there physically space?** Asked when the first question cannot be
            answered, and asked anyway when it can be answered with "no claim" —
            launching into a card that is full is what produced the incidents this
@@ -346,7 +353,7 @@ class ModelManager:
         no longer allowed to do is guess on a busy one.
         """
         claim = self._gpu_claim()
-        if claim is not None and claim.get("claimed"):
+        if claim is not None and claim.get("holding"):
             jobs = ", ".join(
                 f"{j.get('id')} ({j.get('stage') or 'stage unknown'})"
                 for j in claim.get("jobs", [])
@@ -403,6 +410,29 @@ class ModelManager:
                 url, exc, self.settings.vllm_gpu,
             )
             return None
+
+    def release_lazy(self) -> tuple[list[str], list[str]]:
+        """Drop every evictable resident. ``(dropped, kept)``.
+
+        Called by the trainer at the moment a run moves onto the card. Pinned
+        models are **kept** — that is what pinning means — and named in the
+        result rather than counted, because if the run then fails to fit around
+        one, the log has to say which.
+
+        An in-flight request against a dropped model dies with it. That is the
+        trade being made: one recognition request against a run that would
+        otherwise OOM hours later.
+        """
+        dropped, kept = [], []
+        for model_id, resident in list(self._resident.items()):
+            if resident.spec.residency == "pinned":
+                kept.append(model_id)
+                continue
+            self._drop(model_id)
+            dropped.append(model_id)
+        logger.info("released GPU {}: dropped {}, kept pinned {}",
+                    self.settings.vllm_gpu, dropped or "nothing", kept or "nothing")
+        return dropped, kept
 
     def _used_mb(self) -> int:
         return sum(r.spec.vram_mb for r in self._resident.values())

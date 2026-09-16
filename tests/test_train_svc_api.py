@@ -749,7 +749,9 @@ def test_training_claims_the_card(client):
     _set_stage(client, job_id, "training", "train")
     body = client.get("/gpu-claim").json()
     assert body["claimed"] is True
-    assert body["jobs"] == [{"id": job_id, "status": "training", "stage": "train"}]
+    assert body["jobs"] == [{"id": job_id, "status": "training", "stage": "train",
+                             "holding": True}]
+    assert body["holding"] is True
 
 
 def test_testing_claims_the_card_too(client):
@@ -757,6 +759,22 @@ def test_testing_claims_the_card_too(client):
     job_id = client.post("/jobs", json=BODY).json()["job_id"]
     _set_stage(client, job_id, "testing", "test")
     assert client.get("/gpu-claim").json()["claimed"] is True
+
+
+def test_a_cpu_stage_claims_the_card_without_holding_it(client):
+    """Both halves of the answer, and they are not the same question.
+
+    `claimed` says a run owns this box; `holding` says it is on the card right
+    now. prepare and compile are disk and CPU — v5 left the GPU at 0 % for 74
+    minutes — so the gateway keeps serving, and the trainer asks it to let go
+    when train begins.
+    """
+    job_id = client.post("/jobs", json=BODY).json()["job_id"]
+    _set_stage(client, job_id, "compiling", "compile")
+    body = client.get("/gpu-claim").json()
+    assert body["claimed"] is True
+    assert body["holding"] is False
+    assert body["jobs"][0]["holding"] is False
 
 
 def test_preparing_claims_the_card_too(client):
@@ -772,10 +790,12 @@ def test_preparing_claims_the_card_too(client):
     assert client.get("/gpu-claim").json()["claimed"] is True
 
 
-def test_compiling_claims_the_card_too(client):
+def test_a_running_job_with_no_stage_is_treated_as_holding(client):
+    """Guessing "not on the card" from a silent record is the costly guess."""
     job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    _set_stage(client, job_id, "compiling", "compile")
-    assert client.get("/gpu-claim").json()["claimed"] is True
+    _set_stage(client, job_id, "training", None)
+    body = client.get("/gpu-claim").json()
+    assert body["claimed"] is True and body["holding"] is True
 
 
 def test_a_queued_job_does_not_claim_the_card(client):
