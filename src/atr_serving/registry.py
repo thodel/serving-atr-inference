@@ -29,6 +29,12 @@ class ModelSpec(BaseModel):
     # flips it after one successful recognition, so /models never advertises a
     # model the host cannot actually run (cf. #30/#31).
     enabled: bool = True
+    # Why this host cannot run it, when the answer is known and specific. Absent
+    # means the ordinary case — registered, not yet proven — which is what a
+    # freshly trained model looks like before the promotion gate flips it.
+    # Present, it is what a caller gets in the 404 instead of "see the registry
+    # entry for why", which is a YAML file on a box they may not have (#132).
+    disabled_reason: str | None = None
     base_model: str | None = None
     task: Literal["ocr", "htr"] = "ocr"
     level: Literal["page", "line"] = "page"

@@ -189,11 +189,15 @@ def _resolve_spec_strict(request: Request, model: str) -> tuple[str, ModelSpec |
         # beats launching an engine that will fail: the caller gets a 404 it can
         # act on instead of a 502 it has to interpret, and a batch runner can
         # abandon the model on its first page rather than on its five hundredth.
+        why = spec.disabled_reason or (
+            "no reason is recorded, which means the ordinary one: it is registered "
+            "and has not yet been proven to run here"
+        )
         raise HTTPException(
             status_code=404,
             detail=(f"model {model!r} is registered but not servable on this host "
-                    f"(enabled: false in the registry). See the registry entry for "
-                    f"why, and GET /models for what this host can run."),
+                    f"(enabled: false in the registry): {why} "
+                    f"GET /models lists what this host can run."),
         )
     if spec is not None:
         return spec.engine, spec

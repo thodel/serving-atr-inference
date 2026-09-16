@@ -111,6 +111,12 @@ models:
     # box has 565. Trained on UBELIX, not here. `enabled: false` records that —
     # see ModelSpec.enabled: registered, not yet proven servable.
     enabled: false
+    disabled_reason: >-
+      transformers 4.57.6 (both venvs on this box) does not recognise model type
+      `qwen3_5`, so the LoRA cannot be merged; and vLLM 0.11.0 does not list
+      Qwen3_5ForConditionalGeneration, while a vLLM that does needs driver >= 580
+      against this box's 565.57.01. Re-checked 2026-09-16, unchanged. Details and
+      the conditions for re-enabling: issue #132.
     hf_repo: dh-unibe/qwen3.5-4b-german-xix-v1
     base_model: Qwen/Qwen3.5-4B
     task: htr
@@ -137,6 +143,12 @@ models:
     # box has 565. Trained on UBELIX, not here. `enabled: false` records that —
     # see ModelSpec.enabled: registered, not yet proven servable.
     enabled: false
+    disabled_reason: >-
+      transformers 4.57.6 (both venvs on this box) does not recognise model type
+      `qwen3_5`, so the LoRA cannot be merged; and vLLM 0.11.0 does not list
+      Qwen3_5ForConditionalGeneration, while a vLLM that does needs driver >= 580
+      against this box's 565.57.01. Re-checked 2026-09-16, unchanged. Details and
+      the conditions for re-enabling: issue #132.
     hf_repo: dh-unibe/qwen3.5-2b-german-xix-v1
     base_model: Qwen/Qwen3.5-2B
     task: htr

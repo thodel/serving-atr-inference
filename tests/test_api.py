@@ -90,3 +90,60 @@ def test_a_disabled_model_is_refused_with_its_reason(client: TestClient):
         assert "not servable on this host" in resp.json()["detail"]
     finally:
         reg._by_id.pop("ghost")
+
+
+def test_the_refusal_carries_the_recorded_reason(client: TestClient):
+    """"See the registry entry for why" points at a YAML file on a box the caller
+    may not have. A reason the registry knows belongs in the answer (#132)."""
+    from atr_serving.registry import ModelSpec
+
+    reg = client.app.state.registry
+    reg._by_id["ghost"] = ModelSpec(
+        id="ghost", engine="vllm", hf_repo="x/y", base_model="b", enabled=False,
+        disabled_reason="vLLM 0.11.0 does not list Qwen3_5ForConditionalGeneration.",
+    )
+    try:
+        resp = client.post(
+            "/recognize",
+            headers={"X-API-Key": "test-key"},
+            files={"image": ("p.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+            data={"model": "ghost"},
+        )
+        assert resp.status_code == 404
+        assert "Qwen3_5ForConditionalGeneration" in resp.json()["detail"]
+    finally:
+        reg._by_id.pop("ghost")
+
+
+def test_without_a_recorded_reason_the_ordinary_one_is_stated(client: TestClient):
+    """A freshly trained model is disabled with no reason at all — that is the
+    promotion gate, not a defect, and the answer should say so rather than send
+    the caller looking for an explanation nobody wrote."""
+    from atr_serving.registry import ModelSpec
+
+    reg = client.app.state.registry
+    reg._by_id["ghost"] = ModelSpec(id="ghost", engine="vllm", hf_repo="x/y",
+                                    base_model="b", enabled=False)
+    try:
+        resp = client.post(
+            "/recognize",
+            headers={"X-API-Key": "test-key"},
+            files={"image": ("p.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+            data={"model": "ghost"},
+        )
+        assert "not yet been proven to run here" in resp.json()["detail"]
+    finally:
+        reg._by_id.pop("ghost")
+
+
+def test_every_disabled_entry_in_the_shipped_registry_says_why(client: TestClient):
+    """A hand-written `enabled: false` is a decision somebody made and can explain;
+    only the promotion gate's own entries are allowed to be silent, and those live
+    in the overlay, not in config/models.yaml."""
+    from pathlib import Path
+
+    from atr_serving.registry import load_registry
+
+    shipped = load_registry(Path(__file__).resolve().parents[1] / "config" / "models.yaml")
+    missing = [m.id for m in shipped.all() if not m.enabled and not m.disabled_reason]
+    assert not missing, f"disabled without a reason: {missing}"
