@@ -56,6 +56,40 @@ def _png_bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+def generation_budget(spec, settings) -> int:
+    """How many tokens this model may generate for one call (#131).
+
+    Three sources, most specific first: the model's own ``max_new_tokens``, the
+    default for its level, and — always — the ceiling of what the served context
+    can hold. The global setting was the only one of the three for a long time,
+    at 512: ample for a line crop, and short enough for a page that
+    ``qwen3vl-german-xix-v1`` and ``qwen3vl-8b-hebrew`` both produced readings
+    that stopped mid-sentence and returned ``200``.
+
+    The clamp is not decoration. ``vllm_max_model_len`` is 16384 and has to hold
+    the prompt and, at page level, the image — which is most of it. A request for
+    more output than the context has room for does not produce a long
+    transcription, it produces an error at generation time, which is a worse
+    failure than the truncation this is fixing.
+    """
+    wanted = spec.max_new_tokens or (
+        settings.vllm_max_new_tokens_page if spec.level == "page"
+        else settings.vllm_max_new_tokens
+    )
+    limit = settings.vllm_max_model_len
+    if not limit:
+        return wanted
+    room = max(1, limit - settings.vllm_prompt_reserve_tokens)
+    if wanted > room:
+        logger.warning(
+            "{}: {} generation tokens do not fit a {}-token context with {} "
+            "reserved for the prompt and image — capped at {}",
+            spec.id, wanted, limit, settings.vllm_prompt_reserve_tokens, room,
+        )
+        return room
+    return wanted
+
+
 async def recognize_page_vllm(image, content_type, spec, vllm_client, max_tokens) -> RecognitionResult:
     """Page-level VLM: send the whole image in one chat call.
 
@@ -72,8 +106,10 @@ async def recognize_page_vllm(image, content_type, spec, vllm_client, max_tokens
     truncated = finish_reason == "length"
     if truncated:
         logger.warning(
-            "{}: reading hit the {}-token ceiling and was cut off — raise "
-            "ATR_VLLM_MAX_NEW_TOKENS", spec.id, max_tokens,
+            "{}: reading hit the {}-token ceiling and was cut off — raise this "
+            "model's max_new_tokens in the registry, or "
+            "ATR_VLLM_MAX_NEW_TOKENS_PAGE for every page model (#131)",
+            spec.id, max_tokens,
         )
     return RecognitionResult(
         model=spec.id, engine="vllm", text=text, lines=[], truncated=truncated,

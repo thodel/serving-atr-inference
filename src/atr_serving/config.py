@@ -117,7 +117,22 @@ class Settings(BaseSettings):
     #: (agentic_historian#404). Bounded rather than unbounded — one GPU serves these,
     #: and flooding it trades latency for queueing plus a memory risk.
     line_concurrency: int = 6
+    #: Generation ceiling for a **line** crop. Ample there, and short for a page —
+    #: which is why it is no longer the answer for both (#131). A page-level model
+    #: gets ``vllm_max_new_tokens_page`` unless its registry entry declares its own
+    #: ``max_new_tokens``.
     vllm_max_new_tokens: int = 512
+    #: Generation ceiling for a **page**. A dense page of nineteenth-century German
+    #: runs well past 512 tokens, and hitting the ceiling is a normal ``200`` whose
+    #: transcription stops mid-sentence — visible since #123, but only to someone
+    #: who looks. asterAIx had 4096 set by hand in `.env`; every other deployment
+    #: and every fresh checkout got 512. It is a fallback: a model that knows its
+    #: own length says so in the registry.
+    vllm_max_new_tokens_page: int = 4096
+    #: Kept free of generated tokens inside ``vllm_max_model_len`` for the prompt
+    #: and, at page level, the image — which is most of it. A ceiling that leaves
+    #: no room for the input is not a ceiling, it is a failed request.
+    vllm_prompt_reserve_tokens: int = 4096
     # The Qwen3-VL / LightOnOCR models are LoRA adapters whose adaptation includes
     # the vision tower, which vLLM can't serve as a runtime LoRA. scripts/merge_loras.py
     # bakes each adapter into its base here; the launcher serves the merged dir if present.

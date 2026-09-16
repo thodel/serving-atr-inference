@@ -30,26 +30,32 @@ properties of that registration are load-bearing:
   model cards put it plainly — "serving it with different wording is a silent
   distribution shift". Do not reword it to match another model's prompt.
 
-### Before serving them page-level: raise the token ceiling
+### The token ceiling (handled since #131, worth knowing)
 
-`ATR_VLLM_MAX_NEW_TOKENS` defaults to **512**. That is ample for a line and not
-for a page. When generation reaches the ceiling, vLLM stops and returns what it
-has: the response is a normal `200`, the text ends mid-sentence, and **nothing in
-the result says it was cut off** — the reading simply looks like a model that gave
-up halfway.
+A page-level model now gets **`ATR_VLLM_MAX_NEW_TOKENS_PAGE`** (4096), not the
+line ceiling of `ATR_VLLM_MAX_NEW_TOKENS` (512). Until 2026-09-16 both took the
+same setting, 512 was the default, and serving these page-level out of a fresh
+checkout produced a corpus of quietly truncated transcriptions — asterAIx had
+4096 set by hand in `.env`, and nowhere else did.
 
-A dense page of nineteenth-century German runs well past 512 tokens, so serving
-these page-level on the default is a corpus of quietly truncated transcriptions.
-Set it before the first real run:
+When generation reaches the ceiling vLLM stops and returns what it has, as a
+normal `200`. Since #123 the result carries `truncated: true`, so it is visible —
+to someone who looks. The reading itself still just ends mid-sentence.
 
-```ini
-# ~/Repo/serving-atr-inference/.env
-ATR_VLLM_MAX_NEW_TOKENS=4096
+A model with a length of its own says so in its registry entry:
+
+```yaml
+    max_new_tokens: 6000    # a page of this hand runs long
 ```
 
+which wins over both settings. All three are bounded by
+`ATR_VLLM_MAX_MODEL_LEN` (16384), which has to hold the prompt and the image as
+well: a request for more output than the context can fit is an error at
+generation time, not a longer reading. `generation_budget` caps it and logs that
+it did.
+
 4096 is a ceiling, not a cost: generation stops at the end of the text, so pages
-that need less do not pay for it. Keep it below `ATR_VLLM_MAX_MODEL_LEN` (16384),
-which has to hold the image tokens as well.
+that need less do not pay for it.
 
 Verify on a real page rather than assuming — a transcription that ends mid-word
 is the symptom, and the fix is a larger ceiling, not a better prompt.

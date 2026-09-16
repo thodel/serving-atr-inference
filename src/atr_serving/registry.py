@@ -42,6 +42,11 @@ class ModelSpec(BaseModel):
     scripts: list[str] = Field(default_factory=list)
     centuries: list[int] = Field(default_factory=list)
     vram_mb: int = 0
+    #: Tokens this model may generate per call. None = the level's default from
+    #: settings. Declared per model because a page of Hebrew and a page of Kurrent
+    #: are not the same length, and because a global that suits one of them
+    #: silently truncates the other (#131).
+    max_new_tokens: int | None = None
     residency: Literal["pinned", "lazy"] = "lazy"
     gpu_affinity: int | None = None
     prompt: str | None = None  # optional VLM instruction; None = image-only (e.g. LightOnOCR)
