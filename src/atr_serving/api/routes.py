@@ -33,7 +33,9 @@ from atr_serving.api.schemas import (
 from atr_serving.clients import EngineError, get_engine_client, get_kraken_client, get_vllm_client
 from atr_serving.config import Settings
 from atr_serving.manager import GpuBusyError, ManagerError
-from atr_serving.pipeline import generation_budget, recognize_lines, recognize_page_vllm
+from atr_serving.pipeline import (
+    generation_budget, recognize_lines, recognize_page_vllm, visual_budget,
+)
 from atr_serving.registry import ModelSpec, Registry
 
 router = APIRouter()
@@ -362,7 +364,10 @@ async def recognize(
             max_tokens = generation_budget(spec, _settings(request))
             if spec.level == "page":
                 return await _with_second_opinion(
-                    await recognize_page_vllm(raw, ctype, spec, vclient, max_tokens)
+                    await recognize_page_vllm(
+                        raw, ctype, spec, vclient, max_tokens,
+                        visual_budget(spec, _settings(request)),
+                    )
                 )
 
             async def _vllm_line(line_img: bytes, line_ct: str) -> str:
