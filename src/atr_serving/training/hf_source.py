@@ -44,6 +44,9 @@ __all__ = [
     "PROJECT_COLUMNS",
     "TEXT_COLUMNS",
     "data_files_for",
+    "keep_projects_for",
+    "only_projects",
+    "resolve_by_reading",
     "whole_split_glob",
     "collapse_complete_selection",
     "resolve_to_files",
@@ -197,9 +200,19 @@ def resolve_to_files(
         FileNotFoundError: Couldn't find any data file at
         <cwd>/dh-unibe/image-text_koenigsfelden-charters-post-1500
 
-    Making this work needs fully-qualified ``hf://datasets/<repo>@<rev>/<path>``
-    URIs and the ``"parquet"`` loader rather than the repo id, which is a larger
-    change than the rate limit warrants right now (#89).
+    **Measured, and it does not help.** The fully-qualified
+    ``hf://datasets/<repo>@<sha>/<path>`` form with the ``"parquet"`` loader —
+    the fix this docstring used to propose — was tried on 16.09.2026 against
+    ``dh-unibe/image-text_aaeb-xiv-xvii`` with the hub requests counted:
+    20 URIs cost 39 requests, one tree call per entry, exactly as the bare paths
+    would have. The cost is **per entry of** ``data_files``, not per file and not
+    per form of path, so no way of writing the paths makes a long selection
+    affordable. What does is having fewer entries — see
+    :func:`resolve_by_reading`, which reads the whole split and filters by
+    ``project_name`` when the selection is dense or too large to resolve.
+
+    Kept because the listing itself is still the cheap way to learn what a repo
+    holds, which is what :func:`list_projects` and the size check use it for.
     """
     lister = list_repo_files_fn or _default_list_repo_files
     prefix = f"data/{split}/"
@@ -254,6 +267,129 @@ def collapse_complete_selection(
     return [whole_split_glob(split)]
 
 
+#: Measured on 16.09.2026 against ``dh-unibe/image-text_aaeb-xiv-xvii`` (349
+#: projects), counting the hub requests the client actually issued:
+#:
+#:     20 project entries in data_files   39 requests  (~2 per entry)
+#:     one whole-split glob               26 requests  (independent of the
+#:                                                      selection; it is the
+#:                                                      recursive tree, paged)
+#:
+#: Note what this overturns: qualifying the entries as
+#: ``hf://datasets/<repo>@<sha>/<path>`` — the fix hf_source's own docstring
+#: proposed — was measured too, and costs a tree call per entry all the same.
+#: The cost is per *entry*, not per file and not per form of path, so the only
+#: lever is how many entries there are.
+REQUESTS_PER_ENTRY = 2
+REQUESTS_PER_GLOB = 26
+#: Above this many entries the selection cannot fit the hub's quota of 1,000
+#: requests per five minutes at all. Königsfelden asked for 1,185 and that is
+#: exactly how the first v4 attempt died.
+MAX_ENTRIES = 200
+#: At or above this share of the split, reading the whole thing and discarding
+#: the rest is cheap enough to be worth one glob.
+DENSE_SELECTION = 0.5
+
+
+def resolve_by_reading(selected: int, available: int) -> tuple[bool, str]:
+    """Should the whole split be read and filtered, rather than selected?
+
+    ``datasets`` resolves every entry of ``data_files`` with its own tree call,
+    so an explicit selection costs requests in proportion to how many projects
+    it names — and a quota of 1,000 per five minutes is not many projects. One
+    glob costs a fixed handful, at the price of streaming shards that will be
+    thrown away.
+
+    Two independent reasons to take that price, and both are about the request
+    count being the binding constraint rather than the bytes:
+
+    * **The selection is dense.** Reading 1,202 projects to keep 1,185 wastes
+      1.4 % of the transfer to save 2,344 requests.
+    * **The selection is too large to resolve at all.** 600 of 5,000 projects is
+      1,200 requests against a quota of 1,000: it does not finish, and reading
+      eight times too much is better than not running.
+
+    Returns the decision and the sentence to log, because a job that silently
+    read a whole repo would be worse than one that said so.
+    """
+    if not available or selected <= 0:
+        return False, ""
+    explicit = selected * REQUESTS_PER_ENTRY
+    share = selected / available
+    if share >= DENSE_SELECTION:
+        return True, (f"selection covers {selected}/{available} projects "
+                      f"({share:.0%}) — reading the whole split and keeping those "
+                      f"costs ~{REQUESTS_PER_GLOB} hub requests instead of "
+                      f"~{explicit} (#89)")
+    if selected > MAX_ENTRIES:
+        return True, (f"selection names {selected} projects — ~{explicit} hub "
+                      f"requests would exceed the quota of 1,000 per 5 minutes, so "
+                      f"the whole split is read and filtered ({share:.0%} kept) (#89)")
+    return False, ""
+
+
+def _keep_for(spec: DatasetSpec) -> frozenset[str] | None:
+    """Project names to keep when the whole split is read, or None to select.
+
+    Asks :func:`resolve_by_reading` with the real numbers, which costs the one
+    listing call :func:`list_projects` already makes. A hub that cannot be listed
+    answers None — the explicit globs are the safe fallback, exactly as in
+    :func:`collapse_complete_selection`.
+    """
+    try:
+        available = set(list_projects(spec.hf_repo, spec.split, spec.revision))
+    except Exception as exc:  # noqa: BLE001 — any failure means "select explicitly"
+        logger.debug("cannot size the selection for {}: {}", spec.hf_repo, exc)
+        return None
+    wanted = set(spec.train_projects)
+    read_all, why = resolve_by_reading(len(wanted), len(available))
+    if not read_all:
+        return None
+    logger.info("{}: {}", spec.hf_repo, why)
+    return frozenset(wanted)
+
+
+def keep_projects_for(spec: DatasetSpec) -> frozenset[str] | None:
+    """What :func:`data_files_for` expects the caller to filter rows by.
+
+    None means the globs already name exactly the selection and every row they
+    return belongs in it. A set means the globs are wider than the selection on
+    purpose, and rows outside it must be dropped as they are read — see
+    :func:`only_projects`.
+    """
+    resolved = expand_all_projects(spec) if spec.all_projects else spec
+    if not resolved.train_projects or resolved.eval_projects:
+        return None
+    if collapse_complete_selection(resolved.split, resolved.train_projects,
+                                   resolved.hf_repo, resolved.revision):
+        return None
+    return _keep_for(resolved)
+
+
+def only_projects(rows, keep: frozenset[str] | None):
+    """Rows whose ``project_name`` is in ``keep``; everything when it is None.
+
+    ``project_name`` is the directory a shard lives in — verified on
+    ``dh-unibe/image-text_aaeb-xiv-xvii``, where the column and the path segment
+    are the same string — so filtering here reproduces exactly the selection the
+    per-project globs would have made.
+    """
+    if keep is None:
+        return rows
+
+    def gen():
+        kept = dropped = 0
+        for row in rows:
+            if row.get("project_name") in keep:
+                kept += 1
+                yield row
+            else:
+                dropped += 1
+        logger.info("kept {} rows, dropped {} outside the selection (#89)",
+                    kept, dropped)
+    return gen()
+
+
 def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
     """Map role → ``data_files`` globs.
 
@@ -290,6 +426,7 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
                 f"projects appear in both train and eval: {overlap}. That leaks evaluation "
                 "pages into training."
             )
+        keep = _keep_for(resolved)
         # Validate every name even when the globs collapse: a typo must still be
         # an error, not silently absorbed into a whole-split glob.
         train_globs = [project_glob(resolved.split, p) for p in resolved.train_projects]
@@ -302,6 +439,11 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
                 logger.info("{}: selection covers every project — one glob instead "
                             "of {} (#89)", resolved.hf_repo, len(train_globs))
                 train_globs = collapsed
+            elif keep is not None:
+                # Not complete, but too expensive to name one by one. Read the
+                # whole split and drop the rest on the way past; the caller is
+                # given the names to keep in `keep`.
+                train_globs = [whole_split_glob(resolved.split)]
         files = {"train": train_globs}
 
     if resolved.eval_projects:

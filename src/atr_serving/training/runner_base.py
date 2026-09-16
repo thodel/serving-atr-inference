@@ -45,7 +45,8 @@ from atr_serving.training.contracts import (
 )
 from atr_serving.training.convergence import check_convergence
 from atr_serving.training.heldout import load_heldout
-from atr_serving.training.hf_source import data_files_for, granularity_files
+from atr_serving.training.hf_source import (data_files_for, granularity_files,
+                                            keep_projects_for, only_projects)
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.manifests import split_pages, write_manifest
 from atr_serving.training.prepare import (
@@ -319,7 +320,9 @@ class BasePipeline(ABC):
         files = data_files_for(spec)
 
         train_set = materialize(
-            self.source.stream(spec.hf_repo, files["train"], spec.revision),
+            only_projects(
+                self.source.stream(spec.hf_repo, files["train"], spec.revision),
+                keep_projects_for(spec)),
             paths.pages, role="train", max_pages=spec.max_pages,
             min_free_disk_gb=self.settings.min_free_disk_gb,
         )
@@ -383,7 +386,9 @@ class BasePipeline(ABC):
         files = granularity_files(spec)
 
         pool: LinePreparedSet = materialize_lines(
-            self.source.stream(spec.hf_repo, files["train"], spec.revision),
+            only_projects(
+                self.source.stream(spec.hf_repo, files["train"], spec.revision),
+                keep_projects_for(spec)),
             paths.data, root=paths.root, role="pool",
             max_lines=spec.max_pages,  # reused as sample cap at line granularity
             min_free_disk_gb=self.settings.min_free_disk_gb,
@@ -564,7 +569,9 @@ class BasePipeline(ABC):
             files = data_files_for(spec)
 
             train_set = materialize(
-                self.source.stream(spec.hf_repo, files["train"], spec.revision),
+                only_projects(
+                    self.source.stream(spec.hf_repo, files["train"], spec.revision),
+                    keep_projects_for(spec)),
                 paths.pages, role="train", max_pages=spec.max_pages,
                 start_index=total_pages_written,
                 min_free_disk_gb=self.settings.min_free_disk_gb,

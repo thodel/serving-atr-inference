@@ -794,3 +794,94 @@ class TestResolvingToFiles:
         """An empty data_files list would load the whole repo; the globs at least
         fail with a name that is not there."""
         assert resolve_to_files("train", ["nope"], "o/r", None, self.lister()) is None
+
+
+# ── how a selection is resolved, and what that costs (#89) ───────────────────
+
+class TestResolveByReading:
+    """Measured on 16.09.2026 against dh-unibe/image-text_aaeb-xiv-xvii (349
+    projects), counting the requests the hub client actually issued:
+
+        20 project entries in data_files   39 requests  (~2 per entry)
+        one whole-split glob               26 requests  (independent of it)
+
+    And the thing that measurement overturned: qualifying the entries as
+    hf://datasets/<repo>@<sha>/<path> — the fix this module's own docstring
+    proposed — costs a tree call per entry all the same. The lever is the number
+    of entries, nothing else.
+    """
+
+    def test_a_dense_selection_is_read_whole(self):
+        from atr_serving.training.hf_source import resolve_by_reading
+        read_all, why = resolve_by_reading(1185, 1202)
+        assert read_all
+        assert "1185/1202" in why and "99%" in why      # 1185/1202 = 98.6 %
+
+    def test_the_koenigsfelden_case_is_the_one_that_killed_v4(self):
+        """1,185 entries is ~2,370 requests against a quota of 1,000 per 5 min."""
+        from atr_serving.training.hf_source import resolve_by_reading
+        read_all, _ = resolve_by_reading(1185, 1202)
+        assert read_all
+
+    def test_a_sparse_selection_is_still_selected(self):
+        """20 of 349 reads seventeen times too much to save thirteen requests."""
+        from atr_serving.training.hf_source import resolve_by_reading
+        read_all, why = resolve_by_reading(20, 349)
+        assert not read_all and why == ""
+
+    def test_a_selection_too_large_to_resolve_is_read_whole_anyway(self):
+        """600 of 5,000 is sparse — and still cannot fit the quota.
+
+        Reading eight times too much is worse than reading what you need, and
+        better than not running.
+        """
+        from atr_serving.training.hf_source import resolve_by_reading
+        read_all, why = resolve_by_reading(600, 5000)
+        assert read_all and "quota" in why
+
+    def test_nothing_selected_is_not_a_reason_to_read_everything(self):
+        from atr_serving.training.hf_source import resolve_by_reading
+        assert resolve_by_reading(0, 349) == (False, "")
+        assert resolve_by_reading(5, 0) == (False, "")
+
+
+class TestOnlyProjects:
+    """The filter that makes reading the whole split equal to selecting it."""
+
+    ROWS = [
+        {"project_name": "Brugg_0014", "filename": "a.jpg"},
+        {"project_name": "Baden_0050", "filename": "b.jpg"},
+        {"project_name": "u-17_0455", "filename": "c.jpg"},
+    ]
+
+    def test_it_keeps_exactly_the_named_projects(self):
+        from atr_serving.training.hf_source import only_projects
+        kept = list(only_projects(iter(self.ROWS), frozenset({"Brugg_0014", "u-17_0455"})))
+        assert [r["filename"] for r in kept] == ["a.jpg", "c.jpg"]
+
+    def test_none_means_the_globs_were_already_exact(self):
+        from atr_serving.training.hf_source import only_projects
+        rows = iter(self.ROWS)
+        assert only_projects(rows, None) is rows      # not even wrapped
+
+    def test_a_row_without_a_project_name_is_dropped_not_guessed(self):
+        """A shard layout this filter cannot read must not silently widen the run."""
+        from atr_serving.training.hf_source import only_projects
+        rows = [{"filename": "x.jpg"}, {"project_name": "Brugg_0014", "filename": "y.jpg"}]
+        kept = list(only_projects(iter(rows), frozenset({"Brugg_0014"})))
+        assert [r["filename"] for r in kept] == ["y.jpg"]
+
+    def test_it_streams_rather_than_materializing(self):
+        """prepare reads 6.6 TB past this point; it cannot become a list."""
+        from atr_serving.training.hf_source import only_projects
+        seen = []
+
+        def rows():
+            for r in self.ROWS:
+                seen.append(r["filename"])
+                yield r
+
+        out = only_projects(rows(), frozenset({"Brugg_0014"}))
+        assert seen == []                              # nothing read yet
+        assert next(iter(out))["filename"] == "a.jpg"
+        assert seen == ["a.jpg"]                       # …and nothing read past it
