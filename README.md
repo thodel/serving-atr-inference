@@ -288,8 +288,11 @@ this box, or on asteraix after the split (#137). The `ufw` rule opens only `:820
 client host, so **this proxy is the only way in** for callers, with the same `X-API-Key`
 as recognition. The gateway authenticates itself to the trainer with a second, separate
 key, `ATR_TRAIN_API_KEY`, which both machines must hold (see `.env.example`); if the
-trainer refuses it, the caller gets `502`, not `401`. `GET /train/gpu` is the trainer's
-reading of its own cards; only an older trainer on this box gets the local reading.
+trainer refuses it, the caller gets `502`, not `401`. A trainer that does not answer
+within `ATR_TRAIN_TIMEOUT_S` (20 s) is a `504` naming its URL; keep that below the bot's
+own 30 s, or the bot times out first and blames this box. `GET /train/gpu` is the
+trainer's reading of its own cards; only an older trainer on this box gets the local
+reading.
 
 | Endpoint | Returns | Use |
 |---|---|---|

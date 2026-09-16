@@ -105,6 +105,20 @@ class Settings(BaseSettings):
     #: Empty = no header, which is what the in-repo trainer on 127.0.0.1 expects.
     #: ``repr=False`` keeps it out of any log line that prints the settings.
     train_api_key: str = Field("", repr=False)
+    #: How long the proxy waits for the trainer to start answering, per call.
+    #: **Must stay below the callers' own timeout** — agentic_historian's
+    #: atr_status.TIMEOUT_S is 30 s — or the 504 naming the trainer's URL is never
+    #: seen: the caller's clock starts before the gateway even connects, so with
+    #: 30 s on both sides the bot gave up first, every time, and reported a
+    #: ReadTimeout against idhefix's :8200 (reproduced in the #137 review against a
+    #: trainer that accepted connections and never answered). The connect phase
+    #: has its own 5 s (clients.TRAINER_CONNECT_TIMEOUT_S), so a call gives up
+    #: within 25 s — and each route the bot reads makes one call. (A submit adds
+    #: the 5 s /health check, but its caller, agent_a's training_client, waits
+    #: ATR_HTTP_TIMEOUT = 300 s.) The ~1 MB /train/jobs body does not need more:
+    #: httpx's read timeout counts the gap between chunks, not the transfer, so
+    #: only the trainer's time to first byte counts against it.
+    train_timeout_s: float = 20.0
     # vLLM instances are dynamic (one per resident VLM); discovered via the
     # ModelManager in Phase 3, not statically configured here.
 

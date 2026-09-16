@@ -131,6 +131,7 @@ from atr_serving.config import Settings            # noqa: E402
 
 KEY = "test-key"
 AUTH = {"X-API-Key": KEY}
+LOCAL = "http://127.0.0.1:8204"
 
 
 class _Trainer:
@@ -145,7 +146,7 @@ class _Trainer:
         self.raises = raises
 
     async def gpu(self):
-        raise TrainerError(404, "Not Found")
+        raise TrainerError(404, "Not Found", service=LOCAL)
 
     async def list_jobs(self):
         if self.raises:
@@ -200,7 +201,7 @@ def test_it_totals_what_no_job_accounts_for(monkeypatch):
 
 def test_an_unreachable_trainer_still_reports_the_cards(monkeypatch):
     """Losing attribution must not lose the memory figures."""
-    c = _client(_Trainer(raises=TrainerError(503, "trainer down")),
+    c = _client(_Trainer(raises=TrainerError(503, "trainer down", service=LOCAL)),
                 monkeypatch, _two_cards)
     body = c.get("/train/gpu", headers=AUTH).json()
     assert body["job_attribution_available"] is False

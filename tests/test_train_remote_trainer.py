@@ -13,6 +13,7 @@ copies and checks its real responses against them.
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from loguru import logger
 from atr_serving import gpu as gpu_probe
 from atr_serving.api import train_routes
 from atr_serving.app import create_app
-from atr_serving.clients import TrainerClient, readable_detail
+from atr_serving.clients import TrainerClient, get_trainer_client, readable_detail
 from atr_serving.config import Settings, is_loopback_url
 
 KEY = "caller-key"
@@ -32,6 +33,8 @@ AUTH = {"X-API-Key": KEY}
 TRAINER_KEY = "t" * 40            # the shared ATR_TRAIN_API_KEY
 ASTERAIX = "http://130.92.59.242:8204"
 LOCAL = "http://127.0.0.1:8204"
+#: agentic_historian's atr_status.TIMEOUT_S: how long the bot waits for :8200.
+CALLER_TIMEOUT_S = 30
 
 FIXTURES = Path(__file__).parent / "fixtures" / "trainer_contract"
 HEALTH = json.loads((FIXTURES / "health.json").read_text())
@@ -78,7 +81,7 @@ def make_client(trainer: Trainer, train_url: str = ASTERAIX,
     app = create_app(settings)
     app.state.trainer_client = TrainerClient(
         settings.train_url, api_key=settings.train_api_key,
-        transport=httpx.MockTransport(trainer))
+        timeout=settings.train_timeout_s, transport=httpx.MockTransport(trainer))
     return TestClient(app)
 
 
@@ -113,12 +116,34 @@ def log_lines():
 
 
 # ── timeouts and transport ──────────────────────────────────────────────────
-def test_a_remote_trainer_that_times_out_answers_504():
-    trainer = Trainer({("GET", "/jobs"): httpx.ReadTimeout("")})
+@pytest.mark.parametrize("failure,says", [
+    (httpx.ReadTimeout(""), "did not answer within 20s"),
+    (httpx.ConnectTimeout(""), "could not connect within 5s"),
+], ids=["read", "connect"])
+def test_a_remote_trainer_that_times_out_answers_504(failure, says):
+    trainer = Trainer({("GET", "/jobs"): failure})
     resp = make_client(trainer).get("/train/jobs", headers=AUTH)
     assert resp.status_code == 504
     detail = resp.json()["detail"]
-    assert f"{ASTERAIX}/jobs" in detail and "30s" in detail
+    assert f"{ASTERAIX}/jobs" in detail and says in detail
+
+
+def test_the_gateway_gives_up_on_the_trainer_before_the_bot_gives_up_on_it(monkeypatch):
+    """The 504 naming asteraix only reaches a caller that is still waiting. With
+    30 s here and 30 s in the bot, the bot's clock — started first — ran out
+    first, every time, and it reported a timeout against idhefix's :8200
+    (reproduced in the #137 review). Checked on the wire, connect plus read,
+    because httpx gives each phase the whole budget."""
+    monkeypatch.delenv("ATR_TRAIN_TIMEOUT_S", raising=False)
+    client = get_trainer_client(Settings(_env_file=None))
+    trainer = Trainer({("GET", "/jobs"): (200, {"jobs": []})})
+    client._transport = httpx.MockTransport(trainer)
+    asyncio.run(client.list_jobs())
+    timeout = trainer.requests[0].extensions["timeout"]
+    assert timeout["connect"] + timeout["read"] < CALLER_TIMEOUT_S
+
+    monkeypatch.setenv("ATR_TRAIN_TIMEOUT_S", "12.5")
+    assert get_trainer_client(Settings(_env_file=None)).timeout == 12.5
 
 
 def test_a_refused_connection_is_still_a_502_naming_the_url():
@@ -147,7 +172,7 @@ def test_the_engine_list_comes_from_the_trainer_health():
     client = make_client(full)
     resp = client.post("/train/jobs", json={**BODY, "engine": "trocr"}, headers=AUTH)
     assert resp.status_code == 503
-    assert resp.json()["detail"] == unbuilt[1]["detail"]
+    assert resp.json()["detail"] == f"training service at {ASTERAIX}: {unbuilt[1]['detail']}"
     assert full.paths() == [("POST", "/jobs")]
     health = [r for r in full.requests if r.url.path == "/health"]
     assert health and health[0].extensions["timeout"]["read"] == 5.0
@@ -179,9 +204,15 @@ def test_an_absent_engine_is_not_checked():
     (200, {**HEALTH, "engines": []}),
     httpx.ConnectTimeout(""),
     (500, {"detail": "boom"}),
-], ids=["older-trainer", "empty-list", "health-timeout", "health-500"])
+    lambda r: httpx.Response(200, text="OK"),
+    lambda r: httpx.Response(307, headers={"Location": "https://130.92.59.242/health"}),
+], ids=["older-trainer", "empty-list", "health-timeout", "health-500",
+        "health-not-json", "health-redirect"])
 def test_the_engine_check_is_skipped_when_the_trainer_health_has_no_engines(health):
-    """The trainer validates the request anyway; its own 422 is what comes back."""
+    """The trainer validates the request anyway; its own 422 is what comes back.
+
+    Not JSON and a redirect included: the check is a courtesy, and until the
+    #137 review either one failed the submit with a bare 500."""
     refusal = {"detail": [{"type": "literal_error", "loc": ["body", "engine"],
                            "msg": "Input should be 'kraken', 'trocr' or 'vllm'",
                            "input": "party", "ctx": {"expected": "..."}}]}
@@ -241,23 +272,100 @@ def test_a_validation_error_from_the_trainer_stays_readable():
 
 
 @pytest.mark.parametrize("status,body", [
-    (507, {"detail": "only 3.2 GB free at /mnt/...; this job needs 50 GB of headroom"}),
     (409, {"detail": "job 2026... is already completed"}),
     (404, {"detail": {"job_id": "x", "reason": "no such job"}}),
-    (503, {"detail": "atr-train has no ATR_TRAIN_API_KEY configured; set it in .env and restart"}),
+    (503, {"detail": {"reason": "no ATR_TRAIN_API_KEY", "fix": "set it in .env"}}),
 ])
 def test_other_trainer_errors_pass_through_unchanged(status, body):
-    """A 503 included: the trainer's own detail names the fix."""
+    """A 4xx describes the request, and a structured 5xx keeps its shape."""
     trainer = Trainer({("GET", "/jobs/x"): (status, body)})
     resp = make_client(trainer).get("/train/jobs/x", headers=AUTH)
     assert resp.status_code == status
     assert resp.json() == body
 
 
+#: The trainer's own words (kraken_train_svc/app.py, submit): "this box" is
+#: asteraix. This repository has scripts/make_venvs.sh with a vlm-train target
+#: too, so read under idhefix's :8200 the text sends the reader to the wrong box.
+UNBUILT = ("the vlm-train venv is not built on this box, so vllm jobs cannot run. "
+           "Build it:  bash scripts/make_venvs.sh vlm-train")
+
+
+@pytest.mark.parametrize("status,text", [
+    (503, UNBUILT),
+    (507, "only 3.2 GB free at /mnt/...; this job needs 50 GB of headroom"),
+    (503, "atr-train has no ATR_TRAIN_API_KEY configured; set it in .env and restart"),
+])
+def test_a_remote_trainers_5xx_names_the_trainer_and_keeps_its_status(status, text):
+    """The status and the fix pass through; what is added is which machine the
+    fix is for."""
+    trainer = Trainer({("POST", "/jobs"): (status, {"detail": text})})
+    resp = make_client(trainer).post("/train/jobs", json=BODY, headers=AUTH)
+    assert resp.status_code == status
+    assert resp.json() == {"detail": f"training service at {ASTERAIX}: {text}"}
+
+
+def test_a_local_trainers_5xx_is_passed_on_word_for_word():
+    """On this box "this box" is right, and the default setup must not change."""
+    trainer = Trainer({("POST", "/jobs"): (503, {"detail": UNBUILT})})
+    resp = make_client(trainer, train_url=LOCAL, train_api_key="").post(
+        "/train/jobs", json=BODY, headers=AUTH)
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": UNBUILT}
+
+
 def test_a_non_json_error_body_is_passed_as_text():
     trainer = Trainer({("GET", "/jobs/x"): lambda r: httpx.Response(500, text="Internal")})
     resp = make_client(trainer).get("/train/jobs/x", headers=AUTH)
-    assert resp.status_code == 500 and resp.json()["detail"] == "Internal"
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == f"training service at {ASTERAIX}: Internal"
+
+
+# ── answers that are not the trainer's ──────────────────────────────────────
+def _not_json(request):
+    return httpx.Response(200, text="<html>Welcome to nginx!</html>")
+
+
+def test_a_non_json_answer_is_a_502_naming_the_url():
+    """A port typo in ATR_TRAIN_URL lands on another service on asteraix. That
+    was a bare 500 "Internal Server Error", with nothing to say where to look."""
+    trainer = Trainer({("GET", "/jobs"): _not_json})
+    resp = make_client(trainer).get("/train/jobs", headers=AUTH)
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert f"{ASTERAIX}/jobs" in detail and "non-JSON" in detail
+    assert "Welcome to nginx" in detail and "ATR_TRAIN_URL" in detail
+
+
+def test_a_non_json_gpu_answer_from_a_remote_trainer_is_a_502(no_local_reading):
+    trainer = Trainer({("GET", "/gpu"): _not_json})
+    resp = make_client(trainer).get("/train/gpu", headers=AUTH)
+    assert resp.status_code == 502
+    assert f"{ASTERAIX}/gpu" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("headers,says", [
+    ({"Location": "https://130.92.59.242:8204/jobs/abc"},
+     "redirect to https://130.92.59.242:8204/jobs/abc"),
+    ({}, "no Location given"),
+], ids=["with-location", "without-location"])
+def test_a_redirect_is_a_502_naming_where_it_pointed(headers, says):
+    """httpx does not follow it, so its empty body used to reach the JSON decoder."""
+    trainer = Trainer({("GET", "/jobs/abc"): lambda r: httpx.Response(
+        307, headers=headers)})
+    resp = make_client(trainer).get("/train/jobs/abc", headers=AUTH)
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert f"{ASTERAIX}/jobs/abc" in detail and "307" in detail and says in detail
+
+
+def test_a_non_json_body_is_scrubbed_before_it_is_cut():
+    """Cut first, a key starting near the cut would be half blanked, half shown."""
+    trainer = Trainer({("GET", "/jobs"): lambda r: httpx.Response(
+        200, text="x" * 100 + TRAINER_KEY)})
+    resp = make_client(trainer).get("/train/jobs", headers=AUTH)
+    assert resp.status_code == 502
+    assert "***" in resp.json()["detail"] and "t" * 10 not in resp.text
 
 
 def test_readable_detail_leaves_strings_and_dicts_alone():
@@ -267,14 +375,18 @@ def test_readable_detail_leaves_strings_and_dicts_alone():
 
 
 # ── the gateway's own key ───────────────────────────────────────────────────
-@pytest.mark.parametrize("status,detail,names", [
-    (401, "missing or invalid X-API-Key", "ATR_TRAIN_API_KEY"),
-    (403, "client 130.92.59.240 is not in ATR_TRAIN_ALLOWED_CLIENTS",
-     "ATR_TRAIN_ALLOWED_CLIENTS"),
+@pytest.mark.parametrize("status,detail,names,not_names", [
+    (401, "missing or invalid X-API-Key", "ATR_TRAIN_API_KEY", "ATR_TRAIN_ALLOWED_CLIENTS"),
+    # Not the trainer's own 403 text, which names the setting itself and so
+    # would satisfy the check whatever the gateway adds: a plain "Forbidden" is
+    # what anything in front of the trainer would say.
+    (403, "Forbidden", "ATR_TRAIN_ALLOWED_CLIENTS", "ATR_TRAIN_API_KEY"),
 ])
-def test_a_trainer_that_rejects_the_gateway_key_is_a_502_not_a_401(status, detail, names):
+def test_a_trainer_that_rejects_the_gateway_key_is_a_502_not_a_401(
+        status, detail, names, not_names):
     """The caller's key was fine — the gateway checked it. A 401 handed back
-    would tell the bot its own key is wrong (atr_status.py says exactly that)."""
+    would tell the bot its own key is wrong (atr_status.py says exactly that).
+    And the gateway itself names the one setting that fits the status."""
     trainer = Trainer({("GET", "/jobs"): (status, {"detail": detail}),
                        ("GET", "/jobs/x"): (status, {"detail": detail}),
                        ("GET", "/gpu"): (status, {"detail": detail})})
@@ -284,6 +396,7 @@ def test_a_trainer_that_rejects_the_gateway_key_is_a_502_not_a_401(status, detai
         assert resp.status_code == 502, path
         message = resp.json()["detail"]
         assert ASTERAIX in message and names in message
+        assert not_names not in message
         assert detail in message
         assert TRAINER_KEY not in message
 
@@ -307,6 +420,9 @@ def test_the_trainer_key_is_sent_and_never_logged(log_lines):
         ("GET", "/jobs/b"): httpx.ReadTimeout(""),
         ("GET", "/jobs/c"): httpx.ConnectError(f"refused {TRAINER_KEY}"),
         ("GET", "/jobs/d"): (507, {"detail": echo}),
+        ("GET", "/jobs/e"): lambda r: httpx.Response(200, text=echo),
+        ("GET", "/jobs/f"): lambda r: httpx.Response(
+            302, headers={"Location": f"https://login/?next={TRAINER_KEY}"}),
     })
     client = make_client(trainer)
     responses = [
@@ -316,8 +432,10 @@ def test_the_trainer_key_is_sent_and_never_logged(log_lines):
         client.get("/train/jobs/b", headers=AUTH),
         client.get("/train/jobs/c", headers=AUTH),
         client.get("/train/jobs/d", headers=AUTH),
+        client.get("/train/jobs/e", headers=AUTH),
+        client.get("/train/jobs/f", headers=AUTH),
     ]
-    assert [r.status_code for r in responses] == [200, 422, 502, 504, 502, 507]
+    assert [r.status_code for r in responses] == [200, 422, 502, 504, 502, 507, 502, 502]
     assert {r.url.path for r in trainer.requests} >= {"/health", "/jobs", "/jobs/a"}
     for request in trainer.requests:
         assert request.headers["X-API-Key"] == TRAINER_KEY
@@ -343,10 +461,10 @@ def test_the_key_stays_out_of_reprs():
 
 
 def test_the_factory_hands_the_key_to_the_client():
-    from atr_serving.clients import get_trainer_client
-
-    client = get_trainer_client(Settings(train_url=ASTERAIX, train_api_key=TRAINER_KEY))
+    client = get_trainer_client(Settings(train_url=ASTERAIX, train_api_key=TRAINER_KEY,
+                                         train_timeout_s=7.0))
     assert client.base_url == ASTERAIX and client._api_key == TRAINER_KEY
+    assert client.timeout == 7.0
 
 
 # ── what the bot and the ATR-MCP see ────────────────────────────────────────

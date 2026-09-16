@@ -31,6 +31,8 @@ JOB = {"job_id": "20260807T120000Z-kraken-thun-missiven-v1", "status": "queued",
 #: What a current trainer's /health says (the contract fixture, #137).
 HEALTH = json.loads((Path(__file__).parent / "fixtures" / "trainer_contract"
                      / "health.json").read_text())
+#: Where the fake stands: the default ``train_url``, a trainer on this box.
+LOCAL = "http://127.0.0.1:8204"
 
 
 class FakeTrainer:
@@ -161,7 +163,7 @@ def test_a_trocr_job_reaches_the_trainer_now_that_it_has_a_backend(client, train
 BAD_SLUG = TrainerError(422, [{
     "type": "value_error", "loc": ["body"],
     "msg": "Value error, model_id 'Not A Slug' must match ^[a-z0-9][a-z0-9._-]*$ "
-           "(it becomes a directory name and a registry id)"}])
+           "(it becomes a directory name and a registry id)"}], service=LOCAL)
 
 
 def test_malformed_request_is_422_with_the_offending_field():
@@ -242,7 +244,7 @@ def test_trainer_unreachable_is_502_naming_the_url():
 def test_trainer_errors_keep_their_status_and_detail(status, detail):
     """The trainer's failures name their own fix; flattening them to 502 would
     throw that away."""
-    client = make_client(FakeTrainer(TrainerError(status, detail)))
+    client = make_client(FakeTrainer(TrainerError(status, detail, service=LOCAL)))
     resp = client.get("/train/jobs/20260807T120000Z-x", headers=AUTH)
     assert resp.status_code == status
     assert resp.json()["detail"] == detail

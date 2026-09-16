@@ -253,12 +253,17 @@ class TrainerError(EngineError):
     ``detail`` is the JSON value as the trainer sent it — a string, or for a 422
     the list of field errors — not its ``str()``. Flattening a list turned it into
     a Python repr nobody can index (#137).
+
+    ``service`` is the trainer's base URL. The proxy needs it because a 5xx
+    detail describes the trainer's machine ("the vlm-train venv is not built on
+    this box") while the caller reads it under the gateway's address.
     """
 
-    def __init__(self, status_code: int, detail: Any) -> None:
-        super().__init__(f"trainer error {status_code}: {detail}")
+    def __init__(self, status_code: int, detail: Any, *, service: str) -> None:
+        super().__init__(f"trainer error {status_code} at {service}: {detail}")
         self.status_code = status_code
         self.detail = detail
+        self.service = service
 
 
 class TrainerTimeout(EngineError):
@@ -317,16 +322,24 @@ def _scrub(value: Any, secret: str) -> Any:
     return value
 
 
+#: asteraix is on this box's /24, so a TCP connection that is not up in 5 s is
+#: not coming. Bounded apart from the read because httpx applies a bare float to
+#: *each* phase: 20 s would allow 20 to connect plus 20 to answer — past the
+#: callers' 30 s that ``Settings.train_timeout_s`` exists to stay under.
+TRAINER_CONNECT_TIMEOUT_S = 5.0
+
+
 class TrainerClient:
     """Async client for the training service. Used only by the /train/* proxy.
 
     The key travels in the ``X-API-Key`` header and nowhere else: not in the URL,
     not in a log line, not in an exception message. ``transport`` is a test seam
     (``httpx.MockTransport``), so the whole path from route to wire is testable
-    without a trainer.
+    without a trainer. ``timeout`` defaults to ``Settings.train_timeout_s``'s
+    value; see there for why it is not 30.
     """
 
-    def __init__(self, base_url: str, api_key: str = "", timeout: float = 30.0,
+    def __init__(self, base_url: str, api_key: str = "", timeout: float = 20.0,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -340,17 +353,22 @@ class TrainerClient:
                        **kwargs) -> Any:
         url = f"{self.base_url}{path}"
         timeout = self.timeout if timeout is None else timeout
+        limits = httpx.Timeout(timeout, connect=min(timeout, TRAINER_CONNECT_TIMEOUT_S))
         headers = {"X-API-Key": self._api_key} if self._api_key else {}
         try:
-            async with httpx.AsyncClient(timeout=timeout, headers=headers,
+            async with httpx.AsyncClient(timeout=limits, headers=headers,
                                          transport=self._transport) as client:
                 resp = await client.request(method, url, **kwargs)
         except httpx.TimeoutException as exc:
             # Before RequestError, which it subclasses. httpx timeouts stringify
             # to "" more often than not, so the message is built, not forwarded.
-            logger.error("trainer did not answer within {}s at {}", timeout, url)
+            if isinstance(exc, httpx.ConnectTimeout):
+                what, waited = "could not connect", limits.connect
+            else:
+                what, waited = "did not answer", timeout
+            logger.error("trainer {} within {}s at {}", what, waited, url)
             raise TrainerTimeout(
-                f"training service did not answer within {timeout:g}s at {url}"
+                f"training service {what} within {waited:g}s at {url}"
             ) from exc
         except httpx.RequestError as exc:
             reason = _scrub(str(exc), self._api_key)
@@ -367,8 +385,33 @@ class TrainerClient:
                 message = self._refusal(resp.status_code, url, detail)
                 logger.error("{}", message)
                 raise TrainerAuthError(message)
-            raise TrainerError(resp.status_code, detail)
-        return resp.json()
+            raise TrainerError(resp.status_code, detail, service=self.base_url)
+        # Below: an answer that is not the trainer's. Unguarded, both reached
+        # resp.json(), whose ValueError is no EngineError — a bare 500 with no URL
+        # on every route, and on submit the /health courtesy check failed the job
+        # it is documented to skip for (#137 review).
+        if not resp.is_success:
+            # httpx does not follow redirects, so a 3xx lands here with an empty
+            # body. The trainer never redirects; an http->https front or another
+            # service at ATR_TRAIN_URL does.
+            location = resp.headers.get("location")
+            where = (f"redirect to {_scrub(location, self._api_key)}" if location
+                     else "no Location given")
+            message = (f"training service at {url} answered {resp.status_code} "
+                       f"({where}); ATR_TRAIN_URL must name the trainer itself")
+            logger.error("{}", message)
+            raise EngineError(message)
+        try:
+            return resp.json()
+        except ValueError as exc:
+            # A 2xx that is not JSON is some other HTTP service: asteraix runs
+            # several on neighbouring ports (config.py), one port-typo away.
+            # Scrubbed before it is cut, so a cut cannot leave half a key behind.
+            body = _scrub(resp.text, self._api_key)[:120]
+            message = (f"training service at {url} answered {resp.status_code} with a "
+                       f"non-JSON body ({body!r}); is ATR_TRAIN_URL the trainer?")
+            logger.error("{}", message)
+            raise EngineError(message) from exc
 
     def _refusal(self, status: int, url: str, detail: Any) -> str:
         """Why the trainer turned the gateway away, in terms of the setting to fix."""
@@ -420,4 +463,5 @@ class TrainerClient:
 
 def get_trainer_client(settings) -> TrainerClient:
     """Factory used by routes; a seam for tests to monkeypatch."""
-    return TrainerClient(settings.train_url, api_key=settings.train_api_key)
+    return TrainerClient(settings.train_url, api_key=settings.train_api_key,
+                         timeout=settings.train_timeout_s)

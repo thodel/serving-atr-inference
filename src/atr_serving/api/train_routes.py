@@ -17,10 +17,13 @@ own client allowlist.
 Errors are passed through with their status. The trainer's failures name their
 own fix (507 = full filesystem, 500 = network TMPDIR, 409 = already terminal,
 503 = a setting it lacks), and flattening them to a generic 502 would discard
-exactly that. Three exceptions, each because passing through would mislead:
+exactly that. The exceptions, each because passing through would mislead:
 a timeout is a 504 naming the URL; a 401/403 from the trainer is a 502, because
-the caller's key was fine and the gateway's was not; and a 422's field errors
-lose pydantic's ``input`` echo of the whole request body.
+the caller's key was fine and the gateway's was not; an answer that is not the
+trainer's (a redirect, a 2xx that is not JSON) is a 502 naming the URL; a 422's
+field errors lose pydantic's ``input`` echo of the whole request body; and a
+remote trainer's 5xx text keeps its status but gains the trainer's URL, because
+"this box" in it means asteraix while the caller reads it under idhefix's.
 """
 
 from __future__ import annotations
@@ -48,8 +51,8 @@ router = APIRouter(prefix="/train", tags=["training"],
 #: the network buys nothing.
 ENGINES_TTL_S = 60.0
 #: The engine check is a courtesy — the trainer validates anyway — so it gets a
-#: short leash rather than the client's 30 s default, and a trainer too slow to
-#: answer /health in time is forwarded to unchecked.
+#: short leash rather than the client's ``train_timeout_s``, and a trainer too
+#: slow to answer /health in time is forwarded to unchecked.
 ENGINES_TIMEOUT_S = 5.0
 
 
@@ -66,7 +69,19 @@ def _http_error(exc: EngineError) -> HTTPException:
     empty-looking success, the same rule #21 established for recognition.
     """
     if isinstance(exc, TrainerError):
-        return HTTPException(status_code=exc.status_code, detail=exc.detail)
+        detail = exc.detail
+        # A trainer's 5xx describes its own machine — "the vlm-train venv is not
+        # built on this box ... bash scripts/make_venvs.sh vlm-train" — and this
+        # repository has that script and that target too, so a reader who sees
+        # the text under :8200 builds it on idhefix: the wrong-host diagnosis #81
+        # fixed for the engines. Prefixed only for a remote trainer (on this box
+        # "this box" is right, and the detail stays as it was), only for a string
+        # (a list or dict keeps its shape), and never for a 4xx, which describes
+        # the request rather than the machine.
+        if (exc.status_code >= 500 and isinstance(detail, str)
+                and not is_loopback_url(exc.service)):
+            detail = f"training service at {exc.service}: {detail}"
+        return HTTPException(status_code=exc.status_code, detail=detail)
     if isinstance(exc, TrainerTimeout):
         return HTTPException(status_code=504, detail=str(exc))
     return HTTPException(status_code=502, detail=str(exc))
@@ -86,9 +101,10 @@ async def _trainer_engines(request: Request) -> list[str] | None:
     Taken from the trainer's ``/health`` rather than from a list here: the old
     proxy imported the backend registry, which after the split (#137) would be a
     copy of another repository's code, kept in agreement by hand. None — an
-    unreachable trainer, or one older than the ``engines`` field — skips the
-    check; the trainer validates the request itself either way. Both outcomes are
-    cached, so an unreachable trainer costs the 5 s once a minute, not per submit.
+    unreachable trainer, a /health that is not the trainer's JSON, or a trainer
+    older than the ``engines`` field — skips the check; the trainer validates the
+    request itself either way. Both outcomes are cached, so an unreachable
+    trainer costs the 5 s once a minute, not per submit.
     """
     state = request.app.state
     cached = getattr(state, "trainer_engines", None)
