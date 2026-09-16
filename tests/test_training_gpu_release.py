@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from atr_serving.training.gpu_release import ReleaseResult, release_gpu
 
