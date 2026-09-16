@@ -1707,6 +1707,12 @@ page total: 246 chars -> 1,760 chars (7.2x)
 | medieval | 50,673 chars | 74,408 chars | **1.47×** |
 | 19th century | 62,913 chars | 62,913 chars | **1.00×** |
 
+> **Corrected in §21.** The next paragraph is wrong. The 60-page sample was
+> dominated by `zh-regierungsratsprotokolle` (931,173 of ~1.19 M lines) and never
+> reached the two small federal-protocol sources, which *were* truncated — 59.7 %
+> and 30.2 % of their lines. The 1.00 % CER was not evidence of anything: it was
+> measured on five pages from the unaffected source.
+
 The 19th-century corpus has no word-level `TextEquiv` and was never affected —
 which is precisely why it reached 1.00 % CER on identical code, and why the
 medieval/19th-century gap was never about the difficulty of medieval script.
@@ -1915,3 +1921,88 @@ work.
 Attribution reached 119 of 200 pages, the rest falling in the index ranges that
 skipped pages make ambiguous — the module's docstring explains why it declines to
 guess, and leaving them as "unattributed" is the right behaviour.
+
+---
+
+## 21. The 19th-century models on a published held-out benchmark
+
+§20 found that the 19th-century CERs (1.00 / 1.07 / 1.41 %) came from five pages
+of documents that also appear in training. This section is the number that
+replaces them.
+
+### The test set
+
+*Handwritten Text Recognition Test Set: Minutes of the Swiss Federal Council
+(1848-1903)*, Hodel & Schoch 2021, https://doi.org/10.5281/zenodo.4746342,
+CC BY 4.0. 2,751 ground-truth line images drawn at random from ~150,000 pages of
+BAR E1004.1#1000/9#1-215. Every page carries `status="GT"`.
+
+Mirrored privately as `dh-unibe/image-text_federal-minutes-testset` in
+`pagexml-hf` shape (one row per line, `project_name` `TEST_federal_minutes`), with
+the text read by `_own_text`. The card cites the Zenodo record.
+
+**Zero document overlap**: its 111 `docId`s checked against all 115 `docId`s on
+the train and validation sides of `qwen3vl-german-xix-v1`. Same period (1848–1903)
+and script as the training corpus, different documents and hands — the clean case,
+where a drop cannot be blamed on a change of era.
+
+Lines were cut with the service's own `samples_for` + `write_crops`, so they are
+shaped the way the models were trained. 2,751 lines, 114,960 characters, the same
+count the dataset build produced.
+
+### Result, all 2,751 lines
+
+| model | CER | WER | ratio | collapsed | CER on the rest |
+|---|---:|---:|---:|---:|---:|
+| `qwen3vl-german-xix-v1` | **0.2551** | 0.3917 | 0.815 | 18.4 % | 0.0921 |
+| `qwen3.5-2b-german-xix-v1` | 0.2937 | 0.4223 | 0.771 | 22.2 % | 0.0988 |
+| `qwen3.5-4b-german-xix-v1` | 0.3596 | 0.4733 | 0.685 | 29.3 % | 0.0884 |
+
+"Collapsed" = the prediction is under a third of the reference.
+
+A factor of 25–35 against the reported figures. Two things make up the gap:
+
+* **Reading.** On the lines each model does transcribe, CER is 0.09–0.10. That is
+  the held-out reading quality of these models on unseen 19th-century hands.
+* **Stopping.** On a fifth to a third of lines they write the first word and
+  stop. The crops are clean — one checked by eye is a complete, legible 54-char
+  line (`Gerichten auf den Prozeß einlassen wolle. Auf Anregen,` → `Zürchen`).
+
+The collapse is **not** explained by line length: lines over 70 characters
+collapse *less* (7 %) than 45–55 (28 %). It is tied to the images: **289 lines
+collapse in all three models, against 33 if collapse were independent**, and on
+those lines all three write the same first word — `verwaltung.`, `ner`, `seiner`,
+`dem`, `Protokoll`.
+
+### The 19th-century corpus was affected by the parser bug after all
+
+That signature is the §17 bug's. So the old and fixed readers were compared over
+**every** page of the 19th-century corpus rather than a sample:
+
+| source | lines | truncated | char gain |
+|---|---:|---:|---:|
+| `nr-sr-vereinigte-bundesversammlung-xix` | 7,606 | **59.7 %** | **3.00×** |
+| `parlamentsdienste-protokolle` | 5,100 | **30.2 %** | **1.74×** |
+| `kurrent-xix` | 127,957 | 1.1 % | 1.02× |
+| `zh-regierungsratsprotokolle` | 931,173 | 0.0 % | 1.00× |
+
+About 7,500 truncated lines, some 0.6 % of the corpus — and concentrated in the
+two **federal-protocol** sources, the material closest to a Federal Council test
+set. That fits a model that learned "on this kind of page, write the first word
+and stop", and never saw the behaviour contradicted because the cantonal Zurich
+volumes, nearly 80 % of the data, look different and were not truncated.
+
+It fits; it is not proven. The proof is a retrained model: re-prepare the
+19th-century corpus with the fixed reader and score it on this set. Nothing in
+this section justifies predicting the number that run will produce.
+
+### Lesson, again
+
+§17's "1.00× — never affected" came from 60 random pages of a corpus in which one
+source holds 78 % of the lines. A uniform sample of a skewed corpus measures its
+largest source. Per-source checks over the whole corpus cost minutes; the wrong
+conclusion cost three published model cards.
+
+The three cards now carry the held-out result, name the benchmark by DOI, state
+that the headline CER above the note is not held-out, and record the training-data
+defect.
