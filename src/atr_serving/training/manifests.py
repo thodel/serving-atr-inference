@@ -85,7 +85,13 @@ def split_pages(
     val: list[str] = []
     for document in order:
         block = groups[document]
-        if not train or (len(train) + len(block) <= target):
+        # Half a block, not a whole one: taking a document only while it fits
+        # entirely under the target can only ever undershoot, and it did — v5's
+        # first two datasets came out at 84 % and 85 % against a 90 % partition,
+        # because whole manuscripts are large and the last one to fit is refused.
+        # Rounding to whichever side leaves the fraction closer centres the error
+        # instead of biasing every dataset's training set downwards.
+        if not train or (len(train) + len(block) / 2 <= target):
             train += block
         else:
             val += block
