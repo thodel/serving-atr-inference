@@ -1729,3 +1729,71 @@ clone trick in §16 cannot help, because the damage is in the compiled JSONL.
 measured: it was built against a distribution that no longer exists, and the short
 lines it removes may be legitimate once the references are whole. It stays in the
 codebase as an option, defaulting to off.
+
+---
+
+## 18. `qwen3vl-medieval-german-v3` — what the parser was costing
+
+Corpus prepared again from scratch with the fixed parser (§17), `min_train_chars`
+back to 0, everything else identical to v1: same four repositories, same seed,
+same 0.9 page-level partition.
+
+### The corpus
+
+Same 12,301 pages, same 325,768 lines, same 325,651 samples — **four million more
+characters**. Nothing was added; what had been thrown away came back.
+
+| repo | v1 chars/line | v3 chars/line | gain |
+|---|---:|---:|---:|
+| `rats-und-richtebuecher_xv-xvi` | 12.7 | 34.5 | **2.71×** |
+| `aaeb-xiv-xvii` | 24.7 | 36.6 | **1.49×** |
+| `bullinger-autoren` | 49.9 | 52.6 | 1.05× |
+| `koenigsfelden-charters-post-1500` | 76.4 | 77.8 | 1.02× |
+| **total** | **33.2** | **45.7** | **1.38×** |
+
+Concentrated exactly where word-level `TextEquiv` exists. `aaeb-xiv-xvii` was also
+affected, which §17 did not predict — only the Zurich books were on the list.
+
+Training-set line length, median **7 → 42 characters**; samples of ≤3 characters,
+**25.6 % → 4.1 %**. The 19th-century corpus sits at median 30 and 0.8 %. So the
+"medieval corpus is full of fragments" reading in §16 was wrong: four fifths of
+those fragments were truncated transcriptions, and `min_train_chars` was a filter
+against an artefact of our own parser.
+
+### The result
+
+| | v1 | v2 (`min_train_chars=4`) | **v3 (parser fixed)** |
+|---|---:|---:|---:|
+| CER | 0.5322 | 0.4995 | **0.1120** |
+| WER | 0.6199 | 0.6046 | **0.2787** |
+| `length_ratio` | 0.479 | 0.586 | **1.0012** |
+| missing chars | 4,389 | 3,587 | **185** |
+| substitutions | 325 | 380 | 546 |
+
+4.75× better than v1, in 4 h 48 on one H100, no preemption.
+
+**The comparison is exact.** The first 200 validation lines are byte-identical
+between v1 and v3 — they come from pages with no word-level `TextEquiv` and were
+never affected — so all three CERs are measured against the same reference
+strings. The gain is entirely in the training data.
+
+The error profile inverted, which is the part that matters: v1's errors were
+missing text (4,389 of 4,799), v3's are substitutions (546 of 926). Misreadings
+instead of truncation — the profile an HTR model is supposed to have.
+
+```
+REF: Hanns pfister Jacob slossers knecht
+v1:  Hanns
+v3:  Hanns Pfister Jacob glogsters knecht
+```
+
+### Still open
+
+The near-square crops remain: blocks holding fragments of three lines, carrying a
+one-character reference (`REF "a"`, `REF "i"`). 7.9 % of validation by aspect
+ratio, and now a measurable share of the remaining 0.112, because they are simply
+wrong ground truth. That is the next lever — but measure how much it actually
+costs before building a filter for it. §16 is the cautionary tale.
+
+Published privately as `dh-unibe/qwen3vl-medieval-german-v3` (544 MB, 15 files)
+and copied to the share.
