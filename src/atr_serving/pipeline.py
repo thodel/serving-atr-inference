@@ -18,7 +18,8 @@ from PIL import Image
 
 from atr_serving import __version__
 from atr_serving.api.schemas import Line, RecognitionResult
-from atr_serving.image_io import decode_image
+from atr_serving.image_io import decode_image, encode_png, fit_pixel_budget
+from atr_serving.training.contracts import VLM_PIXEL_BUDGET
 
 # async (line_image_bytes, content_type) -> recognized text
 RecognizeLine = Callable[[bytes, str], Awaitable[str]]
@@ -90,7 +91,62 @@ def generation_budget(spec, settings) -> int:
     return wanted
 
 
-async def recognize_page_vllm(image, content_type, spec, vllm_client, max_tokens) -> RecognitionResult:
+def visual_budget(spec, settings) -> int | None:
+    """Pixels one image may carry into this model, or None to send it untouched.
+
+    **Serving has to replay the scale training used.** The fine-tune pinned every
+    page to ``VLM_PIXEL_BUDGET["page"]`` — 2048 visual tokens against Qwen3-VL's
+    32x32 grid — and passed it on the command line
+    (``training/vlm_cmd.py``). Nothing applied it on the way out: ``vllm serve``
+    is launched with no processor kwargs and the request path never resized, so a
+    full archival scan arrived at the model's own default, which for Qwen3-VL is
+    **16384 tokens an image**. Eight times the training scale, and more than the
+    whole 16384-token context this gateway serves with.
+
+    The symptom is not an error. ``qwen3vl-german-xix-v1`` read ten pages of
+    Lassberg correspondence and returned 3 to 36 characters each — correct
+    German every time, always the largest writing on the page, ``finish_reason``
+    ``stop`` rather than ``length`` (agentic_historian#435). A model given an
+    image at a scale it never trained on does not fail, it answers briefly.
+
+    The same three-source shape as ``generation_budget``: the model's own
+    ``max_pixels``, then its level's training budget, and a setting that turns the
+    whole thing off for anyone who needs the old behaviour back.
+    """
+    if not settings.vllm_visual_budget:
+        return None
+    return spec.max_pixels or VLM_PIXEL_BUDGET.get(spec.level)
+
+
+def fit_to_budget(image: bytes, content_type: str, max_pixels: int | None,
+                  model_id: str = "?") -> tuple[bytes, str]:
+    """``(bytes, content_type)`` for this image within ``max_pixels``.
+
+    Returns the original bytes untouched when there is no budget, when the image
+    already fits, or when it cannot be decoded — a page that PIL cannot open is
+    the engine's problem to report, not this function's to hide behind a 500.
+    """
+    if not max_pixels:
+        return image, content_type
+    try:
+        img = decode_image(image)
+    except Exception as exc:  # noqa: BLE001 — the engine reports a bad image, not us
+        logger.warning("{}: cannot decode image to apply the visual budget: {}",
+                       model_id, exc)
+        return image, content_type
+
+    fitted = fit_pixel_budget(img, max_pixels)
+    if fitted is img:
+        return image, content_type
+
+    logger.info("{}: image {}x{} -> {}x{} for a {}-pixel budget (~{} visual tokens)",
+                model_id, img.width, img.height, fitted.width, fitted.height,
+                max_pixels, max_pixels // (32 * 32))
+    return encode_png(fitted), "image/png"
+
+
+async def recognize_page_vllm(image, content_type, spec, vllm_client, max_tokens,
+                              max_pixels: int | None = None) -> RecognitionResult:
     """Page-level VLM: send the whole image in one chat call.
 
     Reports truncation. A page is many times more output than a line, and
@@ -100,6 +156,7 @@ async def recognize_page_vllm(image, content_type, spec, vllm_client, max_tokens
     simply gave up.
     """
     t0 = time.perf_counter()
+    image, content_type = fit_to_budget(image, content_type, max_pixels, spec.id)
     text, finish_reason = await vllm_client.transcribe_image_detail(
         spec.id, image, content_type, spec.prompt, max_tokens
     )

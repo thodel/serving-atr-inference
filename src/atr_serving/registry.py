@@ -47,6 +47,11 @@ class ModelSpec(BaseModel):
     #: are not the same length, and because a global that suits one of them
     #: silently truncates the other (#131).
     max_new_tokens: int | None = None
+    #: Pixels one image may carry into this model. None = the level's training
+    #: budget (``VLM_PIXEL_BUDGET``). Declared per model for the same reason
+    #: ``max_new_tokens`` is: the budget belongs to the fine-tune, and serving at
+    #: a different one is a silent distribution shift, not an error.
+    max_pixels: int | None = None
     residency: Literal["pinned", "lazy"] = "lazy"
     gpu_affinity: int | None = None
     prompt: str | None = None  # optional VLM instruction; None = image-only (e.g. LightOnOCR)

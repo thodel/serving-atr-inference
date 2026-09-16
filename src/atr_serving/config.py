@@ -148,6 +148,11 @@ class Settings(BaseSettings):
     #: which is why it is no longer the answer for both (#131). A page-level model
     #: gets ``vllm_max_new_tokens_page`` unless its registry entry declares its own
     #: ``max_new_tokens``.
+    #: Send each vLLM model its images at the pixel budget its fine-tune used.
+    #: Off sends the scan as it is, which is what this gateway did until a page
+    #: model answered in fragments because the image arrived at eight times the
+    #: scale it was trained on.
+    vllm_visual_budget: bool = True
     vllm_max_new_tokens: int = 512
     #: Generation ceiling for a **page**. A dense page of nineteenth-century German
     #: runs well past 512 tokens, and hitting the ceiling is a normal ``200`` whose

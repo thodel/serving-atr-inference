@@ -30,6 +30,39 @@ properties of that registration are load-bearing:
   model cards put it plainly — "serving it with different wording is a silent
   distribution shift". Do not reword it to match another model's prompt.
 
+### The pixel budget (handled since #136, and the reason to read this)
+
+The same failure as the token ceiling, one layer over, and considerably harder to
+see. The fine-tune pinned every page to **2048 visual tokens** — 
+`VLM_PIXEL_BUDGET["page"]`, 2 097 152 pixels against Qwen3-VL's 32x32 grid — and
+passed it to the trainer on the command line. Serving passed nothing: `vllm serve`
+went out without processor kwargs and the request path never resized, so an
+archival scan reached the model at **its own default of 16384 tokens an image**.
+Eight times the training scale, and more than the whole 16384-token context this
+gateway serves with.
+
+It does not raise. On 2026-09-16 `qwen3vl-german-xix-v1` read ten pages of
+Lassberg correspondence and returned **3 to 36 characters each** — correct German
+every time, and every time the largest writing on the page: a salutation, a date,
+an address. `finish_reason` was `stop`, not `length`, so nothing was marked
+truncated. A model shown an image at a scale it never trained on does not fail,
+it answers briefly and looks content.
+
+Since #136 the request carries the budget of the fine-tune that is about to read
+it. A model with a budget of its own says so in its registry entry:
+
+```yaml
+    max_pixels: 4014080     # this fine-tune saw pages larger
+```
+
+`ATR_VLLM_VISUAL_BUDGET=false` restores the old behaviour for anyone who needs
+it. The resize is lossless PNG, so what changed is the scale and nothing else.
+
+**This is the first thing to check when a VLM reads a fraction of a page.** A
+short answer from a page model is far more likely to be a scale mismatch than a
+model that cannot read the hand — and the two look identical from the outside
+until you notice every fragment is the biggest text in the image.
+
 ### The token ceiling (handled since #131, worth knowing)
 
 A page-level model now gets **`ATR_VLLM_MAX_NEW_TOKENS_PAGE`** (4096), not the
