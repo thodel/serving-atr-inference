@@ -1846,3 +1846,72 @@ A crop-geometry filter would be real work for under 5 %, and it would also delet
 whatever legitimate short lines fall under the threshold. Not worth it. The
 finding is recorded so the idea does not get proposed again from the same
 plausible-sounding reasoning that produced §16.
+
+---
+
+## 20. What the reported CERs were actually measured on
+
+Scoring the held-out subset separately (open since §14) turned up something
+larger: **until `4785410` the test stage scored `val.jsonl[:eval_samples]` — the
+head of the file** — and `_prepare_multi` writes that file one dataset after
+another. So every CER in §12–§19 describes whichever material happens to sit at
+the front of its corpus, not the corpus.
+
+The fix landed 2026-09-15 21:37. The v3 training job started 00:02 the next
+morning, but the UBELIX checkout was last pulled at 07:38 the previous day — the
+fix was committed and not deployed. Worth remembering: on UBELIX the container
+takes the code from `~/serving-atr-inference` via `PYTHONPATH`, so a job runs
+whatever that checkout was when it started, not what is on `main`.
+
+It cuts both ways.
+
+**Medieval v3 was better than reported.** The first 594 lines of its `val.jsonl`
+are `escript_test` and `escript_test_2` — the held-out projects — so all 200
+scored samples fell inside them, where a random draw would have given about six.
+The 0.1120 was already a held-out number.
+
+**The 19th-century runs are weaker than reported.** Their 200 scored lines come
+from **five pages**, every one of them from a document that also appears in
+training. The 1.00 % is one source, five pages, same hands.
+
+### v3 measured properly, on two disjoint subsets
+
+| subset | n | ref chars | CER | WER | ratio |
+|---|---:|---:|---:|---:|---:|
+| held-out (`escript_test`, all 594 lines) | 594 | 24,543 | **0.1109** | 0.2747 | 1.001 |
+| in-domain (seeded 200 of 18,475) | 200 | 11,629 | **0.1427** | 0.3601 | 0.989 |
+
+The held-out number rests on all 594 lines rather than 200, and lands at 0.1109
+against the 0.1120 the 200 gave — so that sample was representative.
+
+**The held-out set scores *better* than the in-domain set, and the reason is the
+source mix, not the split.** `escript_test` is Rats- und Richtebücher material,
+of which the model saw 139,708 lines; it is an unseen *project* in a very
+familiar hand. The in-domain draw is spread over all four repositories, including
+the harder ones. Per source, on that draw:
+
+| source | n | CER |
+|---|---:|---:|
+| `aaeb-xiv-xvii` | 51 | 0.0979 |
+| `bullinger-autoren` | 66 | 0.1301 |
+| `koenigsfelden-charters-post-1500` | 27 | 0.1574 |
+| unattributed (mostly rats-und-richtebuecher) | 56 | 0.1695 |
+
+So **0.14 is the number that describes the model on this corpus**, and 0.11 the
+number on one familiar-looking held-out project. Neither is wrong; quoting only
+the second would be.
+
+### A gap in the #120 fix
+
+`plan_eval_subset` attributes a page by the pool index in its **image** name. At
+`granularity: line` the image is a crop, whose index carries no source, so
+attribution finds nothing and the planner falls back to an unstratified draw —
+which is what it did here (`0 source(s) could be attributed`). The `page` field on
+each row does carry the index, and reading that instead makes it work: the table
+above was produced by calling `attribute` on `page` rather than `image`. Every
+line-granularity run is affected, which is all of the medieval and 19th-century
+work.
+
+Attribution reached 119 of 200 pages, the rest falling in the index ranges that
+skipped pages make ambiguous — the module's docstring explains why it declines to
+guess, and leaving them as "unattributed" is the right behaviour.
