@@ -55,12 +55,18 @@ und „ausbauen" sich nicht vermischen.
 - **E3 — dünne Naht.** Kein geteiltes Vertragspaket. Der Proxy validiert nicht
   mehr selbst und leitet durch.
 - **E4 — `eval/` zieht mit ins Trainingsrepo.**
+- **E5 — die Registry wird geteilt, nicht über HTTP übergeben** (16.09., nach
+  Rückfrage). Sie liegt auf dem Share, je trainiertem Modell eine Datei, atomar
+  geschrieben. Das ersetzt `POST /admin/register` und löst zugleich die Frage,
+  wie der Trainer einen `base_model` auflöst (§4 T3).
 
 ---
 
 ## 3. Was die Naht wirklich ist
 
-Drei HTTP-Kanten, **keine** geteilte Python-Abhängigkeit:
+Drei HTTP-Kanten, **keine** geteilte Python-Abhängigkeit — und seit E5
+**kein** Netzaufruf für die Übergabe eines Modells. Gewichte und Registrierung
+liegen beide auf dem Share:
 
 | Kante | heute | nachher |
 |---|---|---|
@@ -151,38 +157,67 @@ verhindert, dass die Naht über Monate wieder zuwächst.
 `test_the_engine_list_comes_from_the_trainer_health`,
 `test_a_validation_error_from_the_trainer_stays_readable`.
 
-### T3 — Der Handover
+### T3 — Der Handover über die geteilte Registry
 
-Hier hat die erste Fassung am meisten danebengelegen. **Ein geteilter Mount
-allein löst gar nichts:**
+**Umgestellt am 16.09.2026.** Die erste Fassung wollte `POST /admin/register`.
+Verworfen, weil die Einwände gegen eine geteilte Datei bei genauerer Prüfung
+nicht halten — und die entscheidende Tatsache war schon im Code:
 
-- `overlay_path` (`settings.py:39`) und `models_overlay` (`config.py:45`) sind
-  **beide `REPO_ROOT`-relativ**, und `REPO_ROOT` kommt aus `__file__` im
-  jeweiligen Checkout. Zwei Checkouts, **zwei Dateien**, keine auf dem Share —
-  egal was gemountet ist.
-- Und selbst eine wirklich geteilte Datei schlösse den Kreis nicht: der Gateway
-  ruft `load_overlay` **genau einmal**, in `create_app` (`app.py:42`). Es gibt
-  keine Reload-Route. Geteilte Datei plus Neustart ist dieselbe Operation wie
-  keine geteilte Datei plus Neustart.
-- `save_overlay` ist zudem die **einzige nicht-atomar** geschriebene
-  Mehrschreiber-Datei des Repos (`overlay.py:82` `write_text`, gegen
-  `os.replace` in `jobstore.py:226` und `staging.rename` in
-  `artefact_cache.py:354`).
+```
+jobstore.save():  tmp.write_text(...)  →  os.replace(tmp, job_json)
+jobs_root       = /mnt/wbkolleg_dh_1/…/jobs      ← derselbe Share
+job.json        = 48 Stück, seit Wochen in Betrieb
+```
+
+**Atomares Ersetzen auf diesem CIFS-Mount ist im Betrieb bewiesen.**
+
+| Einwand gegen eine geteilte Datei | Befund |
+|---|---|
+| Zwei Checkouts, zwei Dateien (`REPO_ROOT`-relativ) | Eine Env-Variable, die beide auf den Share zeigt |
+| `save_overlay` schreibt nicht atomar (`overlay.py:82`) | Gilt für den heutigen Code, nicht für den Share — der Jobstore macht es auf demselben Mount richtig |
+| Der Gateway liest nur beim Start (`app.py:42`) | Stimmt, **gilt für HTTP aber genauso** |
+| Zwei Trainer parallel (T6) | Read-Modify-Write auf **eine** Datei verliert Updates → **eine Datei pro Modell**, wie der Jobstore eine pro Job hat |
+
+```
+/mnt/wbkolleg_dh_1/Textrecognition_Training/registry/
+    models.yaml          ← kuratiert; Quelle bleibt Git im Serving-Repo;
+                           vom Gateway beim Start veröffentlicht
+    trained/<id>.yaml    ← vom Trainer geschrieben, tmp + os.replace
+```
+
+Was das gegenüber HTTP gewinnt: kein Endpunkt, keine Authentifizierung dafür,
+**kein Fehlerfall „Gateway weg → Job scheitert nach 24 Stunden"** — und es
+**löst T1.4 mit**: der Trainer liest `models.yaml` vom Share, ohne Kopie, die
+auseinanderläuft, und sieht auch Modelle, die auf der Serving-Box deaktiviert
+sind. `GET /models` hätte die versteckt (`routes.py:157` filtert auf `enabled`).
+
+Mit E3 vereinbar: geteilt wird ein **Dateiformat**, kein Python-Paket. Ein
+Vertragstest in beiden Repos pinnt das Schema.
+
+Was es kostet:
+
+- **Die Validierung wandert** vom Empfang zum Lesen. Eine kaputte Datei darf den
+  Gateway nicht umwerfen — sie wird übersprungen und protokolliert. Die
+  Aufteilung pro Modell macht das natürlich.
+- **Nachladen ist unscharf.** CIFS-Clients cachen Attribute (`actimeo`); eine
+  mtime-Prüfung kann um diese Frist nachhinken. Nach einem 24-Stunden-Lauf
+  unerheblich.
+- **Der Share ist nicht immer da** (Ende August zwei Wochen offline). Ein
+  Trainer, der eine Registry-ID auflösen muss und keine Registry findet, muss
+  laut scheitern — nicht wie `load_heldout` still mit einer leeren weitermachen.
 
 | Issue | Inhalt |
 |---|---|
-| T3.1 | `POST /admin/register` am Gateway: nimmt die `ModelSpec`-Felder, schreibt das Overlay **gatewayseitig**, atomar |
-| T3.2 | Die drei `_register` rufen die Route statt `upsert_entry` (kraken `runner.py:403,459`; trocr `:199`; vlm `:389`). Erst **danach** stimmt der Satz, dass nur noch der Gateway das Overlay schreibt |
-| T3.3 | `set_enabled` nach dem Gate ebenfalls über die Route (`kraken runner.py:459`) |
-| T3.4 | Registry zur Laufzeit neu laden — sonst braucht jedes trainierte Modell einen Gateway-Neustart |
-| T3.5 | `local_path` über den Share. Zwei Fallen: **vLLM kann daraus nie bedienen** (`resolve_model_path` prüft `vllm_merged_dir/<id>` und fällt auf `hf_repo or id` zurück, **nie** `local_path`), und ein nicht auflösbarer Pfad meldet **keine fehlende Datei** — `kraken_loader.resolve_weights` gibt `None` zurück, und `None` heisst „per DOI aus dem Netz holen" |
-| T3.6 | `merge_loras.py` bleibt **serving-seitig** — jeder Pfad darin ist eine Gateway-Einstellung. Aber `peft_blocker` (`:151-168`) ist **fatal** und verweist auf `.venvs/vlm-train`, „which trained it" — ein venv, das künftig auf der anderen Box liegt. Die Serving-Box muss peft ≥ dem Trainer pinnen, und **nichts erzwingt das über zwei Repos** |
-| T3.7 | `.env`: Gateway und Trainer lesen heute **dieselbe Datei** (`atr-gateway.service:16`, `atr-train.service:15`). Der Split macht aus einer Wahrheitsquelle für `trained_root`, Overlay-Pfad und API-Key **zwei**, auf zwei Maschinen, ohne Vertragstest |
+| serving#138 | Gateway veröffentlicht `models.yaml` (inklusive deaktivierter Einträge), liest `trained/` Datei für Datei, lädt ohne Neustart nach |
+| training#14 | Die drei `_register` und `set_enabled` schreiben `trained/<id>.yaml` atomar; eine gescheiterte Registrierung lässt den Job scheitern und sagt, wo die Gewichte liegen |
+| training#5 | `base_models.py` liest die Registry vom Share; die vorläufige `registry.py`-Kopie aus #3 verschwindet |
 
-**Tests**: `test_a_registration_over_http_lands_in_the_overlay`,
-`test_the_registry_picks_up_a_model_without_a_restart`,
-`test_an_unresolvable_local_path_fails_loudly_instead_of_fetching_a_doi`,
-`test_the_two_env_files_agree_on_trained_root` (Vertragstest über beide Repos).
+**Unverändert gültige Fallen:** vLLM bedient nie aus `local_path`
+(`manager.py:81-88`), und ein nicht auflösbarer `local_path` meldet keine
+fehlende Datei, sondern wird zu einer DOI-Suche (`kraken_loader.py:70-72`).
+`merge_loras.py` bleibt auf der Serving-Seite; seine peft-Bindung an das venv,
+„which trained it", spannt künftig über zwei Maschinen und wird von nichts
+geprüft.
 
 ### T4 — `eval/` zieht mit
 
