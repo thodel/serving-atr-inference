@@ -721,130 +721,21 @@ class TestCurveWhileRunning:
         assert client.get("/jobs/20260101T000000Z-nope/curve").status_code == 404
 
 
-# ── the GPU claim the gateway asks about (#129) ──────────────────────────────
+# ── the GPU claim is gone (#139) ─────────────────────────────────────────────
 
-def _set_stage(client, job_id, status, stage):
-    """Move a job, then let the scheduler notice — as it does in production.
-
-    The claim is cached and refreshed on the scheduler's tick, because computing
-    it costs a listing of every record and on asterAIx that store is on CIFS: the
-    uncached route took longer than the gateway's probe allowed, the probe timed
-    out, and the gateway launched a model beside a running job. So the tests
-    drive the same refresh the tick does rather than reaching past it.
-    """
-    store = store_of(client)
-    job = store.load(job_id)
-    job.status, job.stage = status, stage
-    store.save(job)
-    app_module.refresh_gpu_claim(store.list())
+def test_the_trainer_no_longer_serves_a_gpu_claim(client):
+    """The gateway asked this before every vLLM launch (#129) while both shared
+    idhefix GPU 1. Training left that box on 16.09.2026; nothing asks now."""
+    assert client.get("/gpu-claim").status_code == 404
+    assert not hasattr(app_module, "refresh_gpu_claim")
+    assert not hasattr(app_module, "GPU_STAGES")
 
 
-def test_no_job_no_claim(client):
-    body = client.get("/gpu-claim").json()
-    assert body["claimed"] is False and body["jobs"] == []
+def test_the_runner_no_longer_asks_the_gateway_to_let_go():
+    """A run reaching ``train`` used to POST the gateway's release endpoint."""
+    import importlib.util
 
+    from atr_serving.training.runner_base import BasePipeline
 
-def test_training_claims_the_card(client):
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    _set_stage(client, job_id, "training", "train")
-    body = client.get("/gpu-claim").json()
-    assert body["claimed"] is True
-    assert body["jobs"] == [{"id": job_id, "status": "training", "stage": "train",
-                             "holding": True}]
-    assert body["holding"] is True
-
-
-def test_testing_claims_the_card_too(client):
-    """The test stage loads the model and generates — same card, same claim."""
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    _set_stage(client, job_id, "testing", "test")
-    assert client.get("/gpu-claim").json()["claimed"] is True
-
-
-def test_a_cpu_stage_claims_the_card_without_holding_it(client):
-    """Both halves of the answer, and they are not the same question.
-
-    `claimed` says a run owns this box; `holding` says it is on the card right
-    now. prepare and compile are disk and CPU — v5 left the GPU at 0 % for 74
-    minutes — so the gateway keeps serving, and the trainer asks it to let go
-    when train begins.
-    """
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    _set_stage(client, job_id, "compiling", "compile")
-    body = client.get("/gpu-claim").json()
-    assert body["claimed"] is True
-    assert body["holding"] is False
-    assert body["jobs"][0]["holding"] is False
-
-
-def test_preparing_claims_the_card_too(client):
-    """The rule that cost v4 on 15.09.
-
-    prepare and compile touch no GPU, so they did not claim it — and a vLLM model
-    launched at 08:53 during v4's prepare was still holding 16.5 GB when the train
-    stage began at 09:52. The run died three minutes later, wanting 850 MiB with
-    841 MiB free. A few hours of cold starts is the cheaper loss.
-    """
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    _set_stage(client, job_id, "preparing", "prepare")
-    assert client.get("/gpu-claim").json()["claimed"] is True
-
-
-def test_a_running_job_with_no_stage_is_treated_as_holding(client):
-    """Guessing "not on the card" from a silent record is the costly guess."""
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    _set_stage(client, job_id, "training", None)
-    body = client.get("/gpu-claim").json()
-    assert body["claimed"] is True and body["holding"] is True
-
-
-def test_a_queued_job_does_not_claim_the_card(client):
-    """Nothing is running yet, and the trainer's own preflight guards the start."""
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    _set_stage(client, job_id, "queued", None)
-    assert client.get("/gpu-claim").json()["claimed"] is False
-
-
-def test_a_running_job_with_no_stage_claims_the_card(client):
-    """Guessing "not the GPU" from a silent record is the guess that costs a run."""
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    _set_stage(client, job_id, "training", None)
-    assert client.get("/gpu-claim").json()["claimed"] is True
-
-
-def test_a_finished_job_releases_the_card(client):
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    _set_stage(client, job_id, "completed", None)
-    assert client.get("/gpu-claim").json()["claimed"] is False
-
-
-def test_a_stale_claim_is_recomputed_rather_than_served(client, monkeypatch):
-    """A cache nobody refreshes freezes on "no claim" — the one wrong answer.
-
-    This is what a dead scheduler looks like from the gateway's side: the route
-    pays for a listing instead of repeating something it can no longer vouch for.
-    """
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    store = store_of(client)
-    job = store.load(job_id)
-    job.status, job.stage = "training", "train"
-    store.save(job)                       # deliberately no refresh: nobody ticked
-
-    assert client.get("/gpu-claim").json()["claimed"] is False   # cache still fresh
-
-    app_module.app.state.gpu_claim_at = 0.0                      # now it is old
-    body = client.get("/gpu-claim").json()
-    assert body["claimed"] is True
-    assert body["jobs"][0]["id"] == job_id
-
-
-def test_a_claim_with_no_cache_at_all_is_computed(client):
-    """Nothing seeded yet (a route hit before the first tick)."""
-    job_id = client.post("/jobs", json=BODY).json()["job_id"]
-    store = store_of(client)
-    job = store.load(job_id)
-    job.status, job.stage = "training", "train"
-    store.save(job)
-
-    app_module.app.state.gpu_claim = None
-    assert client.get("/gpu-claim").json()["claimed"] is True
+    assert importlib.util.find_spec("atr_serving.training.gpu_release") is None
+    assert not hasattr(BasePipeline, "_release_gpu")

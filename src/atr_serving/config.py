@@ -88,12 +88,12 @@ class Settings(BaseSettings):
     # the /train/* proxy (#35), and callers (the Discord bot, the ATR-MCP) know
     # nothing but :8200: ufw opens that port alone to tei.
     #
-    # Since the split (#137) the trainer lives on asteraix, and after the cutover
-    # this is ``http://130.92.59.242:8204``. Whether the host part is loopback
-    # decides two things (see :func:`is_loopback_url`): whether /train/gpu may
-    # fall back to reading *this* box's cards, and whether the vLLM launcher asks
-    # the trainer's /gpu-claim at all — a claim on asteraix says nothing about a
-    # card on idhefix.
+    # Since the split (#137) the trainer lives on asteraix; on idhefix this is
+    # ``http://130.92.59.242:8204`` since 16.09.2026. Nothing about this box's
+    # cards depends on it any more (#139): /train/gpu is always the trainer's
+    # reading, the vLLM launcher asks no trainer, and GET /gpu reads this box.
+    # Whether the host part is loopback only decides how a trainer's 5xx text is
+    # labelled (see :func:`is_loopback_url`).
     train_url: str = "http://127.0.0.1:8204"
     #: Sent as ``X-API-Key`` on every call to ``train_url``. **Shared** with the
     #: trainer, which reads the same variable name (ATR_TRAIN_API_KEY) and refuses
@@ -140,10 +140,22 @@ class Settings(BaseSettings):
     vllm_python: Path = REPO_ROOT / ".venvs" / "vllm" / "bin" / "vllm"
     vllm_gpu: int = 1
     vllm_port_base: int = 8210
-    # Budget for resident vLLM models on vllm_gpu. ~30 GB lets LightOnOCR (3 GB,
-    # pinned) + one 8B (18 GB) co-reside while leaving headroom for the small
-    # engine services that also sit on GPU 1. A 2nd 8B is evicted (LRU).
-    vllm_vram_budget_mb: int = 30000
+    # Budget for resident vLLM models on vllm_gpu, in registry vram_mb; a launch
+    # beyond it evicts the least recently used lazy model. Unset (the default),
+    # it is read at launch time: the card less what the engines hold less
+    # vllm_vram_reserve_mb — 28190 MiB on idhefix GPU 1 on 16.09.2026, see
+    # manager.vram_budget. Set, it is an override. The old default, 30000, was
+    # more than that card has left once the engines (15830 MiB) are on it.
+    vllm_vram_budget_mb: int | None = None
+
+    @field_validator("vllm_vram_budget_mb", mode="before")
+    @classmethod
+    def _empty_budget_is_unset(cls, value):
+        # `ATR_VLLM_VRAM_BUDGET_MB=` in .env reads as "derive it", not as an error.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     # GPU 1 is essentially free (~45 GB). At 0.45, weights (16.6 GB) + Qwen3-VL's
     # profiling overhead left NEGATIVE KV cache. 0.70 (~32 GB) leaves ~8 GB for KV
     # and still ~14 GB for the small engines (kraken/trocr) on GPU 1.
@@ -167,11 +179,6 @@ class Settings(BaseSettings):
     # 17 GB of weights on GPU 1. Cap it — OCR/HTR needs nothing close.
     vllm_max_model_len: int | None = 16384
     vllm_startup_timeout_s: int = 300  # 8B load + CUDA graph capture can exceed 180s
-    #: How long to wait for the trainer to say whether a job claims the GPU
-    #: (#129). Short on purpose: this sits on the launch path, and no answer falls
-    #: back to the free-VRAM check. Only used while ``train_url`` is loopback — a
-    #: remote trainer is not asked at all (#137).
-    gpu_claim_timeout_s: float = 2.0
     #: How many line crops are recognised at once in the line pipeline. The loop was
     #: strictly sequential: a 79-line page cost 79 round trips at ~0.58s, ~46s, which
     #: measurement made the largest single item in an ensemble page
@@ -208,15 +215,13 @@ class Settings(BaseSettings):
 def is_loopback_url(url: str) -> bool:
     """Whether ``url`` names this machine: ``localhost`` or a loopback address.
 
-    The one test for "is the trainer on this box" (#137), shared by the
-    /train/gpu fallback and the vLLM launch guard so the two cannot disagree.
-    Textual, no DNS: the configured values are literal addresses, and a lookup on
-    the launch path is a new way to hang. Anything else — a hostname, this box's
-    own public address, a URL without a scheme — counts as remote. That is the
-    safe reading for /train/gpu (it refuses rather than describing the wrong
-    machine); for the launch guard it means the trainer is not asked, which is
-    only right because the in-repo trainer binds 127.0.0.1 and is reachable under
-    no other name.
+    The one test for "is the trainer on this box" (#137). Since #139 it only
+    decides whether a trainer's 5xx text is prefixed with the trainer's URL and
+    whether a missing ATR_TRAIN_API_KEY is warned about; nothing about a GPU
+    depends on it. Textual, no DNS: the configured values are literal
+    addresses, and a lookup is a new way to hang. Anything else — a hostname,
+    this box's own public address, a URL without a scheme — counts as remote,
+    which errs towards naming the machine.
     """
     host = urlsplit(url).hostname
     if not host:

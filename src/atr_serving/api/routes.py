@@ -1,6 +1,6 @@
 """Public API routes.
 
-- /health, /models (meta)
+- /health, /models, /gpu (meta)
 - /segment, /recognize, /ocr (recognition; kraken + vLLM wired)
 - /v1/chat/completions (OpenAI-compatible passthrough to a resident vLLM model)
 """
@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import socket
 import time
 
 import httpx
@@ -18,6 +20,7 @@ from loguru import logger
 from starlette.concurrency import run_in_threadpool
 
 from atr_serving import __version__
+from atr_serving import gpu as gpu_probe
 from atr_serving.api.auth import require_api_key
 from atr_serving.api.schemas import (
     EngineStatus,
@@ -32,7 +35,7 @@ from atr_serving.api.schemas import (
 )
 from atr_serving.clients import EngineError, get_engine_client, get_kraken_client, get_vllm_client
 from atr_serving.config import Settings
-from atr_serving.manager import GpuBusyError, ManagerError
+from atr_serving.manager import GpuBusyError, ManagerError, vllm_pids, vram_budget
 from atr_serving.pipeline import (
     generation_budget, recognize_lines, recognize_page_vllm, visual_budget,
 )
@@ -107,25 +110,6 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
     )
 
 
-@router.post("/admin/release-gpu", tags=["meta"],
-             dependencies=[Depends(require_api_key)])
-async def release_gpu(request: Request) -> dict:
-    """Unload the evictable vLLM models, so a training run can have the card.
-
-    Called by the trainer at the moment a job moves from compile into train
-    (#129). Until then the gateway serves normally on an idle GPU — prepare and
-    compile are disk and CPU, and v5 left the card at 0 % for 74 minutes — and
-    this is what closes the window that killed v4, whose prepare-time model was
-    still resident when training began.
-
-    Pinned models are kept and named. An in-flight request against a dropped
-    model dies with it; that is one recognition request against a run that would
-    otherwise fail hours later.
-    """
-    dropped, kept = await run_in_threadpool(_manager(request).release_lazy)
-    return {"dropped": dropped, "kept": kept}
-
-
 @router.get("/health", response_model=HealthResponse, tags=["meta"])
 async def health(request: Request) -> HealthResponse:
     registry = _registry(request)
@@ -185,6 +169,70 @@ async def list_models(request: Request) -> ModelsResponse:
             for spec in registry.all() if spec.enabled
         ]
     )
+
+
+@router.get("/gpu", tags=["meta"], dependencies=[Depends(require_api_key)])
+async def gpu(request: Request) -> dict:
+    """This box's cards, and what holds memory on them.
+
+    /train/gpu answers for the trainer's cards since #137 — right for its
+    question (why is a job waiting?), and since 16.09.2026 those are asteraix's.
+    Whoever read this box's load there (the vLLM budget, the neighbours' RAG
+    service on card 0) lost it; this is where it is now (#139).
+
+    The rows have the shape of the trainer's ``GET /gpu``, so the bot's
+    ``/atr_gpu`` formats both boxes alike, with three differences:
+
+    - no job attribution: nothing trains here, so ``registered`` is always
+      false, and ``job_attribution_available``/``known_job_pids`` are absent
+      rather than false — a reader takes false to mean "trainer unreachable".
+    - ``unaccounted_mib`` is therefore what is not ``own_service``. That
+      includes the neighbours' gunicorn workers (10392 MiB on card 0,
+      16.09.): memory we cannot have. It is not an alarm — their rows carry
+      ``service: gunicorn.service``, which a reader classifies as foreign; only
+      an orphan or a row without a unit is unexplained.
+    - ``vllm`` says which of our rows are the gateway's own vLLM children and
+      which are engines: both run in ``atr-*`` units, and on 16.09. the child
+      serving qwen3vl-german-xix-v1 (12000 MiB in the registry) held 16584 MiB
+      beside 15830 MiB of engines. ``pids`` are the rows descending from this
+      gateway, ``residents`` what they serve, ``budget_mb`` the resident budget
+      as it would be computed for the next launch.
+    """
+    settings = _settings(request)
+    registry = _registry(request)
+    residents = []
+    for model_id in _manager(request).resident_model_ids():
+        spec = registry.get(model_id)       # None: reloaded out of the registry
+        residents.append({"id": model_id,
+                          "vram_mb": spec.vram_mb if spec else None,
+                          "residency": spec.residency if spec else None})
+
+    def read() -> dict:
+        # nvidia-smi plus /proc for every row: seconds on a wedged driver, so
+        # never on the event loop.
+        cards = gpu_probe.inspect()
+        budget = vram_budget(settings, cards)
+        return {
+            "host": socket.gethostname(),
+            "cards": gpu_probe.as_rows(cards),
+            "vllm": {
+                "gpu": settings.vllm_gpu,
+                "service": gpu_probe.service_of(os.getpid()),
+                "pids": vllm_pids(cards),
+                "residents": residents,
+                "budget_mb": budget.mb,
+                "budget": budget.reason,
+            },
+        }
+
+    try:
+        return await run_in_threadpool(read)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — a wedged driver, a timeout
+        raise HTTPException(
+            status_code=502,
+            detail=f"nvidia-smi failed: {type(exc).__name__}: {exc}") from exc
 
 
 # ── recognition endpoints ───────────────────────────────────────────────────
@@ -266,8 +314,8 @@ async def _ensure_vllm_port(request: Request, model: str) -> int:
     try:
         return await run_in_threadpool(_manager(request).ensure_resident, model)
     except GpuBusyError as exc:
-        # 503, not 502: nothing is broken. The card is busy and the same request
-        # will work once it is not (#129).
+        # 503, not 502: nothing is broken. The card is full of things this
+        # gateway cannot evict, and the same request can work once it is not.
         raise HTTPException(status_code=503, detail=str(exc),
                             headers={"Retry-After": "300"}) from exc
     except ManagerError as exc:

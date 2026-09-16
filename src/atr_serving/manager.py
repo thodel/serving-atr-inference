@@ -7,7 +7,7 @@ Linger=no, so root systemd units aren't an option). The manager:
 - keeps a VRAM budget on the vLLM GPU (GPU 1; GPU 0 is the shared RAG GPU) and
   evicts the least-recently-used **lazy** model when a new one won't fit,
 - never evicts ``pinned`` models (e.g. LightOnOCR) once started,
-- reports residency to ``/health`` and ``/models``.
+- reports residency to ``/health``, ``/models`` and ``/gpu``.
 
 Everything that touches the OS (process launch, health poll) is behind the
 ``Launcher`` protocol so the manager is fully testable without a GPU or vLLM.
@@ -27,7 +27,7 @@ import httpx
 from loguru import logger
 
 from atr_serving import gpu as gpu_probe
-from atr_serving.config import Settings, is_loopback_url
+from atr_serving.config import Settings
 from atr_serving.registry import ModelSpec, Registry
 
 
@@ -36,12 +36,15 @@ class ManagerError(RuntimeError):
 
 
 class GpuBusyError(ManagerError):
-    """The card is claimed by a training run, so no model is launched.
+    """The card cannot hold the model right now, so it is not launched.
 
     Separate from :class:`ManagerError` because the answer to the caller is
-    different: nothing is broken, the box is busy, and the same request will
-    work later. The route turns this into 503 with a ``Retry-After`` rather than
-    the 502 a genuine launch failure gets.
+    different: nothing is broken — the memory is held by something no eviction
+    here can free (an engine, a pinned model, a neighbour, a model still on its
+    way out) — and the route turns this into 503 with a ``Retry-After`` rather
+    than the 502 a genuine launch failure gets. Until #139 it also carried a
+    training run's claim on the card; since training left this box (16.09.2026)
+    the free-memory check is all that raises it.
     """
 
 
@@ -108,6 +111,26 @@ RESERVE_MB = 2048
 
 #: vLLM's own ceiling. Above it the driver's own allocations stop fitting.
 MAX_UTILISATION = 0.95
+
+#: The resident budget when the card cannot be read. idhefix GPU 1, measured
+#: 16.09.2026 21:50 CEST, after training moved to asteraix:
+#:
+#:       46068 MiB  the card
+#:     - 15830 MiB  the engines (atr-party 8918, atr-trocr 3840, atr-kraken 3072)
+#:     -  2048 MiB  the reserve (vllm_vram_reserve_mb)
+#:     = 28190 MiB
+#:
+#: The constant this replaces, 30000, promised 1810 MiB the card does not have:
+#: #139 counted the engines at 14.4 GB, and they have grown since. A reading at
+#: launch time (:func:`vram_budget`) follows them; this number does not.
+MEASURED_VRAM_BUDGET_MB = 28190
+
+#: Re-reads of the card, one second apart, before a launch that has just evicted
+#: a model is refused for want of memory. ``SubprocessHandle.terminate`` waits
+#: for ``vllm serve``; the engine core it started holds the memory and may still
+#: be on the card a moment later, and refusing on memory that is on its way out
+#: would turn a working eviction into a 503.
+EVICTION_SETTLE_READS = 15
 
 
 @dataclass(frozen=True)
@@ -212,6 +235,69 @@ def gpu_budget(spec: ModelSpec, gpu: int, settings: Settings) -> Budget:
     return budget
 
 
+@dataclass(frozen=True)
+class VramBudget:
+    """How many MiB of registry ``vram_mb`` may be resident at once, and why."""
+
+    mb: int
+    reason: str
+
+
+def plan_vram_budget(total_mb: int, engines_mb: int, reserve_mb: int) -> int:
+    """The card, less what the engines hold, less the reserve.
+
+    Pure, so the 16.09. measurement is a test rather than a comment. What the
+    gateway's own vLLM children hold is *not* subtracted: that is the budget
+    being spent, and the LRU accounts for it.
+    """
+    return max(0, total_mb - engines_mb - reserve_mb)
+
+
+def vllm_pids(cards: list, own_pid: int | None = None) -> list[int]:
+    """Processes holding GPU memory that descend from this gateway.
+
+    Those are its vLLM children (``vllm serve`` and the engine core it starts).
+    Everything else of ours on the card is an engine — or a child that outlived
+    its parent, which no eviction can free and which therefore counts as one.
+    """
+    me = own_pid or os.getpid()
+    return [p.pid for card in cards for p in card.processes
+            if gpu_probe.descends_from(p.pid, me)]
+
+
+def vram_budget(settings: Settings, cards: list | None = None,
+                own_pid: int | None = None) -> VramBudget:
+    """The resident budget on ``vllm_gpu``, as the card is now.
+
+    ``vllm_vram_budget_mb`` set is an override and wins. Unset, the budget is
+    read at launch time from the card, so it follows the engines rather than
+    describing the card they had when someone last measured (#139). An
+    unreadable card falls back to :data:`MEASURED_VRAM_BUDGET_MB`.
+    """
+    if settings.vllm_vram_budget_mb is not None:
+        return VramBudget(settings.vllm_vram_budget_mb,
+                          f"{settings.vllm_vram_budget_mb} MiB, configured")
+    gpu, reserve = settings.vllm_gpu, settings.vllm_vram_reserve_mb
+    if cards is None:
+        try:
+            cards = gpu_probe.inspect()
+        except Exception as exc:  # noqa: BLE001 — no nvidia-smi, a wedged driver
+            return VramBudget(MEASURED_VRAM_BUDGET_MB,
+                              f"{MEASURED_VRAM_BUDGET_MB} MiB, measured 16.09.2026; "
+                              f"gpu {gpu} unreadable ({type(exc).__name__})")
+    card = next((c for c in cards if c.index == gpu), None)
+    if card is None:
+        return VramBudget(MEASURED_VRAM_BUDGET_MB,
+                          f"{MEASURED_VRAM_BUDGET_MB} MiB, measured 16.09.2026; "
+                          f"nvidia-smi lists no gpu {gpu}")
+    ours = set(vllm_pids([card], own_pid))
+    engines = sum(p.used_mib for p in card.processes
+                  if p.own_service and p.pid not in ours)
+    mb = plan_vram_budget(card.memory_total_mib, engines, reserve)
+    return VramBudget(mb, f"{mb} MiB = {card.memory_total_mib} MiB gpu {gpu} "
+                          f"- {engines} MiB engines - {reserve} MiB reserve")
+
+
 class VllmLauncher:
     """Default launcher: spawn ``vllm serve`` pinned to one GPU."""
 
@@ -274,7 +360,6 @@ class ModelManager:
         # insertion/use order == LRU order (front = least recently used)
         self._resident: "OrderedDict[str, _Resident]" = OrderedDict()
         self._ports = _PortPool(settings.vllm_port_base)
-        self._said_trainer_is_remote = False
 
     # ── introspection ────────────────────────────────────────────────────────
     def resident_model_ids(self) -> list[str]:
@@ -300,8 +385,16 @@ class ModelManager:
             logger.warning("vLLM {} unhealthy; relaunching", model_id)
             self._drop(model_id)
 
-        self._refuse_while_training(spec)
-        self._make_room_for(spec)
+        # Evict first, then look at the card. In the other order (#129 to #139)
+        # the LRU was dead code: the budget is at most the card less the engines
+        # and the reserve, and a resident holds at least its vram_mb, so a launch
+        # that does not fit the budget does not fit the free memory either — and
+        # the fit check refused it before the eviction could run. On 16.09., with
+        # qwen3vl-german-xix-v1 resident (16584 MiB), GPU 1 had 13654 MiB free:
+        # every model above 11.6 GB would have been refused, and nothing would
+        # ever have evicted xix to make room.
+        evicted = self._make_room_for(spec)
+        self._check_fit(spec, settle=evicted)
         port = self._ports.acquire()
         try:
             handle = self.launcher.start(spec, port, self.settings.vllm_gpu, self.settings)
@@ -314,163 +407,63 @@ class ModelManager:
         return port
 
     # ── the card is not ours alone ───────────────────────────────────────────
-    def _refuse_while_training(self, spec: ModelSpec) -> None:
-        """Do not launch onto a card a training run is using (#129).
+    def _check_fit(self, spec: ModelSpec, *, settle: bool) -> None:
+        """Do not launch into a card that cannot hold the model.
 
-        The incident: a vLLM instance serving qwen3vl-german-xix-v1 held 18.4 GB
-        of GPU 1 for fifteen hours, and v4 could not start — the trainer's own
-        preflight caught that one and queued the job, which is the guard working
-        in the *other* direction. Nothing guarded this direction, so a single
-        inference request arriving during a 33-hour run would have loaded a model
-        beside it and taken the run down with an OOM at the next peak.
+        The card is shared with the engines (15.8 GB on idhefix GPU 1, 16.09.)
+        and whatever else lands on it; launching into a full card is what
+        produced the incidents this manager exists for. The bar is the one the
+        launcher's own sizing applies (:data:`MIN_HEADROOM` plus the reserve), so
+        a card too full for the model is refused here with a 503 rather than by
+        :func:`gpu_budget` with a 502 a moment later.
 
-        Two questions, in order of how much they know:
+        Until #139 this also asked the trainer whether a run held the card, and
+        demanded an idle card when it did not answer. Nothing trains on this box
+        any more (the in-repo trainer is disabled, ``train_url`` names asteraix),
+        so there is no one to ask and nothing to be unsure about: the free memory
+        decides, for any ``train_url``.
 
-        1. **Is a job on the card?** The trainer answers, and its answer is
-           definite. It is asked about that rather than about free memory,
-           because VRAM dips between peaks and a dip is not room.
-
-           Note ``holding``, not ``claimed``: a job in ``prepare`` or ``compile``
-           is running but the card is idle — v5 left it at 0 % for 74 minutes —
-           and refusing every launch through that was an hour of inference given
-           away per run. What made refusing look necessary is that a model
-           launched during prepare was still resident when train began, which is
-           how v4 died on 15.09. That is now handled where it belongs: the
-           trainer asks the gateway to let go at the stage boundary
-           (:mod:`atr_serving.training.gpu_release`), after advancing to
-           ``training`` so nothing new can land in the gap.
-        2. **Is there physically space?** Asked when the first question cannot be
-           answered, and asked anyway when it can be answered with "no claim" —
-           launching into a card that is full is what produced the incidents this
-           manager exists for, training or no training.
-
-        Unreachable trainer means the first question is skipped, loudly, and the
-        second decides — but on a stricter bar. Fitting is not the same as being
-        safe: on 15.09. the trainer's answer timed out while v4 trained, the card
-        had 7.6 GB free, and 7.6 GB fits a 3 GB model perfectly while leaving the
-        run to die at its next peak. So an unverifiable launch requires the card
-        to look idle rather than merely roomy. Inference still works on an idle
-        box when the trainer is down, which is what fail-open was for; what it is
-        no longer allowed to do is guess on a busy one.
+        ``settle``: a model was just evicted; give its memory a few reads to come
+        back (:data:`EVICTION_SETTLE_READS`) before refusing.
         """
-        claim = self._gpu_claim()
-        if claim is not None and claim.get("holding"):
-            jobs = ", ".join(
-                f"{j.get('id')} ({j.get('stage') or 'stage unknown'})"
-                for j in claim.get("jobs", [])
-            ) or "a training job"
-            raise GpuBusyError(
-                f"GPU {self.settings.vllm_gpu} is claimed by {jobs}; not launching "
-                f"{spec.id} beside it. Models already resident keep serving; this "
-                "one becomes available when the run finishes."
-            )
-
-        free_total = gpu_probe.card_memory(self.settings.vllm_gpu)
-        if free_total is None:
-            return                      # nvidia-smi cannot say; the launch decides
-        free_mb, _ = free_total
-        need = spec.vram_mb + self.settings.vllm_vram_reserve_mb
-
-        if claim is None:
-            # No answer from the trainer, so "is a run in progress" is unknown and
-            # the card has to answer it. Fitting is not enough: on 15.09. v4 was
-            # training with 7.6 GB left on the card, which fits a 3 GB model and
-            # would still have taken the run down at its next peak. A card with a
-            # multi-GB consumer on it looks exactly like this, so an unverifiable
-            # launch requires the card to look **idle** — free space of the order
-            # of the whole vLLM budget — not merely roomy enough for this model.
-            idle = self.settings.vllm_vram_budget_mb
-            if free_mb < idle:
-                raise GpuBusyError(
-                    f"GPU {self.settings.vllm_gpu} has {free_mb} MB free and the "
-                    f"trainer did not answer, so whether a run is using the card is "
-                    f"unknown. Not launching {spec.id}: below {idle} MB free, "
-                    "something substantial is resident and it cannot be ruled out "
-                    "that it is a training job."
-                )
-            return
-
-        if free_mb < need:
-            raise GpuBusyError(
-                f"GPU {self.settings.vllm_gpu} has {free_mb} MB free, {spec.id} needs "
-                f"{need} MB (model {spec.vram_mb} + {self.settings.vllm_vram_reserve_mb} "
-                "reserve). Not launching into a card that cannot hold it."
-            )
-
-    def _gpu_claim(self) -> dict | None:
-        """The trainer's answer, or None when it did not give one.
-
-        Asked only of a trainer on this box (#137). Once ``train_url`` points at
-        asteraix, its claim describes a card there: a run holding it would refuse
-        every vLLM launch here — a day of inference given away for a card nobody
-        on this box touches — and a free card there would say nothing about this
-        one. A remote trainer is answered for with a definite "no claim", so the
-        ordinary fit check below decides, as it does for any launch the trainer
-        has no stake in. The coordination itself goes in #139.
-        """
-        if not is_loopback_url(self.settings.train_url):
-            if not self._said_trainer_is_remote:
-                # Once, not per launch: it is a property of the deployment.
-                logger.info("trainer at {} is not on this box; vLLM launches are "
-                            "checked against free VRAM only", self.settings.train_url)
-                self._said_trainer_is_remote = True
-            return {"holding": False, "claimed": False, "jobs": [], "trainer": "remote"}
-        url = f"{self.settings.train_url.rstrip('/')}/gpu-claim"
-        # A trainer on loopback accepts callers without a key today; a newer one
-        # would not, and sending the shared key costs nothing.
-        key = self.settings.train_api_key
-        headers = {"X-API-Key": key} if key else {}
-        try:
-            response = httpx.get(url, timeout=self.settings.gpu_claim_timeout_s,
-                                 headers=headers)
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:  # noqa: BLE001 — any failure means "no answer"
-            logger.warning(
-                "trainer did not answer {} ({}); launching on free VRAM alone, so a "
-                "training run on GPU {} is unprotected right now",
-                url, exc, self.settings.vllm_gpu,
-            )
-            return None
-
-    def release_lazy(self) -> tuple[list[str], list[str]]:
-        """Drop every evictable resident. ``(dropped, kept)``.
-
-        Called by the trainer at the moment a run moves onto the card. Pinned
-        models are **kept** — that is what pinning means — and named in the
-        result rather than counted, because if the run then fails to fit around
-        one, the log has to say which.
-
-        An in-flight request against a dropped model dies with it. That is the
-        trade being made: one recognition request against a run that would
-        otherwise OOM hours later.
-        """
-        dropped, kept = [], []
-        for model_id, resident in list(self._resident.items()):
-            if resident.spec.residency == "pinned":
-                kept.append(model_id)
-                continue
-            self._drop(model_id)
-            dropped.append(model_id)
-        logger.info("released GPU {}: dropped {}, kept pinned {}",
-                    self.settings.vllm_gpu, dropped or "nothing", kept or "nothing")
-        return dropped, kept
+        gpu = self.settings.vllm_gpu
+        reserve = self.settings.vllm_vram_reserve_mb
+        need = math.ceil(spec.vram_mb * MIN_HEADROOM) + reserve
+        for attempt in range(EVICTION_SETTLE_READS if settle else 1):
+            if attempt:
+                self._sleep(1)
+            memory = gpu_probe.card_memory(gpu)
+            if memory is None:
+                return                  # nvidia-smi cannot say; the launch decides
+            free_mb = memory[0]
+            if free_mb >= need:
+                return
+        raise GpuBusyError(
+            f"GPU {gpu} has {free_mb} MB free, {spec.id} needs {need} MB (model "
+            f"{spec.vram_mb} x {MIN_HEADROOM} + {reserve} reserve). Not launching "
+            "into a card that cannot hold it; `GET /gpu` names what is holding it."
+        )
 
     def _used_mb(self) -> int:
         return sum(r.spec.vram_mb for r in self._resident.values())
 
-    def _make_room_for(self, spec: ModelSpec) -> None:
-        budget = self.settings.vllm_vram_budget_mb
-        while self._used_mb() + spec.vram_mb > budget:
+    def _make_room_for(self, spec: ModelSpec) -> list[str]:
+        """Evict LRU lazy models until ``spec`` fits the budget. The evicted ids."""
+        evicted: list[str] = []
+        budget = vram_budget(self.settings)
+        while self._used_mb() + spec.vram_mb > budget.mb:
             victim = self._lru_lazy()
             if victim is None:
                 logger.warning(
-                    "vLLM budget {} MB exceeded by {} and no lazy model to evict; "
-                    "launching anyway", budget, spec.id,
+                    "vLLM budget {} exceeded by {} and no lazy model to evict; "
+                    "launching anyway", budget.reason, spec.id,
                 )
-                return
-            logger.info("Evicting LRU vLLM model {} to fit {}", victim, spec.id)
+                return evicted
+            logger.info("Evicting LRU vLLM model {} to fit {} (budget {})",
+                        victim, spec.id, budget.reason)
             self._drop(victim)
+            evicted.append(victim)
+        return evicted
 
     def _lru_lazy(self) -> str | None:
         for mid, r in self._resident.items():  # front = LRU

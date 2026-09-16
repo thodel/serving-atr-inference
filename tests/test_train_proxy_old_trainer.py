@@ -1,10 +1,10 @@
 """The new proxy in front of the in-repo trainer (#137).
 
-That trainer stays on idhefix, idle, until #139 removes it — and until the
-cutover it is the one ``ATR_TRAIN_URL`` points at. It has no ``engines`` field in
-its /health and no ``/gpu``, so this is the "older trainer" branch of every
-fallback, run against the real app over ``httpx.ASGITransport`` rather than a
-script of what it would say. Delete this file with ``engines/kraken_train_svc``.
+That trainer is stopped and disabled on idhefix since 16.09.2026, and the code
+stays until the training package leaves this repository. It has no ``engines``
+field in its /health and no ``/gpu``, so this is the "older trainer" branch of
+every fallback, run against the real app over ``httpx.ASGITransport`` rather than
+a script of what it would say. Delete this file with ``engines/kraken_train_svc``.
 """
 
 from __future__ import annotations
@@ -96,17 +96,15 @@ def test_a_job_still_goes_through_and_is_listed(client):
     assert client.get(f"/train/jobs/{job_id}", headers=AUTH).json()["id"] == job_id
 
 
-def test_train_gpu_falls_back_to_this_box_for_the_old_trainer(client, monkeypatch):
-    seen: list[dict] = []
+def test_train_gpu_is_a_502_for_the_old_trainer_not_this_boxs_cards(client, monkeypatch):
+    """It has no /gpu. Until #139 that meant this box's reading, attributed from
+    its job list; now it is a 502 that points at GET /gpu."""
+    def no_reading(*args, **kwargs):
+        raise AssertionError("/train/gpu read this box's cards")
 
-    def cards(job_pids):
-        seen.append(dict(job_pids))
-        card = gpu_probe.Card(1, "NVIDIA A40", 46068, 0, 45589, 0, 0)
-        return [card]
-
-    monkeypatch.setattr(gpu_probe, "inspect", cards)
-    job_id = client.post("/train/jobs", json=BODY, headers=AUTH).json()["job_id"]
+    monkeypatch.setattr(gpu_probe, "inspect", no_reading)
+    client.post("/train/jobs", json=BODY, headers=AUTH)
     resp = client.get("/train/gpu", headers=AUTH)
-    assert resp.status_code == 200
-    assert resp.json()["job_attribution_available"] is True
-    assert seen == [{os.getpid(): job_id}]
+    assert resp.status_code == 502
+    assert "http://127.0.0.1:8204 has no /gpu" in resp.json()["detail"]
+

@@ -31,7 +31,6 @@ import os
 import shutil
 import signal
 import subprocess
-import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -67,10 +66,6 @@ from atr_serving.training.runner_base import tail
 from atr_serving.training.settings import TrainerSettings, get_settings
 
 RUNNING_STATUSES = ("preparing", "compiling", "training", "testing", "registering")
-
-#: The stages that put a job on the card *while it runs*. Kept for reporting —
-#: the claim no longer gates on it, see :func:`_claim_from`.
-GPU_STAGES = frozenset({"train", "test"})
 
 
 # ── wiring (overridable in tests via app.state) ─────────────────────────────
@@ -199,15 +194,11 @@ def schedule_once(
 
 def _schedule() -> TrainJob | None:
     """Run one scheduling pass with whatever seams are installed on app.state."""
-    started = schedule_once(
+    return schedule_once(
         _store(), _settings(),
         spawn=getattr(app.state, "spawn", None) or _spawn,
         vram_check=getattr(app.state, "vram_check", None) or check_vram,
     )
-    # The tick has just reconciled and listed every record, so the claim the
-    # gateway asks about costs nothing extra here — and nothing at all there.
-    refresh_gpu_claim(_store().list())
-    return started
 
 
 async def _scheduler() -> None:  # pragma: no cover - timing loop
@@ -248,9 +239,6 @@ async def lifespan(_app: FastAPI):  # pragma: no cover - process lifecycle
     # A restart must not leave a killed job looking like it is still training.
     for job in _store().list():
         _store().reconcile(job)
-    # Seeded before the first tick: an empty cache would answer "no claim" to the
-    # gateway, which is the one wrong answer this must never give.
-    refresh_gpu_claim(_store().list())
     task = asyncio.create_task(_scheduler())
     _app.state.scheduler = task
     try:
@@ -296,107 +284,6 @@ async def health() -> JSONResponse:
                  "running": len([j for j in jobs if j.status in RUNNING_STATUSES]),
                  "queued": len([j for j in jobs if j.status == "queued"])},
     })
-
-
-def compute_gpu_claim() -> dict:
-    """The claim, read from the job store.
-
-    Costs one listing of every job record. On asterAIx the store lives on a CIFS
-    share and holds 44 jobs, some of them 57 KB — under training load that took
-    longer than the gateway's two-second probe, the probe timed out, and the
-    gateway fell back to free VRAM and allowed a launch **beside a running job**.
-    The warning it logged is what caught it. So this is computed on the
-    scheduler's tick, which lists the store anyway, and the route answers from
-    the result: see :func:`refresh_gpu_claim`.
-    """
-    return {
-        "gpu": _settings().gpu,
-        "claimed": False,
-        "jobs": [],
-    } | _claim_from(_store().list())
-
-
-def _claim_from(jobs) -> dict:
-    """A running job claims the card from its first stage, not from ``train``.
-
-    This gated on ``GPU_STAGES`` for half a day, on the reasoning that prepare and
-    compile are disk and CPU and blocking inference through them — three and a
-    half hours for v3 — would be the worse fault. On 15.09. that reasoning cost a
-    run:
-
-        08:32  v4 enters prepare        claimed: false, by this rule
-        08:53  gateway launches vLLM    16.5 GB, correctly allowed
-        09:52  v4 enters train          the model is still resident
-        09:55  CUDA OOM, 850 MiB wanted, 841 MiB free
-
-    The hole was named in #129 when the rule was written — "a model already
-    resident when training starts stays resident" — and left open anyway. It is
-    not a trade between inference latency and training throughput; it is a trade
-    between a few hours of cold starts and a 33-hour run, and it was made the
-    wrong way round.
-
-    So a job claims the card as soon as it is running. Together with the trainer's
-    own preflight, which refuses to *start* a job onto an occupied card, the loop
-    closes: the card must be clear when a run begins, and nothing new may land on
-    it afterwards. Models already resident keep serving throughout — what is
-    refused is a launch.
-    """
-    claims = [
-        {"id": j.id, "status": j.status, "stage": j.stage,
-         # On the card *now*, as opposed to spoken for. prepare and compile are
-         # disk and CPU — v5 left the GPU at 0 % for 74 minutes — so the gateway
-         # may serve through them; what it may not do is still hold a model when
-         # `train` begins, and the trainer asks it to let go at that boundary
-         # (atr_serving.training.gpu_release).
-         "holding": j.stage is None or j.stage in GPU_STAGES}
-        for j in jobs if j.status in RUNNING_STATUSES
-    ]
-    return {"claimed": bool(claims), "jobs": claims,
-            "holding": any(c["holding"] for c in claims)}
-
-
-def refresh_gpu_claim(jobs) -> dict:
-    """Store the claim computed from a listing the caller already has."""
-    claim = {"gpu": _settings().gpu} | _claim_from(jobs)
-    app.state.gpu_claim = claim
-    app.state.gpu_claim_at = time.monotonic()
-    return claim
-
-
-def _claim_is_fresh() -> bool:
-    """False once the cache is older than several scheduler ticks.
-
-    A cache nobody refreshes freezes at whatever it last said, and the answer it
-    would freeze on is "no claim" — the one answer that must never be wrong. So a
-    stale cache is not served: the route pays for a listing instead. This is what
-    a dead scheduler looks like from here, and it is also why the tests can drive
-    the store directly.
-    """
-    at = getattr(app.state, "gpu_claim_at", None)
-    if at is None:
-        return False
-    return (time.monotonic() - at) < max(3 * _settings().poll_interval_s, 30.0)
-
-
-@app.get("/gpu-claim")
-async def gpu_claim() -> JSONResponse:
-    """Whether a job holds the training GPU right now.
-
-    The gateway asks this before it launches a vLLM model, so that inference
-    cannot take the card out from under a run in progress (#129). It exists
-    separately from ``/jobs`` for one blunt reason: ``/jobs`` on this box is
-    868 KB, and this sits on the gateway's launch path.
-
-    Reported as a claim, not as free memory, because memory is the wrong
-    question. VRAM use fluctuates during training; a gap between two peaks is
-    not an invitation. ``stage is None`` on a running job counts as a claim —
-    the record has not said what it is doing, and guessing "not the GPU" is the
-    guess that costs a multi-day run.
-    """
-    cached = getattr(app.state, "gpu_claim", None)
-    if cached is not None and _claim_is_fresh():
-        return JSONResponse(cached)
-    return JSONResponse(refresh_gpu_claim(_store().list()))
 
 
 @app.post("/jobs", status_code=202)

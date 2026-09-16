@@ -204,108 +204,41 @@ async def get_curve(request: Request, job_id: str) -> dict:
 async def gpu(request: Request) -> dict:
     """What holds GPU memory on the training box, and whether the trainer knows it.
 
-    Four fields carry the incidents this exists for. ``orphaned`` is a pid holding
-    memory with no ``/proc`` entry: the data-loader worker that kept a dead
-    parent's CUDA context alive for sixteen hours. ``registered`` is false for a
-    process belonging to no job the trainer recorded — the hand-started ``ketos``
-    run that displaced a scheduled one. ``service`` names the systemd unit behind
-    a process, so our own engines are not read as strays: on this box four
-    gunicorn workers of a neighbouring RAG service hold 10 GB on card 0, and a
-    trocr engine holds 1.6 GB on card 1, and only one of those is somebody else's
-    problem. ``unaccounted_mib`` totals what is neither a job nor one of ours —
-    the number a queued job is really waiting for, with the explainable part
+    Four fields carry the incidents this exists for (#414). ``orphaned`` is a pid
+    holding memory with no ``/proc`` entry: the data-loader worker that kept a
+    dead parent's CUDA context alive for sixteen hours. ``registered`` is false
+    for a process belonging to no job the trainer recorded — the hand-started
+    ``ketos`` run that displaced a scheduled one. ``service`` names the systemd
+    unit behind a process, so the trainer's own units are not read as strays.
+    ``unaccounted_mib`` totals what is neither a job nor one of ours — the
+    number a queued job is really waiting for, with the explainable part
     already taken out.
 
     A card with 0 % utilisation and no free memory is the shape of the problem;
     both numbers are here so nobody has to ssh in to see it.
 
-    **The trainer reads its own cards** (``GET /gpu``, #137), because the cards
-    that matter are the ones next to its job pids. This route used to read *this*
-    box's nvidia-smi and match the trainer's pids against *this* box's ``/proc``;
-    with the trainer on asteraix, a pid collision would mark a local stranger as
-    ``registered`` to a foreign job and drop it from ``unaccounted_mib`` — the
-    failure #414 exists to show, produced silently. So a remote trainer is never
-    answered with a local reading. Only an older trainer on this box, which has no
-    ``/gpu`` (404) or is not answering, still gets the local reading: there the
-    cards are the right ones.
+    **Always the trainer's own reading** (its ``GET /gpu``, #137): the cards
+    that matter are the ones next to its job pids, and those pids mean nothing
+    in this box's ``/proc`` — matched here, a collision would mark a local
+    stranger as ``registered`` to a foreign job and drop it from
+    ``unaccounted_mib``, the failure #414 exists to show, produced silently.
+    Until #139 a trainer on loopback without ``/gpu`` still got this box's
+    reading; that trainer is disabled since 16.09.2026, so a trainer without
+    ``/gpu`` is a 502 naming its URL, whatever the URL. This box's cards are
+    ``GET /gpu`` on the gateway.
     """
     train_url = request.app.state.settings.train_url
-    local = is_loopback_url(train_url)
     try:
         return await _client(request).gpu()
     except EngineError as exc:
-        if not local:
-            if isinstance(exc, TrainerError) and exc.status_code == 404:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(f"the training service at {train_url} has no /gpu (an "
-                            "older trainer?), and this gateway's own cards are on a "
-                            "different machine — a local reading would describe the "
-                            "wrong one. Update the trainer."),
-                ) from exc
-            raise _http_error(exc) from exc
-        if not (isinstance(exc, TrainerError) and exc.status_code == 404):
-            logger.warning("trainer /gpu failed ({}); reading this box's cards "
-                           "instead", exc)
-        # A trainer that answered at all may still list its jobs. One that timed
-        # out or refused the connection will not a moment later, and asking again
-        # would only double the wait.
-        return await _local_reading(request, ask_trainer=isinstance(exc, TrainerError))
-
-
-async def _local_reading(request: Request, *, ask_trainer: bool) -> dict:
-    """This box's cards, with pids attributed from the trainer's job list.
-
-    Correct only while the trainer runs on this box; :func:`gpu` guarantees that.
-    """
-    from atr_serving import gpu as gpu_probe
-
-    job_pids: dict = {}
-    attribution = False
-    if ask_trainer:
-        try:
-            listing = await _forward(_client(request).list_jobs())
-            for job in (listing or {}).get("jobs", []):
-                pid = job.get("pid")
-                if pid:
-                    job_pids[int(pid)] = job.get("id")
-        except HTTPException:
-            # The trainer being unreachable must not hide the cards. Everything is
-            # then reported unregistered, which is honest: nothing is known to
-            # belong to a job, and the response says the attribution is missing.
-            job_pids = {}
-        else:
-            attribution = True
-
-    try:
-        cards = gpu_probe.inspect(job_pids)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:                     # a wedged driver, a timeout
-        raise HTTPException(
-            status_code=502,
-            detail=f"nvidia-smi failed: {type(exc).__name__}: {exc}") from exc
-
-    out = []
-    for card in cards:
-        procs = [vars(p) for p in card.processes]
-        row = {k: v for k, v in vars(card).items() if k != "processes"}
-        row["processes"] = procs
-        # What nobody here can explain: not a training job, not one of our
-        # services. An engine holding memory is expected and must not be summed
-        # with a stray, or the number stops meaning anything and the row that
-        # matters gets read past — which is how a sixteen-hour orphan stays
-        # invisible.
-        row["unaccounted_mib"] = sum(
-            p["used_mib"] for p in procs
-            if not p["registered"] and not p["own_service"])
-        row["service_mib"] = sum(
-            p["used_mib"] for p in procs if p["own_service"])
-        row["orphaned_mib"] = sum(
-            p["used_mib"] for p in procs if p["orphaned"])
-        out.append(row)
-    return {"cards": out, "job_attribution_available": attribution,
-            "known_job_pids": len(job_pids)}
+        if isinstance(exc, TrainerError) and exc.status_code == 404:
+            raise HTTPException(
+                status_code=502,
+                detail=(f"the training service at {train_url} has no /gpu (the "
+                        "in-repo trainer never had one; training-atr-models "
+                        "does). This gateway's own cards are GET /gpu."),
+            ) from exc
+        raise _http_error(exc) from exc
 
 
 @router.post("/jobs/{job_id}/cancel")

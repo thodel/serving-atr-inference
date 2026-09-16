@@ -19,9 +19,9 @@ import, and a merge_loras test picked up a registration from the share.
 
 The trainer's address (#137) is the same trap. After the cutover idhefix's
 ``.env`` names asteraix in ``ATR_TRAIN_URL``; every ``Settings()`` in the suite
-would then treat the trainer as remote, and the #129 launch-guard tests would
-pass or fail for a reason that has nothing to do with the code. Its key would be
-sent wherever a test pointed a client. A test that wants a remote trainer or a
+would then treat the trainer as remote, and the proxy tests written for a local
+trainer would pass or fail for a reason that has nothing to do with the code. Its
+key would be sent wherever a test pointed a client. A test that wants a remote trainer or a
 key passes ``train_url``/``train_api_key`` to ``Settings`` itself.
 """
 

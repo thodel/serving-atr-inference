@@ -290,9 +290,10 @@ as recognition. The gateway authenticates itself to the trainer with a second, s
 key, `ATR_TRAIN_API_KEY`, which both machines must hold (see `.env.example`); if the
 trainer refuses it, the caller gets `502`, not `401`. A trainer that does not answer
 within `ATR_TRAIN_TIMEOUT_S` (20 s) is a `504` naming its URL; keep that below the bot's
-own 30 s, or the bot times out first and blames this box. `GET /train/gpu` is the
-trainer's reading of its own cards; only an older trainer on this box gets the local
-reading.
+own 30 s, or the bot times out first and blames this box.
+
+- `GET /train/gpu` — the trainer's cards, always its own reading (a trainer without `/gpu` is a `502`).
+- `GET /gpu` — this box's cards: the engines, the gateway's vLLM children and the vLLM budget (#139).
 
 | Endpoint | Returns | Use |
 |---|---|---|
@@ -460,6 +461,7 @@ that order when reassembling.
 |---|---|
 | Unknown model id (not registered, not a raw Zenodo ref) | `404`, naming the model and listing known ids |
 | Engine unreachable / failed to load the model | `502`, with the engine's reason |
+| vLLM model does not fit on its card | `503` + `Retry-After`, naming free and needed MB; `GET /gpu` shows what holds it |
 | Wrong engine for `/ocr` (party, line-level vLLM) | `400` → use `/recognize` |
 | Page with no detected lines | `200`, `text: ""`, **`lines: 0`** |
 

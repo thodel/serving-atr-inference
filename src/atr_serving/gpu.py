@@ -160,6 +160,27 @@ def _unit_of(pid: int) -> str | None:
     return None
 
 
+def service_of(pid: int) -> str | None:
+    """The systemd unit of ``pid`` — for the gateway, ``os.getpid()``.
+
+    Public because the gateway names its own unit in ``GET /gpu``: its vLLM
+    children run in it, so it is the ``service`` their rows carry.
+    """
+    return _unit_of(pid)
+
+
+def descends_from(pid: int, ancestor: int) -> bool:
+    """Whether ``pid`` is ``ancestor`` or one of its descendants.
+
+    How the gateway tells its own vLLM children from the engines on the same
+    card. The unit cannot: a child that outlived its ``vllm serve`` (a crashed
+    launch, a terminate that did not reach it) still sits in atr-gateway.service,
+    but it is no longer reachable from this process, and no eviction frees its
+    memory — so it has to count with the engines, not with the budget.
+    """
+    return ancestor in _ancestors(pid)
+
+
 def _ancestors(pid: int, limit: int = 32) -> list:
     """pid and its ancestors, nearest first. Empty when /proc has no such pid."""
     chain, seen = [], set()
@@ -216,6 +237,37 @@ def inspect(job_pids: dict | None = None) -> list:
         if card is not None:
             card.processes.append(process)
     return cards
+
+
+def as_rows(cards: list) -> list:
+    """Cards as JSON rows, with the three totals a reader acts on.
+
+    The shape the trainer's ``GET /gpu`` answers with too (the contract fixture
+    ``tests/fixtures/trainer_contract/gpu.json``), so one reader — the bot's
+    ``/atr_gpu`` — formats both boxes alike.
+    """
+    out = []
+    for card in cards:
+        procs = [vars(p) for p in card.processes]
+        row = {k: v for k, v in vars(card).items() if k != "processes"}
+        row["processes"] = procs
+        # What nobody here can explain: not a training job, not one of our
+        # services. An engine holding memory is expected and must not be summed
+        # with a stray, or the number stops meaning anything and the row that
+        # matters gets read past — which is how a sixteen-hour orphan stays
+        # invisible. A neighbour's named unit is in here too: it is memory we
+        # cannot have. Whether it is also an alarm is the reader's call, from the
+        # row — atr_status._classify calls a row with a unit "foreign", and only
+        # an orphan or a row without a unit "unexplained".
+        row["unaccounted_mib"] = sum(
+            p["used_mib"] for p in procs
+            if not p["registered"] and not p["own_service"])
+        row["service_mib"] = sum(
+            p["used_mib"] for p in procs if p["own_service"])
+        row["orphaned_mib"] = sum(
+            p["used_mib"] for p in procs if p["orphaned"])
+        out.append(row)
+    return out
 
 
 def card_memory(index: int) -> tuple[int, int] | None:

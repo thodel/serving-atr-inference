@@ -89,7 +89,7 @@ def make_client(trainer: Trainer, train_url: str = ASTERAIX,
 def no_local_reading(monkeypatch):
     """Fail the test if anything looks at this box's cards or processes.
 
-    Checked after the test as well as raised: the route turns any exception from
+    Checked after the test as well as raised: the route turned any exception from
     the probe into a 502, which a test expecting a 502 would read as success.
     """
     touched: list[str] = []
@@ -97,10 +97,11 @@ def no_local_reading(monkeypatch):
     def forbid(name):
         def forbidden(*args, **kwargs):
             touched.append(name)
-            raise AssertionError(f"gpu.{name} was called for a remote trainer")
+            raise AssertionError(f"gpu.{name} was called for /train/gpu")
         return forbidden
 
-    for name in ("inspect", "_smi", "_proc_info", "_ancestors", "_unit_of"):
+    for name in ("inspect", "card_memory", "_smi", "_proc_info", "_ancestors",
+                 "_unit_of"):
         monkeypatch.setattr(gpu_probe, name, forbid(name))
     yield
     assert touched == [], "a local GPU reading was taken for a remote trainer"
@@ -521,85 +522,63 @@ def test_a_pid_on_the_training_box_is_never_attributed_to_a_local_process(no_loc
     assert trainer.paths() == [("GET", "/gpu")]        # no /jobs for attribution
 
 
-def test_a_remote_trainer_without_gpu_is_a_502_not_a_local_reading(no_local_reading):
+@pytest.mark.parametrize("url,key", [(ASTERAIX, TRAINER_KEY), (LOCAL, "")],
+                         ids=["remote", "loopback"])
+def test_a_trainer_without_gpu_is_a_502(no_local_reading, url, key):
+    """Until #139 a loopback trainer without /gpu got this box's reading. That
+    trainer is disabled; whatever answers 404 now is not a reason to describe a
+    different machine's cards."""
     trainer = Trainer()                                  # /gpu → 404
-    resp = make_client(trainer).get("/train/gpu", headers=AUTH)
+    resp = make_client(trainer, train_url=url, train_api_key=key).get(
+        "/train/gpu", headers=AUTH)
     assert resp.status_code == 502
     detail = resp.json()["detail"]
-    assert ASTERAIX in detail and "/gpu" in detail and "wrong" in detail
+    assert f"{url} has no /gpu" in detail and "GET /gpu" in detail
     assert trainer.paths() == [("GET", "/gpu")]
 
 
+@pytest.mark.parametrize("url,key", [(ASTERAIX, TRAINER_KEY), (LOCAL, "")],
+                         ids=["remote", "loopback"])
 @pytest.mark.parametrize("failure,status", [
     (httpx.ConnectError("refused"), 502),
     (httpx.ReadTimeout(""), 504),
     ((503, {"detail": "nvidia-smi is not on PATH"}), 503),
-])
-def test_a_failing_remote_trainer_is_never_answered_with_a_local_reading(
-        no_local_reading, failure, status):
+    ((200, GPU), 200),
+    ((404, {"detail": "Not Found"}), 502),
+], ids=["refused", "timeout", "trainer-503", "answers", "no-gpu"])
+def test_train_gpu_never_reads_this_box(no_local_reading, url, key, failure, status):
+    """Every outcome, either kind of trainer: the trainer's reading or an error
+    naming it — never this box's cards, and never a second call for job pids."""
     trainer = Trainer({("GET", "/gpu"): failure})
-    resp = make_client(trainer).get("/train/gpu", headers=AUTH)
+    resp = make_client(trainer, train_url=url, train_api_key=key).get(
+        "/train/gpu", headers=AUTH)
     assert resp.status_code == status
-
-
-def _local_cards(job_pids):
-    card = gpu_probe.Card(1, "NVIDIA A40", 46068, 16500, 29000, 0, 0)
-    card.processes = [
-        gpu_probe.Process(pid=4242, used_mib=16000, registered=4242 in job_pids,
-                          job_id=job_pids.get(4242), user="tobias", age_s=900.0,
-                          command="python -m vlm_train_svc.runner"),
-        gpu_probe.Process(pid=8888, used_mib=500, service="atr-trocr.service",
-                          own_service=True),
-    ]
-    return [card]
-
-
-def test_an_old_local_trainer_without_gpu_falls_back_to_the_local_reading(monkeypatch):
-    """The in-repo trainer on idhefix has no /gpu. Its cards are this box's, so
-    today's reading stays right for it — attribution included."""
-    monkeypatch.setattr(gpu_probe, "inspect", _local_cards)
-    trainer = Trainer({("GET", "/jobs"): (200, {"jobs": [{"id": "job-a", "pid": 4242}]})})
-    resp = make_client(trainer, train_url=LOCAL, train_api_key="").get(
-        "/train/gpu", headers=AUTH)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["job_attribution_available"] is True and body["known_job_pids"] == 1
-    (card,) = body["cards"]
-    assert card["processes"][0]["job_id"] == "job-a"
-    assert card["unaccounted_mib"] == 0 and card["service_mib"] == 500
-    assert trainer.paths() == [("GET", "/gpu"), ("GET", "/jobs")]
-
-
-@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), httpx.ReadTimeout("")])
-def test_an_unreachable_local_trainer_still_reports_the_cards(monkeypatch, failure):
-    """Losing the trainer must not lose the memory figures — and it is not asked
-    a second time for its job list after it has just failed to answer."""
-    monkeypatch.setattr(gpu_probe, "inspect", _local_cards)
-    trainer = Trainer({("GET", "/gpu"): failure, ("GET", "/jobs"): (200, {"jobs": []})})
-    resp = make_client(trainer, train_url=LOCAL, train_api_key="").get(
-        "/train/gpu", headers=AUTH)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["job_attribution_available"] is False
-    assert body["cards"][0]["unaccounted_mib"] == 16000
     assert trainer.paths() == [("GET", "/gpu")]
+    if status == 200:
+        assert resp.json() == GPU
+    elif status == 503:
+        # The trainer's own words, labelled with its URL only when it is remote.
+        detail = resp.json()["detail"]
+        assert detail.endswith("nvidia-smi is not on PATH")
+        assert (url in detail) is (url == ASTERAIX)
+    else:
+        assert url in resp.json()["detail"]
 
 
-def test_a_current_local_trainer_is_asked_for_its_own_reading(no_local_reading):
-    trainer = Trainer({("GET", "/gpu"): (200, GPU)})
-    resp = make_client(trainer, train_url=LOCAL, train_api_key="").get(
-        "/train/gpu", headers=AUTH)
-    assert resp.json() == GPU
-
-
-def test_the_gpu_fixture_has_the_shape_of_the_local_reading_plus_host(monkeypatch):
-    """The contract says the trainer's /gpu is today's /train/gpu plus ``host``.
-    Pinned against the gateway's own reading, so neither can drift alone."""
-    monkeypatch.setattr(gpu_probe, "inspect", _local_cards)
-    trainer = Trainer({("GET", "/jobs"): (200, {"jobs": []})})
-    local = make_client(trainer, train_url=LOCAL, train_api_key="").get(
-        "/train/gpu", headers=AUTH).json()
-    assert set(GPU) == set(local) | {"host"}
+def test_the_gpu_fixture_has_the_shape_of_the_gateways_own_reading(monkeypatch):
+    """The trainer's /gpu and the gateway's GET /gpu share their rows, so one
+    reader formats both. Pinned against the gateway's reading, so neither can
+    drift alone; only the top level differs — job attribution there, the vLLM
+    residents here."""
+    card = gpu_probe.Card(1, "NVIDIA A40", 46068, 16500, 29000, 0, 0)
+    card.processes = [gpu_probe.Process(pid=8888, used_mib=500, service="atr-trocr.service",
+                                        own_service=True, user="tobias", age_s=1.0,
+                                        command="trocr")]
+    monkeypatch.setattr(gpu_probe, "inspect", lambda *a, **k: [card])
+    monkeypatch.setattr(gpu_probe, "descends_from", lambda pid, ancestor: False)
+    local = make_client(Trainer()).get("/gpu", headers=AUTH).json()
+    assert set(GPU) - {"job_attribution_available", "known_job_pids"} \
+        == set(local) - {"vllm"} == {"host", "cards"}
     assert set(GPU["cards"][0]) == set(local["cards"][0])
     assert set(GPU["cards"][0]["processes"][0]) == set(local["cards"][0]["processes"][0])
 

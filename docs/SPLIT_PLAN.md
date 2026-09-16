@@ -29,7 +29,7 @@ Dazu ein Zitatfehler: `set_enabled` steht in `kraken_train_svc/runner.py:459`, n
 | | **idhefix** — Serving | **asteraix** — Training |
 |---|---|---|
 | Adresse | 130.92.59.240 (`srv`, dhserver02) | 130.92.59.242 (`dhserver03`) |
-| GPUs | 2 × A40 46 GB; GPU 1 trägt **dauerhaft 14,4 GB** Serving-Dienste | **2 × A40 46 GB, beide 0 MiB belegt** |
+| GPUs | 2 × A40 46 GB; GPU 1 trägt **dauerhaft 14,4 GB** Serving-Dienste (16.09., 21:50: **15 830 MiB** — sie wachsen) | **2 × A40 46 GB, beide 0 MiB belegt** |
 | Verbund | — | **NVLink, 4 Links à 14,06 GB/s, P2P OK** |
 | CPU / RAM | 48 Kerne / 251 GB | 48 Kerne / 251 GB |
 | OS / Treiber | Ubuntu 24.04.3 / 580.95.05 | identisch |
@@ -80,7 +80,8 @@ Und **eine vierte, die kein Import ist und den Split still überlebt**:
 is on this box" begründet. Nach dem Split vergleicht dieser Wächter den Anspruch
 einer **fremden** Maschine mit der **eigenen** Karte. Das ist kein Feature, das
 fehlt — das ist ein Wächter, der falsche Auskunft gibt. Er gehört in T5 entfernt,
-nicht in T2 umgebogen.
+nicht in T2 umgebogen. **Entfernt am 16.09.2026** (T5.5, #139); ein Grep-Test
+hält fest, dass kein Serving-Modul ihn wieder erwähnt.
 
 Was **nicht** geteilt werden muss, entgegen der ersten Fassung:
 
@@ -235,17 +236,54 @@ Der billigste Epic, und der Code stützt ihn: `eval/` hat **null** Serving-Impor
 
 ### T5 — Cutover und Rückbau
 
+**Cutover erledigt am 16.09.2026** (serving#139). idhefix trainiert nicht mehr.
+Offen bleibt die Umstellung von asteraix auf den gemeinsamen Job-Speicher
+(`jobs-asteraix` → `jobs`, nach training-atr-models#15) und der Abnahmetest:
+v5 wird zum Schluss über den Gateway neu eingereicht (training-atr-models#10).
+
 | Issue | Inhalt |
 |---|---|
 | T5.1 | Parallelbetrieb: `atr-train` auf asteraix hoch, Gateway zeigt noch auf Loopback |
 | T5.2 | Smoke-Job (`trocr-thun-smoke`) über die neue Kante, alle fünf Stages inklusive Registrierung |
-| T5.3 | `ATR_TRAIN_URL` umstellen, Gateway neu, `/train/jobs` **aus dem Bot heraus** prüfen |
-| T5.4 | Der alte Trainer auf idhefix wird gestoppt, nicht gelöscht. Die 48 Job-Records liegen ohnehin auf dem Share und sind von asteraix aus schon lesbar — **keine Migration nötig** |
-| T5.5 | **Rückbau der GPU-Koordination**: `/gpu-claim`, `/admin/release-gpu`, `gpu_release.py`, `manager._refuse_while_training`, `GpuBusyError`. Sie koordinieren zwei Prozesse um **eine** Karte. `manager._gpu_claim()` ist dabei der wichtigste Posten — er ist kein Import und würde den Split sonst still überleben |
+| T5.3 | `ATR_TRAIN_URL` umstellen, Gateway neu, `/train/jobs` **aus dem Bot heraus** prüfen. **Erledigt 16.09.2026, 19:22:** `ATR_TRAIN_URL` zeigt auf asteraix, Gateway mit #137 neu gestartet; `/train/jobs`, `/train/gpu` und `/health` über den Gateway geprüft, der ATR-MCP läuft ohne Konfigurationsänderung |
+| T5.4 | Der alte Trainer auf idhefix wird gestoppt, nicht gelöscht. Die 48 Job-Records liegen ohnehin auf dem Share und sind von asteraix aus schon lesbar — **keine Migration nötig**. **Erledigt 16.09.2026, 21:3x:** `atr-train` gestoppt und deaktiviert (`disable --now`), vorher geprüft: 48 Jobs, keiner läuft, keiner wartet; auf `:8204` lauscht nichts mehr |
+| T5.5 | **Rückbau der GPU-Koordination**: `/gpu-claim`, `/admin/release-gpu`, `gpu_release.py`, `manager._refuse_while_training`, `GpuBusyError`. Sie koordinieren zwei Prozesse um **eine** Karte. `manager._gpu_claim()` ist dabei der wichtigste Posten — er ist kein Import und würde den Split sonst still überleben. **Erledigt 16.09.2026** (#139), siehe unten |
 | T5.6 | Der Artefakt-Cache **folgt den Daten nicht**. Derselbe Share heisst derselbe Ground Truth und derselbe HF-Cache, aber ein **kalter** `artefact_cache_root` — die ~2,5 h und ~41 GB je Auswahl, für die #109 existiert, werden auf der neuen Box einmal erneut bezahlt |
 
 **T5.5 zuletzt.** Solange beide auf einer Karte laufen, ist die Sperre das, was
-einen 24-Stunden-Lauf vor einer Inferenzanfrage schützt.
+einen 24-Stunden-Lauf vor einer Inferenzanfrage schützt. Eingehalten: der
+Rückbau kam nach T5.4.
+
+**Was T5.5 am 16.09.2026 getan hat:**
+
+- **Entfernt**, Gateway: der Aufruf des Trainer-Anspruchs vor jedem vLLM-Start
+  (`manager._gpu_claim`), die Regel „Trainer antwortet nicht → nur auf eine
+  leere Karte starten", `POST /admin/release-gpu` mit
+  `ModelManager.release_lazy`, `gpu_claim_timeout_s`, und der Rückfall von
+  `/train/gpu` auf eine lokale Messung. `/train/gpu` ist jetzt immer die
+  Messung des Trainers; ein Trainer ohne `/gpu` ist ein 502 mit seiner URL.
+- **Entfernt**, In-Repo-Trainer (deaktiviert, der Code bleibt bis zum Auszug des
+  Pakets): `/gpu-claim` samt Cache, `training/gpu_release.py` und sein Aufruf an
+  der Grenze zu `train` in `runner_base.py`.
+- **Behalten:** die Platzprüfung vor jedem vLLM-Start — sie schützt vor den
+  Engines und den Nachbarn —, die LRU-Verdrängung und das Autosizing.
+  `GpuBusyError` bleibt als Ausnahme der Platzprüfung (503 mit `Retry-After`
+  statt 502). Die Prüfung läuft jetzt **nach** der Verdrängung und verlangt,
+  was auch das Autosizing verlangt (`vram_mb × 1,15` plus Reserve): vorher
+  stand sie davor, und weil das Budget nie mehr als Karte minus Engines minus
+  Reserve ist, lehnte sie jeden Start ab, der eine Verdrängung gebraucht hätte
+  — auf idhefix war die LRU seit #129 toter Code.
+- **Neu:** `GET /gpu` am Gateway — die Karten *dieser* Box, ohne
+  Job-Zuordnung, mit denselben Zeilen wie das `/gpu` des Trainers, dazu `host`
+  und `vllm` (die residenten Modelle mit `vram_mb`, die pids der eigenen
+  vLLM-Kinder, das Budget). Seit #137 zeigte `/train/gpu` die Karten von
+  asteraix, und wer dort die Last von idhefix abgelesen hatte, sah die
+  Trainingsmaschine.
+- **Budget:** `vllm_vram_budget_mb` ist kein fester Wert mehr, sondern wird bei
+  jedem Start gelesen: Karte minus Engines (eigene Dienste, die nicht vom Gateway
+  abstammen) minus Reserve. Gemessen 21:50 CEST: 46 068 − 15 830 − 2 048 =
+  **28 190 MiB**; das alte 30 000 versprach 1 810 MiB, die die Karte nicht hat.
+  Der Messwert ist der Rückfall ohne `nvidia-smi`, die Einstellung ein Override.
 
 ### T6 — Wofür der Umzug gemacht wird
 
@@ -293,8 +331,15 @@ T0 (Namen)  →  T1 (Repo grün)  →  T2 (Proxy)  ┐
   Das dokumentierte CIFS-Problem ist Dedup, ausdrücklich „harmless but not
   optimal" — nicht Nebenläufigkeit. Der Code hält weder Lock-Disziplin noch eine
   Beobachtung dazu fest: **unbeantwortet, nicht schlecht beantwortet.**
-- **Ob ein laufender Job den Cutover übersteht.** T5.3 stellt `ATR_TRAIN_URL`
-  um; was mit einem Job passiert, der in dem Moment auf idhefix trainiert, ist
-  nicht entschieden.
+- ~~**Ob ein laufender Job den Cutover übersteht.**~~ **Entschieden am
+  16.09.2026, 21:50 CEST** (#139): Ein laufender Job wird bei einer Umstellung
+  **nicht migriert** — er bleibt auf der Maschine, die ihn gestartet hat;
+  Checkpoints und TMPDIR liegen lokal. Bei **unter etwa 6 h Restlaufzeit wartet
+  die Umstellung**: der alte Trainer bleibt bis zum Ende aktiv, `ATR_TRAIN_URL`
+  wird erst danach umgestellt. **Sonst wird der Lauf mit Ansage abgebrochen** und
+  auf der neuen Maschine neu eingereicht — billig nur mit warmem Artefakt-Cache
+  (T5.6), sonst wieder rund 1 h (v5 auf asteraix: prepare 13:59–15:04, compile
+  bis 15:59). Die Entscheidung steht **mit Job-ID und Restlaufzeit im
+  Umstellungs-Issue**.
 - **UBELIX**: zieht mit T1.6 um, aber ob asteraix es ersetzt oder ergänzt, ist
   offen.
