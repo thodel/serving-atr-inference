@@ -309,7 +309,7 @@ vLLM qwen3vl-german-xix-v1 gpu budget: 0.42 = 19200 of 45516 MiB
 ```
 
 So a memory 502 now arrives **before** the weights load, and names free and total.
-When it does, the memory is genuinely gone: `GET /gpu` says who has it. Twice that
+When it does, the memory is genuinely gone: `GET /train/gpu` says who has it. Twice that
 has been an orphaned training process — a `[Not Found]` row holding 8 766 MiB
 belonging to a python that had already exited — which `kill -9` on its pid
 releases.

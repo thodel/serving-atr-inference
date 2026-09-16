@@ -217,7 +217,7 @@ vLLM qwen3vl-german-xix-v1 gpu budget: 0.42 = 19200 of 45516 MiB
 
 If the card cannot hold the model even at 1.15×, the request fails **before** the
 launch with a message naming free/total — rather than after a minute of loading
-weights, which is what vLLM does. `GET /gpu` then says what is holding the memory;
+weights, which is what vLLM does. `GET /train/gpu` then says what is holding the memory;
 an orphaned training process has been the answer more than once.
 
 | variable | default | |
