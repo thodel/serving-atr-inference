@@ -268,11 +268,19 @@ Rückbau kam nach T5.4.
 - **Behalten:** die Platzprüfung vor jedem vLLM-Start — sie schützt vor den
   Engines und den Nachbarn —, die LRU-Verdrängung und das Autosizing.
   `GpuBusyError` bleibt als Ausnahme der Platzprüfung (503 mit `Retry-After`
-  statt 502). Die Prüfung läuft jetzt **nach** der Verdrängung und verlangt,
-  was auch das Autosizing verlangt (`vram_mb × 1,15` plus Reserve): vorher
-  stand sie davor, und weil das Budget nie mehr als Karte minus Engines minus
-  Reserve ist, lehnte sie jeden Start ab, der eine Verdrängung gebraucht hätte
-  — auf idhefix war die LRU seit #129 toter Code.
+  statt 502). Sie verlangt, was auch das Autosizing verlangt (`vram_mb × 1,15`
+  plus Reserve), und wird jetzt **zusammen** mit der Verdrängung entschieden,
+  bevor etwas beendet wird: die am längsten ungenutzten lazy-Modelle gehen, bis
+  Budget *und* Karte reichen, jedes gezählt mit dem, was es auf der Karte
+  tatsächlich belegt (xix: 16 584 MiB bei 12 000 in der Registry). Reicht nicht
+  einmal die Verdrängung aller, wird nichts verdrängt und der Start mit 503
+  abgelehnt. Vorher stand die Prüfung vor der Verdrängung, und verdrängt wurde
+  nur nach Budget: mit xix residenten (13 654 MiB frei) scheiterte jeder Start,
+  der eine Verdrängung gebraucht hätte, auch das 4B (12 000 + 12 000 liegt im
+  Budget) — auf idhefix war die LRU seit #129 toter Code. Die umgekehrte
+  Reihenfolge (erst nach Budget verdrängen, dann prüfen) beendete bei einem
+  Nachbarn mit 8 GB auf GPU 1 xix bei jeder hebrew-Anfrage und lehnte hebrew
+  trotzdem ab.
 - **Neu:** `GET /gpu` am Gateway — die Karten *dieser* Box, ohne
   Job-Zuordnung, mit denselben Zeilen wie das `/gpu` des Trainers, dazu `host`
   und `vllm` (die residenten Modelle mit `vram_mb`, die pids der eigenen

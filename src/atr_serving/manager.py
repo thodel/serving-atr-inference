@@ -5,7 +5,8 @@ Linger=no, so root systemd units aren't an option). The manager:
 
 - lazily starts a model's ``vllm serve`` on first request and waits for health,
 - keeps a VRAM budget on the vLLM GPU (GPU 1; GPU 0 is the shared RAG GPU) and
-  evicts the least-recently-used **lazy** model when a new one won't fit,
+  evicts the least-recently-used **lazy** model when a new one won't fit the
+  budget or the card — and evicts nothing for a launch it then refuses,
 - never evicts ``pinned`` models (e.g. LightOnOCR) once started,
 - reports residency to ``/health``, ``/models`` and ``/gpu``.
 
@@ -62,6 +63,11 @@ class SubprocessHandle:
 
     port: int
     proc: subprocess.Popen
+
+    @property
+    def pid(self) -> int:
+        """``vllm serve``'s pid, the ancestor of every row this model holds."""
+        return self.proc.pid
 
     def is_healthy(self) -> bool:
         try:
@@ -385,16 +391,9 @@ class ModelManager:
             logger.warning("vLLM {} unhealthy; relaunching", model_id)
             self._drop(model_id)
 
-        # Evict first, then look at the card. In the other order (#129 to #139)
-        # the LRU was dead code: the budget is at most the card less the engines
-        # and the reserve, and a resident holds at least its vram_mb, so a launch
-        # that does not fit the budget does not fit the free memory either — and
-        # the fit check refused it before the eviction could run. On 16.09., with
-        # qwen3vl-german-xix-v1 resident (16584 MiB), GPU 1 had 13654 MiB free:
-        # every model above 11.6 GB would have been refused, and nothing would
-        # ever have evicted xix to make room.
         evicted = self._make_room_for(spec)
-        self._check_fit(spec, settle=evicted)
+        if evicted:
+            self._await_room(spec, evicted)
         port = self._ports.acquire()
         try:
             handle = self.launcher.start(spec, port, self.settings.vllm_gpu, self.settings)
@@ -407,8 +406,8 @@ class ModelManager:
         return port
 
     # ── the card is not ours alone ───────────────────────────────────────────
-    def _check_fit(self, spec: ModelSpec, *, settle: bool) -> None:
-        """Do not launch into a card that cannot hold the model.
+    def _need_mb(self, spec: ModelSpec) -> int:
+        """Free MiB the card must have before ``spec`` is launched into it.
 
         The card is shared with the engines (15.8 GB on idhefix GPU 1, 16.09.)
         and whatever else lands on it; launching into a full card is what
@@ -417,59 +416,126 @@ class ModelManager:
         a card too full for the model is refused here with a 503 rather than by
         :func:`gpu_budget` with a 502 a moment later.
 
-        Until #139 this also asked the trainer whether a run held the card, and
-        demanded an idle card when it did not answer. Nothing trains on this box
-        any more (the in-repo trainer is disabled, ``train_url`` names asteraix),
-        so there is no one to ask and nothing to be unsure about: the free memory
-        decides, for any ``train_url``.
-
-        ``settle``: a model was just evicted; give its memory a few reads to come
-        back (:data:`EVICTION_SETTLE_READS`) before refusing.
+        Until #139 the check also asked the trainer whether a run held the card,
+        and demanded an idle card when it did not answer. Nothing trains on this
+        box any more (the in-repo trainer is disabled, ``train_url`` names
+        asteraix), so there is no one to ask: the free memory decides, for any
+        ``train_url``.
         """
-        gpu = self.settings.vllm_gpu
-        reserve = self.settings.vllm_vram_reserve_mb
-        need = math.ceil(spec.vram_mb * MIN_HEADROOM) + reserve
-        for attempt in range(EVICTION_SETTLE_READS if settle else 1):
+        return math.ceil(spec.vram_mb * MIN_HEADROOM) + self.settings.vllm_vram_reserve_mb
+
+    def _refusal(self, spec: ModelSpec, free_mb: int, need: int, note: str = "") -> GpuBusyError:
+        return GpuBusyError(
+            f"GPU {self.settings.vllm_gpu} has {free_mb} MB free, {spec.id} needs "
+            f"{need} MB (model {spec.vram_mb} x {MIN_HEADROOM} + "
+            f"{self.settings.vllm_vram_reserve_mb} reserve).{note} Not launching into "
+            "a card that cannot hold it; `GET /gpu` names what is holding it."
+        )
+
+    def _make_room_for(self, spec: ModelSpec) -> list[str]:
+        """Evict what ``spec`` needs evicted, or refuse it — never both.
+
+        Two bars with two numbers. The budget caps the registry ``vram_mb``
+        resident at once; the card decides whether the launch fits
+        (:meth:`_need_mb`). They disagree: a resident holds more than its
+        ``vram_mb`` (xix held 16584 MiB for 12000 on 16.09.), and neighbours and
+        orphans hold memory the budget leaves out on purpose.
+
+        - Checking the card and evicting only for the budget (#129 to #137) kept
+          the LRU dead: with xix resident, GPU 1 had 13654 MiB free, and the
+          12000 MB 4B (12000 + 12000 is within the budget) was refused every
+          time while xix stayed.
+        - Evicting for the budget and then checking the card, as #139 first did,
+          killed xix and refused hebrew anyway whenever 8 GB of something else
+          sat on GPU 1 — on every hebrew request, each followed by a cold start
+          of xix.
+
+        So the plan is made before anything is terminated: least recently used
+        lazy models first, as many as the budget and the card together need,
+        each counted at what it gives back (:meth:`_footprint`). If not even all
+        of them make room on the card, none is evicted. Returns the evicted ids.
+        """
+        need = self._need_mb(spec)
+        memory = gpu_probe.card_memory(self.settings.vllm_gpu)
+        free_mb = None if memory is None else memory[0]     # None: the launch decides
+        lazy = [(mid, r) for mid, r in self._resident.items()   # front = LRU
+                if r.spec.residency == "lazy"]
+        # The full reading costs /proc for every row; take it only when a lazy
+        # resident's footprint decides something. vram_budget reuses it, or
+        # takes its own when the budget is derived and nothing else needed one.
+        cards = self._inspect() if lazy and free_mb is not None and free_mb < need else None
+        budget = vram_budget(self.settings, cards)
+
+        used, freed, victims = self._used_mb(), 0, []
+        for mid, r in lazy:
+            over_budget = used + spec.vram_mb > budget.mb
+            if not over_budget and (free_mb is None or free_mb + freed >= need):
+                break
+            victims.append(mid)
+            used -= r.spec.vram_mb
+            freed += self._footprint(r, cards)
+
+        if free_mb is not None and free_mb + freed < need:
+            note = (f" Evicting {', '.join(victims)} would give back {freed} MB, not "
+                    "enough, so nothing was evicted." if victims else "")
+            raise self._refusal(spec, free_mb, need, note)
+        if used + spec.vram_mb > budget.mb:
+            logger.warning("vLLM budget {} exceeded by {} and no lazy model to evict; "
+                           "launching anyway", budget.reason, spec.id)
+        for mid in victims:
+            logger.info("Evicting LRU vLLM model {} to fit {} (budget {}, {} MiB free, "
+                        "{} needed)", mid, spec.id, budget.reason, free_mb, need)
+            self._drop(mid)
+        return victims
+
+    def _inspect(self) -> list | None:
+        try:
+            return gpu_probe.inspect()
+        except Exception as exc:  # noqa: BLE001 — no nvidia-smi, a wedged driver
+            logger.warning("gpu {} unreadable for the eviction plan: {}",
+                           self.settings.vllm_gpu, exc)
+            return None
+
+    def _footprint(self, resident: _Resident, cards: list | None) -> int:
+        """What evicting ``resident`` gives back to the card, in MiB.
+
+        Measured when it can be: the rows of ``vllm serve`` and the engine core
+        it started. Otherwise the registry ``vram_mb``, deliberately the low
+        estimate — a resident holds at least its weights. Too low refuses a
+        launch an eviction would have made room for: a 503 while the resident
+        keeps serving, as before #139. Too high kills a model and then refuses
+        all the same, the failure this plan exists to prevent.
+        """
+        pid = getattr(resident.handle, "pid", None)
+        if cards is not None and pid is not None:
+            held = sum(p.used_mib for card in cards if card.index == self.settings.vllm_gpu
+                       for p in card.processes if gpu_probe.descends_from(p.pid, pid))
+            if held:
+                return held
+        return resident.spec.vram_mb
+
+    def _await_room(self, spec: ModelSpec, evicted: list[str]) -> None:
+        """Give evicted memory :data:`EVICTION_SETTLE_READS` reads to come back.
+
+        The plan counted it as freed; nvidia-smi may still count it a moment
+        after ``terminate`` returned. Refusing here means the memory did not come
+        back at all — a child that outlived its ``vllm serve`` — which no plan
+        made beforehand can see.
+        """
+        need = self._need_mb(spec)
+        for attempt in range(EVICTION_SETTLE_READS):
             if attempt:
                 self._sleep(1)
-            memory = gpu_probe.card_memory(gpu)
-            if memory is None:
-                return                  # nvidia-smi cannot say; the launch decides
-            free_mb = memory[0]
-            if free_mb >= need:
+            memory = gpu_probe.card_memory(self.settings.vllm_gpu)
+            if memory is None or memory[0] >= need:
                 return
-        raise GpuBusyError(
-            f"GPU {gpu} has {free_mb} MB free, {spec.id} needs {need} MB (model "
-            f"{spec.vram_mb} x {MIN_HEADROOM} + {reserve} reserve). Not launching "
-            "into a card that cannot hold it; `GET /gpu` names what is holding it."
-        )
+        raise self._refusal(
+            spec, memory[0], need,
+            f" Evicted {', '.join(evicted)}; the memory has not come back after "
+            f"{EVICTION_SETTLE_READS} reads.")
 
     def _used_mb(self) -> int:
         return sum(r.spec.vram_mb for r in self._resident.values())
-
-    def _make_room_for(self, spec: ModelSpec) -> list[str]:
-        """Evict LRU lazy models until ``spec`` fits the budget. The evicted ids."""
-        evicted: list[str] = []
-        budget = vram_budget(self.settings)
-        while self._used_mb() + spec.vram_mb > budget.mb:
-            victim = self._lru_lazy()
-            if victim is None:
-                logger.warning(
-                    "vLLM budget {} exceeded by {} and no lazy model to evict; "
-                    "launching anyway", budget.reason, spec.id,
-                )
-                return evicted
-            logger.info("Evicting LRU vLLM model {} to fit {} (budget {})",
-                        victim, spec.id, budget.reason)
-            self._drop(victim)
-            evicted.append(victim)
-        return evicted
-
-    def _lru_lazy(self) -> str | None:
-        for mid, r in self._resident.items():  # front = LRU
-            if r.spec.residency == "lazy":
-                return mid
-        return None
 
     def _drop(self, model_id: str) -> None:
         r = self._resident.pop(model_id, None)
