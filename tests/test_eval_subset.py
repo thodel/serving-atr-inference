@@ -13,6 +13,7 @@ from atr_serving.training.eval_subset import (
     attribute,
     page_key,
     plan_eval_subset,
+    source_key,
     source_spans,
     stratify,
 )
@@ -110,3 +111,47 @@ def test_stratify_orders_its_pool_so_the_seed_alone_decides():
     rows = [row(i, f"a{i}") for i in range(8)]
     owner = attribute([r["image"] for r in rows], source_spans(COUNTS))
     assert stratify(rows, owner, 3, seed=7) == stratify(list(reversed(rows)), owner, 3, seed=7)
+
+# ── line granularity: the crop name carries no source, the page does ─────────
+def _line_row(crop: int, page_index: int, doc: str) -> dict:
+    """A val.jsonl row as `granularity: line` writes it."""
+    return {"image": f"data/crops/val/{crop:07d}.jpg",
+            "text": "x" * 30,
+            "page": f"data/pages/{page_index:06d}_{doc}_0003_97836934.xml"}
+
+
+LINE_COUNTS = [{"hf_repo": "dh-unibe/image-text_alpha", "pages_written": 100, "pages_skipped": 0},
+          {"hf_repo": "dh-unibe/image-text_beta", "pages_written": 100, "pages_skipped": 0}]
+
+
+def test_source_key_prefers_the_page_over_the_crop():
+    row = _line_row(42, 7, "111")
+    assert source_key(row) == "data/pages/000007_111_0003_97836934.xml"
+    # page granularity has no page field; the image is the page
+    assert source_key({"image": "data/pages/000007_111_x.xml"}) == "data/pages/000007_111_x.xml"
+
+
+def test_a_line_granularity_subset_is_stratified_not_random():
+    # Before the fix this attributed nothing: every crop name is 0000NNN.jpg, whose
+    # leading number counts crops, so page_key read a crop index as a pool index
+    # and no row fell inside a source span.
+    rows = ([_line_row(i, i, f"a{i}") for i in range(0, 100)]
+            + [_line_row(100 + i, 100 + i, f"b{i}") for i in range(0, 100)])
+    sub = plan_eval_subset(rows, cap=20, seed=42, dataset_counts=LINE_COUNTS)
+    assert sub.selection == "stratified", sub.reason
+    assert set(sub.counts) == {"alpha", "beta"}
+    assert sub.counts["alpha"] == sub.counts["beta"] == 10
+
+
+def test_every_picked_line_row_is_labelled_with_its_source():
+    rows = ([_line_row(i, i, f"a{i}") for i in range(0, 100)]
+            + [_line_row(100 + i, 100 + i, f"b{i}") for i in range(0, 100)])
+    sub = plan_eval_subset(rows, cap=20, seed=42, dataset_counts=LINE_COUNTS)
+    assert all(r["source"] in {"alpha", "beta"} for r in sub.rows)
+
+
+def test_page_granularity_is_unchanged_by_the_fix():
+    rows = [{"image": f"data/pages/{i:06d}_d{i}_0003_9.xml", "text": "x"} for i in range(200)]
+    sub = plan_eval_subset(rows, cap=20, seed=42, dataset_counts=LINE_COUNTS)
+    assert sub.selection == "stratified"
+    assert sub.counts["alpha"] == sub.counts["beta"] == 10

@@ -73,6 +73,23 @@ def page_key(image: str) -> tuple[int, str]:
     return int(parts[0]), parts[1]
 
 
+def source_key(row: dict) -> str:
+    """The name that carries the pool index, for a row of ``val.jsonl``.
+
+    At ``granularity: page`` the row's ``image`` **is** the materialised page, so
+    its name starts with the pool index and :func:`page_key` can read it. At
+    ``granularity: line`` the image is a line crop — ``data/crops/val/0000042.jpg``
+    — whose number counts crops, not pages, and carries no source at all. Its
+    ``page`` field names the page it was cut from, and that is the one to use.
+
+    Without this, attribution finds nothing on every line-granularity run and
+    :func:`plan_eval_subset` falls back to an unstratified draw while reporting
+    "0 source(s) could be attributed" — which is what happened to the whole
+    medieval and 19th-century campaign.
+    """
+    return row.get("page") or row["image"]
+
+
 def attribute(images: Iterable[str], spans: Sequence[tuple[str, int, int]],
               extra_images: Iterable[str] = ()) -> dict[str, str]:
     """``image -> source``, for every image whose document can be placed.
@@ -122,8 +139,8 @@ def stratify(rows: Sequence[dict], owner: dict[str, str], per_source: int,
     """
     by_source: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
-        if row["image"] in owner:
-            by_source[owner[row["image"]]].append(row)
+        if source_key(row) in owner:
+            by_source[owner[source_key(row)]].append(row)
     rng = random.Random(seed)
     picked: list[dict] = []
     for source in sorted(by_source):
@@ -171,14 +188,15 @@ def plan_eval_subset(
                           reason=f"{len(rows)} validation pages fit the cap of {cap}")
 
     spans = source_spans(dataset_counts) if dataset_counts else []
-    owner = attribute([r["image"] for r in rows], spans, extra_images=train_images) if spans else {}
+    owner = (attribute([source_key(r) for r in rows], spans, extra_images=train_images)
+             if spans else {})
     sources = {name for name in owner.values()}
     if len(sources) >= 2:
         per_source = max(1, cap // len(sources))
         picked = stratify(rows, owner, per_source, seed)
         for row in picked:
-            row["source"] = owner[row["image"]]
-        counts = Counter(owner[row["image"]] for row in picked)
+            row["source"] = owner[source_key(row)]
+        counts = Counter(owner[source_key(row)] for row in picked)
         return EvalSubset(
             rows=picked,
             selection="stratified",

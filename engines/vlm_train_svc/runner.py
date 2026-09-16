@@ -42,7 +42,7 @@ from atr_serving.training.contracts import (
 )
 from atr_serving.training.artefact_cache import key_for_specs
 from atr_serving.training.cropping import write_crops
-from atr_serving.training.eval_subset import plan_eval_subset
+from atr_serving.training.eval_subset import plan_eval_subset, source_key
 from atr_serving.training.manifests import read_manifest
 from atr_serving.training.overlay import upsert_entry
 from atr_serving.training.promote import PromotionResult
@@ -291,7 +291,9 @@ class Pipeline(BasePipeline):
         # Beside the validation set, wherever that is — the job's data directory
         # on the run that compiled it, the cache entry on a run that reused it.
         train_jsonl = val_jsonl.with_name("train.jsonl")
-        train_images = [json.loads(line)["image"] for line in
+        # The same key the validation rows are attributed by: at line granularity
+        # the image is a crop and carries no pool index, the page does.
+        train_images = [source_key(json.loads(line)) for line in
                         train_jsonl.read_text(encoding="utf-8").splitlines()
                         if line.strip()] if train_jsonl.is_file() else []
         subset = plan_eval_subset(
