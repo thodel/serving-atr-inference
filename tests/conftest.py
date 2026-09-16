@@ -1,15 +1,33 @@
 """Test-wide safety rails.
 
-The one thing in here exists because the artefact cache (#109) defaults to a
-directory under ``$HOME``, and a pipeline test that runs the whole lifecycle
-will happily write there. A test suite that leaves 40 GB — or, as it did the
-first time, five stray directories — in the developer's home is a bug in the
-suite, not a quirk of it.
+Both exist because a setting that points at a real place makes the suite write
+there.
+
+The artefact cache (#109) defaults to a directory under ``$HOME``, and a
+pipeline test that runs the whole lifecycle will happily write there. A test
+suite that leaves 40 GB — or, as it did the first time, five stray directories —
+in the developer's home is a bug in the suite, not a quirk of it.
+
+The shared registry (#138) is switched on by ``ATR_REGISTRY_ROOT`` in the
+checkout's ``.env``, and ``Settings`` reads ``.env`` from the working directory —
+the checkout the README says to run pytest from. There, every ``create_app`` in
+the suite, and the module-level ``app`` that importing ``atr_serving.app``
+builds, would publish that checkout's ``config/models.yaml`` to the live share
+(edits and branch included) and read the live ``trained/``. Reproduced in the
+#138 review: a ``.env`` with only that line published the curated registry on
+import, and a merge_loras test picked up a registration from the share.
 """
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# An environment variable beats .env in pydantic-settings, and the validator
+# reads "" as off. Set at import: conftest is loaded before any test module, so
+# this is in place before one of them imports atr_serving.app.
+os.environ["ATR_REGISTRY_ROOT"] = ""
 
 
 @pytest.fixture(autouse=True)
@@ -22,3 +40,11 @@ def _artefact_cache_never_touches_home(tmp_path_factory, monkeypatch):
     """
     root = tmp_path_factory.mktemp("artefact-cache")
     monkeypatch.setenv("ATR_TRAIN_ARTEFACT_CACHE_ROOT", str(root))
+
+
+@pytest.fixture(autouse=True)
+def _shared_registry_is_off_unless_a_test_turns_it_on(monkeypatch):
+    """Again per test: a test that deletes the variable gets it back, rather
+    than handing the ``.env`` value to every test after it. A test that wants
+    the feature passes ``registry_root`` to ``Settings`` itself."""
+    monkeypatch.setenv("ATR_REGISTRY_ROOT", "")

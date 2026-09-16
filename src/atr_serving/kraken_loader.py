@@ -38,6 +38,7 @@ going to fix it.
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 __all__ = ["RECOGNITION_SUFFIXES", "WeightsNotFound", "resolve_weights", "load_recognition_model"]
@@ -63,6 +64,13 @@ def resolve_weights(ref: str | Path) -> Path | None:
 
     CoreML is preferred over safetensors when a directory holds both, because
     CoreML is the one that can be served (see the module docstring).
+
+    A reference that is plainly a path (``/…`` or ``~…``) but names nothing is an
+    error, not a fetch. A DOI or hub id never starts that way, and returning
+    ``None`` sent a registered model's ``local_path`` to htrmopo as a DOI, whose
+    failure never mentions a missing file. With the registry on the share
+    (#138), that is what a mountpoint that differs between trainer and gateway
+    looks like.
     """
     if not ref:
         return None
@@ -70,6 +78,13 @@ def resolve_weights(ref: str | Path) -> Path | None:
     if path.is_file():
         return path
     if not path.is_dir():
+        if str(ref).startswith(("/", "~")):
+            raise WeightsNotFound(
+                f"{path} does not exist on {socket.gethostname()}. A registered model's "
+                "local_path must name its weights on the machine that serves it; a "
+                "registration from the shared registry needs the share mounted at the "
+                "same path on the trainer and here."
+            )
         return None  # not a local reference at all — probably a DOI or a hub id
     for suffix in RECOGNITION_SUFFIXES:
         found = sorted(path.glob(f"*{suffix}"))

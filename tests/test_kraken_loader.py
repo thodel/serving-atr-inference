@@ -63,6 +63,14 @@ def test_a_directory_with_no_weights_is_an_error_not_a_silent_fetch(tmp_path: Pa
         resolve_weights(directory)
 
 
+@pytest.mark.parametrize("ref", ["/mnt/elsewhere/m/m.mlmodel", "~/no-such-dir-138/m.mlmodel"])
+def test_a_path_that_names_nothing_is_an_error_not_a_fetch(ref):
+    """A path is never a DOI. Returning None sent a registered model's missing
+    local_path to htrmopo, whose error never mentions a file (#138)."""
+    with pytest.raises(WeightsNotFound, match="does not exist on"):
+        resolve_weights(ref)
+
+
 # ── load_recognition_model ──────────────────────────────────────────────────
 def test_recognition_goes_through_load_any(tmp_path: Path):
     """rpred's signature is `network: TorchSeqRecognizer`, which only load_any

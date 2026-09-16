@@ -148,6 +148,16 @@ def _is_registration(name: str) -> bool:
     return name.endswith(".yaml") and not name.startswith(".")
 
 
+def _is_dir(path: Path) -> bool:
+    # os.path.isdir, not Path.is_dir: on Python 3.12 (production) the latter
+    # returns False only for ENOENT, ENOTDIR, EBADF and ELOOP and raises anything
+    # else — and a soft CIFS mount that has lost its server answers EHOSTDOWN, EIO
+    # or ESTALE. Measured in the #138 review: the watch then logged a 60-line
+    # traceback on every look and never reached its one "Cannot read" warning,
+    # and scripts/merge_loras.py died instead of saying the share was away.
+    return os.path.isdir(path)
+
+
 def _list_registrations(directory: Path) -> list[os.DirEntry] | None:
     """Registration files under ``directory``, by name. [] if it does not exist
     (nothing trained yet), None if it cannot be listed."""
@@ -172,7 +182,7 @@ def trained_signature(root: str | Path) -> Signature:
     that file's mtime and size whatever the directory's cached mtime says.
     """
     root = Path(root)
-    if not root.is_dir():
+    if not _is_dir(root):
         return None
     entries = _list_registrations(root / TRAINED_DIRNAME)
     if entries is None:
@@ -181,17 +191,29 @@ def trained_signature(root: str | Path) -> Signature:
     for entry in entries:
         try:
             st = entry.stat()
-        except OSError:
-            continue  # renamed away between the listing and the stat
+        except FileNotFoundError:
+            continue  # withdrawn between the listing and the stat
+        except OSError as exc:
+            # Anything else is the mount, not the file. Leaving the entry out would
+            # make the file look deleted; "cannot tell" is the honest answer.
+            logger.debug("Cannot stat {} ({}: {})", entry.path, type(exc).__name__, exc)
+            return None
         signature.append((entry.name, st.st_mtime_ns, st.st_size))
     return tuple(signature)
 
 
 def _read_one(path: Path) -> ModelSpec | None:
+    """One registration, or None if its content is unusable (logged).
+
+    An ``OSError`` is raised, not logged: a file that cannot be opened says
+    nothing about the registration in it, and what "cannot tell" should mean is
+    the caller's decision (:func:`read_trained` skips, :class:`RegistryWatch`
+    keeps what it read before and reads again).
+    """
     try:
         raw: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-        logger.error("Skipping registration {}: unreadable ({}: {})",
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        logger.error("Skipping registration {}: not valid UTF-8 YAML ({}: {})",
                      path, type(exc).__name__, exc)
         return None
     if not isinstance(raw, dict):
@@ -210,7 +232,67 @@ def _read_one(path: Path) -> ModelSpec | None:
         logger.error("Skipping registration {}: it declares id {!r}, so it must be "
                      "named {}.yaml", path, spec.id, spec.id)
         return None
+    if spec.local_path is not None and not _local_path_is_usable(path, spec):
+        return None
     return spec
+
+
+def _local_path_is_usable(path: Path, spec: ModelSpec) -> bool:
+    """False for a ``local_path`` no machine can use; logs one this machine cannot.
+
+    ``trained/`` is the first place a path written on one machine (the trainer)
+    is opened on another (the gateway, and the kraken engine beside it). A path
+    that does not resolve here fails far from its cause: ``resolve_weights``
+    used to take it for a DOI and hand it to htrmopo (#138).
+
+    A relative path is refused — it names a different file on every machine.
+    A missing absolute one is logged but served: the weights are written before
+    the registration, but the two live in different directories of a CIFS mount
+    whose attribute cache can show the one before the other, and a skip would be
+    permanent until the registration file changes again. The request fails
+    loudly instead (``kraken_loader.resolve_weights``).
+    """
+    weights = spec.local_path
+    if not Path(weights).is_absolute():
+        logger.error("Skipping registration {}: local_path {!r} is relative. It must be an "
+                     "absolute path under the shared mount, valid on both machines.",
+                     path, weights)
+        return False
+    # os.path.exists for the same reason as _is_dir: it cannot raise.
+    if not os.path.exists(weights):
+        logger.error("Registration {}: local_path {} does not exist on {}. Both machines must "
+                     "mount the share at the same path. Served regardless (the weights may "
+                     "not be visible here yet); a request for {!r} fails until they are.",
+                     path, weights, socket.gethostname(), spec.id)
+    return True
+
+
+def _read_all(root: Path) -> list[tuple[str, ModelSpec | OSError]] | None:
+    """Every usable registration under ``<root>/trained`` by file name, or the
+    ``OSError`` that kept it from being read. None if the directory cannot be
+    listed. Unusable content is logged by :func:`_read_one` and left out."""
+    if not _is_dir(root):
+        return None
+    directory = root / TRAINED_DIRNAME
+    entries = _list_registrations(directory)
+    if entries is None:
+        return None
+    results: list[tuple[str, ModelSpec | OSError]] = []
+    for entry in entries:
+        path = directory / entry.name
+        try:
+            spec = _read_one(path)
+        except FileNotFoundError:
+            # Deleted between the listing and the read. The next signature lacks
+            # it, so the look after this one rebuilds without it either way.
+            logger.info("Registration {} was withdrawn while being read", path)
+            continue
+        except OSError as exc:
+            results.append((entry.name, exc))
+            continue
+        if spec is not None:
+            results.append((entry.name, spec))
+    return results
 
 
 def read_trained(root: str | Path) -> list[ModelSpec] | None:
@@ -222,17 +304,16 @@ def read_trained(root: str | Path) -> list[ModelSpec] | None:
     different things on a reload.
     """
     root = Path(root)
-    if not root.is_dir():
-        return None
-    directory = root / TRAINED_DIRNAME
-    entries = _list_registrations(directory)
-    if entries is None:
+    results = _read_all(root)
+    if results is None:
         return None
     specs = []
-    for entry in entries:
-        spec = _read_one(directory / entry.name)
-        if spec is not None:
-            specs.append(spec)
+    for name, item in results:
+        if isinstance(item, OSError):
+            logger.error("Skipping registration {}: cannot be read ({}: {})",
+                         root / TRAINED_DIRNAME / name, type(item).__name__, item)
+            continue
+        specs.append(item)
     return specs
 
 
@@ -255,6 +336,13 @@ def combine(tracked: Registry, local: list[ModelSpec], shared: list[ModelSpec],
 
     With ``shared`` empty this is exactly ``merge(tracked, local, include_disabled)``.
     """
+    return merge(tracked, _trained(tracked, local, shared), include_disabled=include_disabled)
+
+
+def _trained(tracked: Registry, local: list[ModelSpec],
+             shared: list[ModelSpec]) -> list[ModelSpec]:
+    """The trained registrations :func:`combine` keeps, disabled ones included.
+    Collisions are logged here, once per call."""
     tracked_ids = {s.id for s in tracked.all()}
     kept_shared = []
     for spec in shared:
@@ -275,8 +363,19 @@ def combine(tracked: Registry, local: list[ModelSpec], shared: list[ModelSpec],
                            "registration; the local one is ignored.", spec.id, spec.id)
             continue
         kept_local.append(spec)
+    return kept_local + kept_shared
 
-    return merge(tracked, kept_local + kept_shared, include_disabled=include_disabled)
+
+def _awaiting_the_gate(trained: list[ModelSpec]) -> dict[str, ModelSpec]:
+    """Trained registrations the promotion gate may ask for by id.
+
+    Written ``enabled: false`` and without a ``disabled_reason``: registered, not
+    yet proven. A reason means someone decided it does not run here. vLLM is
+    left out because it never serves from ``local_path`` (``resolve_model_path``
+    looks in ``vllm_merged_dir``), so an unmerged adapter cannot pass this way.
+    """
+    return {s.id: s for s in trained
+            if not s.enabled and not s.disabled_reason and s.engine != "vllm"}
 
 
 # ── reload without restart ───────────────────────────────────────────────────
@@ -313,6 +412,12 @@ class RegistryWatch:
 
     Swapping is a reference assignment. A :class:`Registry` is never mutated once
     built, so a reader sees the old one or the new one, never a mixture.
+
+    A file that cannot be *opened* is not a withdrawn registration. What was read
+    from it before is kept, and the next look reads again: the first look after
+    a CIFS reconnect is exactly when a read fails, and recording the signature
+    over a failed read left the model unregistered until some unrelated file
+    changed (#138 review, reproduced with one EIO on one file).
     """
 
     #: How long startup waits for the first look before serving without it. The
@@ -334,6 +439,8 @@ class RegistryWatch:
         self._last_check = clock()
         self._signature: object = _UNSEEN
         self._shared: list[ModelSpec] = []
+        self._candidates: dict[str, ModelSpec] = {}
+        self._unreadable: set[str] = set()
         self._published = False
         self._thread: threading.Thread | None = None
 
@@ -344,7 +451,15 @@ class RegistryWatch:
         #138: it is on the local disk, and a broken one stopped the start then
         too. Only the shared side is forgiving.
         """
-        return combine(self.tracked, load_overlay(self.overlay), [])
+        trained = _trained(self.tracked, load_overlay(self.overlay), [])
+        registry = merge(self.tracked, trained)
+        self._candidates = _awaiting_the_gate(trained)
+        return registry
+
+    def candidate(self, model_id: str) -> ModelSpec | None:
+        """The disabled trained registration ``model_id``, if the promotion gate
+        may ask for it; see :func:`_awaiting_the_gate`."""
+        return self._candidates.get(model_id)
 
     def start(self, state: Any) -> None:
         """Publish and read the share for the first time; wait a bounded while."""
@@ -391,18 +506,40 @@ class RegistryWatch:
     def _current_signature(self) -> tuple[Signature, tuple[int, int] | None]:
         return trained_signature(self.root), _stat_key(self.overlay)
 
-    def _read_shared(self) -> list[ModelSpec]:
-        shared = read_trained(self.root)
-        if shared is None:
+    def _read_shared(self) -> tuple[list[ModelSpec], bool]:
+        """The shared registrations to serve, and whether every file was read."""
+        results = _read_all(self.root)
+        if results is None:
             # Keep what was read before. An outage must not unregister models —
             # a registration is withdrawn by deleting its file, not by the share
             # going away for a maintenance window.
             logger.warning("Cannot read {}; keeping the {} shared registration(s) read "
                            "before. Is the share mounted?", self.root / TRAINED_DIRNAME,
                            len(self._shared))
-            return self._shared
+            return self._shared, False
+        before = {s.id: s for s in self._shared}
+        shared: list[ModelSpec] = []
+        unreadable: set[str] = set()
+        for name, item in results:
+            if isinstance(item, ModelSpec):
+                shared.append(item)
+                continue
+            unreadable.add(name)
+            # The file name is the id (_read_one enforces it), so this is the
+            # registration the file held when it was last read.
+            kept = before.get(name.removesuffix(".yaml"))
+            if kept is not None:
+                shared.append(kept)
+            # Warned once per spell: a file that stays unreadable is read again on
+            # every look, and the same line every few seconds is not news.
+            log = logger.debug if name in self._unreadable else logger.warning
+            log("Cannot read registration {} ({}: {}); {}. Reading it again on the next look.",
+                self.root / TRAINED_DIRNAME / name, type(item).__name__, item,
+                "still serving what it said before" if kept is not None
+                else "not serving it until it can be read")
+        self._unreadable = unreadable
         self._shared = shared
-        return shared
+        return shared, not unreadable
 
     def _check(self, state: Any, first: bool = False) -> None:
         try:
@@ -421,13 +558,23 @@ class RegistryWatch:
             # Recorded even if the rebuild fails: nothing fixes it until a file
             # changes again, and retrying every interval only repeats the log.
             self._signature = signature
+            shared, complete = self._read_shared()
+            if not complete:
+                # Not so for a read that failed: the files did not change, so the
+                # full signature would never differ again. With the trained half
+                # unknown, the next look that can list the share reads it again,
+                # and one that cannot compares equal and stays quiet.
+                self._signature = (None, signature[1])
             try:
-                registry = combine(self.tracked, load_overlay(self.overlay),
-                                   self._read_shared())
+                trained = _trained(self.tracked, load_overlay(self.overlay), shared)
+                registry = merge(self.tracked, trained)
             except Exception as exc:  # noqa: BLE001 — a reload must never take serving down
                 logger.error("Registry reload failed ({}: {}); still serving the previous "
                              "{} models", type(exc).__name__, exc, len(state.registry))
                 return
+            self._candidates = _awaiting_the_gate(trained)
+            if not first and registry.all() == state.registry.all():
+                return  # a re-read that found what was served; nothing to announce
             state.registry = registry
             manager = getattr(state, "model_manager", None)
             if manager is not None:

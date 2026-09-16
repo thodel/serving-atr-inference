@@ -11,8 +11,11 @@ and an assertion on an empty capture proves nothing.
 
 from __future__ import annotations
 
+import errno
 import os
+import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -25,10 +28,13 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
 import atr_serving.shared_registry as shared_registry
+from atr_serving.api.schemas import RecognitionResult
 from atr_serving.app import create_app
 from atr_serving.config import Settings
+from atr_serving.kraken_loader import WeightsNotFound, resolve_weights
 from atr_serving.registry import ModelSpec, Registry, load_registry
 from atr_serving.shared_registry import combine, read_trained, trained_signature
+from atr_serving.training.promote import PROMOTION_GATE_HEADER, http_recognizer, promote
 from atr_serving.training.overlay import (
     OverlayError,
     load_overlay,
@@ -55,17 +61,18 @@ models:
     base_model: Qwen/Qwen3-VL-4B-Instruct
     enabled: false
     disabled_reason: this box's vLLM cannot load it
+  - id: kraken-retired
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.2"
+    enabled: false
+    disabled_reason: its weights no longer load
 """
+IMG = ("page.png", b"\x89PNG\r\n\x1a\n-fake", "image/png")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-@pytest.fixture(autouse=True)
-def _no_registry_root_from_the_environment(monkeypatch):
-    # A developer shell with ATR_REGISTRY_ROOT set must not turn the feature on
-    # for tests that rely on it being off.
-    monkeypatch.delenv("ATR_REGISTRY_ROOT", raising=False)
-
-
+# ATR_REGISTRY_ROOT is kept off for the whole suite by tests/conftest.py, which
+# is also what keeps a checkout's .env from switching it on.
 @pytest.fixture
 def logs():
     lines: list[str] = []
@@ -89,16 +96,22 @@ def share(tmp_path: Path) -> Path:
     return root
 
 
-def settings_for(curated: Path, root: Path | None, interval_s: float = 0) -> Settings:
+def settings_for(curated: Path, root: Path | None, interval_s: float = 0,
+                 **fields) -> Settings:
     return Settings(api_key=KEY, models_config=curated,
                     models_overlay=curated.parent / "models.local.yaml",
-                    registry_root=root, registry_reload_interval_s=interval_s)
+                    registry_root=root, registry_reload_interval_s=interval_s, **fields)
 
 
 def register(root: Path, model_id: str, **fields) -> Path:
-    """Register the way the trainer does: a tmp file beside the target, then replace."""
-    spec = {"id": model_id, "engine": "kraken",
-            "local_path": f"/mnt/trained/{model_id}/{model_id}.mlmodel", **fields}
+    """Register the way the trainer does: weights first, then a tmp file beside
+    the target, then replace."""
+    if "local_path" not in fields:
+        weights = root.parent / "trained" / model_id / f"{model_id}.mlmodel"
+        weights.parent.mkdir(parents=True, exist_ok=True)
+        weights.write_bytes(b"W")
+        fields["local_path"] = str(weights)
+    spec = {"id": model_id, "engine": "kraken", **fields}
     target = root / "trained" / f"{model_id}.yaml"
     tmp = target.with_name(target.name + ".tmp")
     tmp.write_text(yaml.safe_dump(spec), encoding="utf-8")
@@ -125,9 +138,19 @@ def look(client: TestClient) -> set[str]:
     return served_ids(client)
 
 
+def look_once(app) -> set[str]:
+    """Exactly one look, then what is served. :func:`look`'s second request
+    starts a look of its own, which a test counting looks cannot have."""
+    watch = app.state.registry_watch
+    watch.poll(app.state)
+    watch.wait(5)
+    return {s.id for s in app.state.registry.all() if s.enabled}
+
+
 # ── opt-in ───────────────────────────────────────────────────────────────────
 def test_the_feature_is_off_unless_a_registry_root_is_set(tmp_path, curated, monkeypatch):
     monkeypatch.chdir(tmp_path)  # and no .env to set it from
+    monkeypatch.delenv("ATR_REGISTRY_ROOT")  # the default, not conftest's ""
     assert Settings().registry_root is None
     monkeypatch.setenv("ATR_REGISTRY_ROOT", "")
     assert Settings().registry_root is None, "an empty value means off, not the cwd"
@@ -142,6 +165,22 @@ def test_the_feature_is_off_unless_a_registry_root_is_set(tmp_path, curated, mon
     assert app.state.registry.all() == before.all()
     assert list(tmp_path.rglob("models.yaml")) == [curated], "nothing published anywhere"
     assert served_ids(TestClient(app)) == {"kraken-curated", "kraken-local"}
+
+
+def test_a_dotenv_in_the_working_directory_cannot_switch_the_suite_onto_the_share(
+        tmp_path, monkeypatch):
+    """The checkout's .env is where the feature is turned on in production, and
+    the README runs pytest from that checkout (see tests/conftest.py)."""
+    live = tmp_path / "live-share" / "registry"
+    (tmp_path / ".env").write_text(f"ATR_REGISTRY_ROOT={live}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert Settings().registry_root is None
+    import atr_serving.app
+    assert atr_serving.app.app.state.registry_watch is None, "the app built on import"
+
+    monkeypatch.delenv("ATR_REGISTRY_ROOT")  # what conftest's guard is holding back
+    assert Settings().registry_root == live
 
 
 def test_a_relative_registry_root_is_refused():
@@ -235,6 +274,8 @@ def test_a_malformed_registration_is_skipped_not_fatal(curated, share, logs):
         # on the order of a directory listing.
         "kraken-good-copy.yaml": "id: kraken-good\nengine: kraken\nlocal_path: /elsewhere\n",
         "not-utf8.yaml": b"id: \xff\xfe\n",
+        # Relative to what? The trainer's cwd is not the engine's.
+        "relative-path.yaml": "id: relative-path\nengine: kraken\nlocal_path: w/m.mlmodel\n",
     }
     for name, content in bad.items():
         if isinstance(content, bytes):
@@ -245,7 +286,7 @@ def test_a_malformed_registration_is_skipped_not_fatal(curated, share, logs):
     app = create_app(settings_for(curated, share))
 
     assert served_ids(TestClient(app)) == {"kraken-curated", "kraken-good"}
-    assert app.state.registry.get("kraken-good").local_path.startswith("/mnt/trained/")
+    assert app.state.registry.get("kraken-good").local_path.startswith(str(share.parent))
     text = "".join(logs)
     for name in bad:
         assert f"ERROR Skipping registration {trained / name}" in text, name
@@ -323,7 +364,7 @@ def test_a_shared_registration_wins_over_the_local_overlay(curated, share, logs,
     assert ("kraken-both" in served_ids(TestClient(app))) is shared_enabled
     assert app.state.registry.all() == app.state.model_manager.registry.all()
     if shared_enabled:
-        assert app.state.registry.get("kraken-both").local_path.startswith("/mnt/")
+        assert app.state.registry.get("kraken-both").local_path.startswith(str(share.parent))
     text = "".join(logs)
     assert "'kraken-both' is registered twice" in text, text
     assert "Serving the shared registration" in text
@@ -375,8 +416,8 @@ def test_an_unchanged_share_is_not_read_again(curated, share, monkeypatch):
     client = TestClient(app)
     served = app.state.registry
     reads = []
-    real = shared_registry.read_trained
-    monkeypatch.setattr(shared_registry, "read_trained",
+    real = shared_registry._read_all
+    monkeypatch.setattr(shared_registry, "_read_all",
                         lambda root: reads.append(root) or real(root))
 
     for _ in range(3):
@@ -484,6 +525,216 @@ def test_a_broken_local_overlay_on_reload_keeps_the_previous_registry(curated, s
     assert "Registry reload failed" in "".join(logs)
 
 
+# ── a share that answers badly ───────────────────────────────────────────────
+def test_a_registration_that_cannot_be_read_for_a_moment_is_not_unregistered(
+        curated, share, monkeypatch, logs):
+    """A soft CIFS mount can return EIO between the listing and the reads, and
+    the first look after a reconnect is when it does. Recording the signature
+    over that read left kraken-a unregistered until an unrelated file changed."""
+    register(share, "kraken-a")
+    app = create_app(settings_for(curated, share))
+    assert "kraken-a" in look_once(app)
+
+    register(share, "kraken-b")  # a change, so the next look reads every file
+    register(share, "kraken-c")
+    failing = {"kraken-a.yaml": 1, "kraken-c.yaml": 1}
+    real = Path.read_text
+
+    def flaky(self, *args, **kwargs):
+        if failing.get(self.name):
+            failing[self.name] -= 1
+            raise OSError(errno.EIO, "Input/output error")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+
+    during = look_once(app)
+    assert "kraken-a" in during, "served before, so kept while unreadable"
+    assert "kraken-b" in during, "one bad read does not hold up the others"
+    assert "kraken-c" not in during, "never read, so nothing to serve yet"
+    assert failing == {"kraken-a.yaml": 0, "kraken-c.yaml": 0}
+
+    # The files have not changed since; the look reads them anyway.
+    assert {"kraken-a", "kraken-b", "kraken-c"} <= look_once(app)
+    text = "".join(logs)
+    assert f"WARNING Cannot read registration {share / 'trained' / 'kraken-a.yaml'}" in text
+    assert "still serving what it said before" in text
+    assert "ERROR Skipping registration" not in text, "an I/O error is not a bad file"
+
+
+def test_a_file_that_stays_unreadable_is_warned_about_once(curated, share, monkeypatch, logs):
+    register(share, "kraken-a")
+    app = create_app(settings_for(curated, share))
+    register(share, "kraken-a")  # changed, so read again
+    real = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if self.name == "kraken-a.yaml":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    for _ in range(4):
+        assert "kraken-a" in look_once(app)
+
+    text = "".join(logs)
+    assert text.count("WARNING Cannot read registration") == 1, text
+    assert "Reloaded the registry" not in text, "nothing changed, so nothing to announce"
+
+
+def test_a_share_that_drops_between_the_listing_and_the_read_is_read_again(
+        curated, share, monkeypatch):
+    app = create_app(settings_for(curated, share))
+    register(share, "kraken-new")
+    real = shared_registry._read_all
+    reads = []
+
+    def away_once(root):
+        reads.append(root)
+        return None if len(reads) == 1 else real(root)
+
+    monkeypatch.setattr(shared_registry, "_read_all", away_once)
+
+    assert "kraken-new" not in look_once(app)
+    assert "kraken-new" in look_once(app), "the signature seen before the failed read " \
+                                           "must not count as read"
+
+
+def test_a_share_whose_server_is_down_is_an_outage_not_a_crash(curated, share, monkeypatch,
+                                                                logs, capsys):
+    """Python 3.12's Path.is_dir raises for EHOSTDOWN, EIO and ESTALE — what a
+    soft CIFS mount answers when its server is gone."""
+    register(share, "kraken-kept")
+    app = create_app(settings_for(curated, share))
+    assert "kraken-kept" in look_once(app)
+    register(share, "kraken-kept")  # so the outage is noticed as a change
+    real_stat = os.stat
+
+    def host_down(path, *args, **kwargs):
+        if str(path).startswith(str(share)):
+            raise OSError(errno.EHOSTDOWN, "Host is down")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", host_down)
+
+    for _ in range(3):
+        assert "kraken-kept" in look_once(app)
+    text = "".join(logs)
+    assert "Registry watch failed" not in text, text
+    assert text.count("WARNING Cannot read") == 1, text
+
+    assert read_trained(share) is None
+    from scripts.merge_loras import registered_models
+    registered_models(Settings(models_config=curated, registry_root=share))
+    assert "Is it mounted?" in capsys.readouterr().err
+
+
+def test_an_unresolvable_local_path_fails_loudly_instead_of_fetching_a_doi(curated, share,
+                                                                          logs):
+    """The share is the first place a path written on one machine is opened on
+    another. A mountpoint that differs used to reach htrmopo as a 'DOI'."""
+    missing = "/mnt/elsewhere/kraken-moved/kraken-moved.mlmodel"
+    path = register(share, "kraken-moved", local_path=missing)
+
+    app = create_app(settings_for(curated, share))
+
+    # Said where the registration is read, with what the operator has to check...
+    text = "".join(logs)
+    assert (f"ERROR Registration {path}: local_path {missing} does not exist on "
+            f"{socket.gethostname()}. Both machines must mount the share") in text, text
+    # ...served regardless, because the weights may just not be visible yet...
+    assert app.state.registry.get("kraken-moved").local_path == missing
+    # ...and where the engine resolves it, an error that names the path.
+    with pytest.raises(WeightsNotFound, match=re.escape(missing)):
+        resolve_weights(missing)
+
+
+# ── the promotion gate ───────────────────────────────────────────────────────
+class FakeKraken:
+    def __init__(self) -> None:
+        self.models: list[str] = []
+
+    async def recognize(self, image, filename, content_type, model, lines=None):
+        self.models.append(model)
+        return RecognitionResult(model=model, engine="kraken", text="gelesen", lines=[],
+                                 timing_ms=1, segmented_by="kraken-blla", version="0.1.0")
+
+
+def gate_client(curated: Path, root: Path | None) -> TestClient:
+    app = create_app(settings_for(curated, root, party_second_opinion=False))
+    app.state.kraken_client = FakeKraken()
+    return TestClient(app)
+
+
+def ocr(client: TestClient, model: str, gate: bool = False):
+    headers = {**HEADERS, PROMOTION_GATE_HEADER: "1"} if gate else HEADERS
+    return client.post("/ocr", headers=headers, files={"image": IMG}, data={"model": model})
+
+
+def test_the_promotion_gate_reaches_a_registration_nobody_else_can(curated, share):
+    """The trainer registers `enabled: false` and then serves one page through
+    /ocr. Without a way through for that request, the gate could never pass."""
+    path = register(share, "kraken-fresh", enabled=False)
+    client = gate_client(curated, share)
+    fake = client.app.state.kraken_client
+
+    refused = ocr(client, "kraken-fresh")
+    assert refused.status_code == 404, refused.text
+
+    passed = ocr(client, "kraken-fresh", gate=True)
+    assert passed.status_code == 200, passed.text
+    assert passed.json()["model"] == "kraken-fresh"
+    assert fake.models == [yaml.safe_load(path.read_text(encoding="utf-8"))["local_path"]]
+    assert "kraken-fresh" not in served_ids(client), "the gate advertises nothing"
+
+    register(share, "kraken-fresh", enabled=True)  # the trainer, after the gate
+    look(client)
+    assert ocr(client, "kraken-fresh").status_code == 200
+    assert "kraken-fresh" in served_ids(client)
+
+
+@pytest.mark.parametrize("case", ["curated", "with a reason", "vllm", "feature off"])
+def test_the_promotion_gate_reaches_nothing_else(curated, share, case):
+    if case == "curated":
+        model, root = "kraken-retired", share
+    elif case == "with a reason":
+        model, root = "kraken-broken", share
+        register(share, model, enabled=False, disabled_reason="loads, then segfaults")
+    elif case == "vllm":
+        # vLLM never serves from local_path; an unmerged adapter cannot pass here.
+        model, root = "qwen-adapter", share
+        register(share, model, engine="vllm", enabled=False,
+                 base_model="Qwen/Qwen3-VL-4B-Instruct")
+    else:
+        model, root = "kraken-local-fresh", None
+        save_overlay(curated.parent / "models.local.yaml",
+                     [local_model(model, enabled=False)])
+    client = gate_client(curated, root)
+
+    response = ocr(client, model, gate=True)
+
+    assert response.status_code == 404, response.text
+    assert client.app.state.kraken_client.models == []
+
+
+def test_the_trainers_gate_passes_through_the_gateway(curated, share, tmp_path, monkeypatch):
+    """promote.http_recognizer against the real routes: the header is the contract."""
+    import httpx
+
+    register(share, "kraken-fresh", enabled=False)
+    client = gate_client(curated, share)
+    page = tmp_path / "page.jpg"
+    page.write_bytes(b"\xff\xd8-fake")
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: client.post(
+        url.removeprefix("http://gateway:8200"),
+        headers=kw["headers"], files=kw["files"], data=kw["data"]))
+
+    verdict = promote("kraken-fresh", page, http_recognizer("http://gateway:8200", KEY))
+
+    assert verdict.promoted, verdict.reason
+    assert verdict.sample == "gelesen"
+
+
 # ── the contract with the trainer ────────────────────────────────────────────
 class TrainersBaseEntry(BaseModel):
     """``atr_training.shared_registry.BaseEntry`` (training-atr-models, 16.09.2026).
@@ -543,7 +794,7 @@ def test_merge_loras_sees_the_shared_registrations(curated, share):
              base_model="Qwen/Qwen3-VL-4B-Instruct")
 
     with_share = registered_models(Settings(models_config=curated, registry_root=share))
-    without = registered_models(Settings(models_config=curated))
+    without = registered_models(Settings(models_config=curated, registry_root=None))
 
     lora = {s.id for s in with_share.by_engine("vllm") if s.base_model}
     assert lora == {"qwen-disabled", "qwen-idhefix", "qwen-asteraix"}

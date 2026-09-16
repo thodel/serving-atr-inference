@@ -35,6 +35,7 @@ from atr_serving.config import Settings
 from atr_serving.manager import GpuBusyError, ManagerError
 from atr_serving.pipeline import generation_budget, recognize_lines, recognize_page_vllm
 from atr_serving.registry import ModelSpec, Registry
+from atr_serving.training.promote import PROMOTION_GATE_HEADER
 
 router = APIRouter()
 
@@ -209,6 +210,10 @@ def _resolve_spec_strict(request: Request, model: str) -> tuple[str, ModelSpec |
     as a real (empty) transcription.
     """
     spec = _registry(request).get(model)
+    if spec is None:
+        candidate = _awaiting_the_gate(request, model)
+        if candidate is not None:
+            return candidate.engine, candidate
     if spec is not None and not spec.enabled:
         # Registered, and known not to run here. Refusing now — with the reason —
         # beats launching an engine that will fail: the caller gets a 404 it can
@@ -234,6 +239,24 @@ def _resolve_spec_strict(request: Request, model: str) -> tuple[str, ModelSpec |
         detail=(f"unknown model {model!r}. Pass a registered id (see GET /models) "
                 f"or a raw Zenodo ref (10.xxxx/zenodo.NNNN). Known ids: {known}"),
     )
+
+
+def _awaiting_the_gate(request: Request, model: str) -> ModelSpec | None:
+    """The trained registration the promotion gate is testing, or None.
+
+    The gate proves a model can be served by serving one page through this
+    route, while the model is still ``enabled: false`` — so a disabled trained
+    registration has to be resolvable for that one request, and only for it.
+    Everyone else keeps getting the 404 below, and GET /models is unchanged.
+    Only with the shared registry on (#138): off, nothing here changes.
+    """
+    if request.headers.get(PROMOTION_GATE_HEADER) != "1":
+        return None
+    watch = getattr(request.app.state, "registry_watch", None)
+    candidate = watch.candidate(model) if watch is not None else None
+    if candidate is not None:
+        logger.info("Promotion gate: serving {} before it is enabled", model)
+    return candidate
 
 
 async def _ensure_vllm_port(request: Request, model: str) -> int:
