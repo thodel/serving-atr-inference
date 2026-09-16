@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest  # noqa: F401
+
 
 from atr_serving.training.gpu_release import ReleaseResult, release_gpu
 
@@ -55,3 +57,20 @@ def test_the_summary_names_what_stayed(monkeypatch):
 def test_an_unreached_gateway_says_so_rather_than_looking_empty():
     r = ReleaseResult(reached=False, detail="ConnectError: refused")
     assert str(r).startswith("gateway not reached")
+
+
+def test_a_venv_without_httpx_does_not_fail_the_job(monkeypatch):
+    """trocr-train does not install httpx, and the import sat outside the try."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_httpx(name, *args, **kwargs):
+        if name == "httpx":
+            raise ModuleNotFoundError("No module named 'httpx'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_httpx)
+    result = release_gpu("http://127.0.0.1:8200", "k")
+    assert not result.reached
+    assert "ModuleNotFoundError" in result.detail

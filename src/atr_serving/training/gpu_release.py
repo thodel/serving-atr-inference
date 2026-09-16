@@ -51,11 +51,17 @@ class ReleaseResult:
 
 def release_gpu(gateway_url: str, api_key: str, timeout: float = 60.0
                 ) -> ReleaseResult:
-    """Ask the gateway to unload its evictable vLLM models. Never raises."""
-    import httpx  # trainer venv only
+    """Ask the gateway to unload its evictable vLLM models. Never raises.
 
+    The import is INSIDE the try. It used to sit above it, so "never raises"
+    held for every failure except the one a venv without httpx produces — and
+    trocr-train is such a venv. The first job on asteraix died of exactly that
+    on 16.09.2026; any TrOCR job on this box would have too.
+    """
     url = f"{gateway_url.rstrip('/')}/admin/release-gpu"
     try:
+        import httpx  # trainer venv only — and not every trainer venv has it
+
         response = httpx.post(url, headers={"X-API-Key": api_key}, timeout=timeout)
         response.raise_for_status()
         body = response.json()
