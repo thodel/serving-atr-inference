@@ -247,3 +247,9 @@ discovery_report.md
 
 # Tooling scratch (openclaw); never project content
 .openclaw/
+
+# Any copy of .env carries the API key. Only the example is tracked. Found on
+# idhefix on 16.09.2026: a pre-deploy backup (.env.bak-<date>) sat untracked and
+# NOT ignored in a public repo, one `git add -A` away from publishing the key.
+.env.*
+!.env.example
