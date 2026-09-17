@@ -2006,3 +2006,20 @@ conclusion cost three published model cards.
 The three cards now carry the held-out result, name the benchmark by DOI, state
 that the headline CER above the note is not held-out, and record the training-data
 defect.
+
+### 21a. A 16-hour prepare, then a chain that died in one second
+
+`qwen3vl-german-xix-v2` was queued as prepare → chain → train → score. The
+prepare took **16 h 34** instead of v1's 4 h: compile finished in 2 h 35, and the
+remaining 14 h were the artefact cache (#109) copying 966,748 crop files — 87.5 GB
+— one by one onto GPFS at ~57,000 files an hour. That step did not exist when v1
+ran. It fitted the 20 h walltime, but not by much; a larger corpus will not.
+
+The chain then failed in one second: `MaxCpuRunMinsPerUser`. `job_gratis` caps
+**CPUs × walltime at 11,520 minutes**, and that applies to GPU jobs as much as CPU
+ones. The train job asked for 16 × 24 h = 23,040 and was rejected at submission.
+The v3 medieval run had fitted only because it asked for 16 × 8 h.
+
+Resubmitted as 12 CPUs × 15 h = 10,800. The chain script now uses the same, with
+the reason next to it, and lives in the repo as `ubelix/chain_train_score.sbatch`
+beside `ubelix/score_federal_minutes.sbatch`.
