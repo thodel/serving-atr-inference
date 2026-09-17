@@ -60,6 +60,18 @@ case "$HF_TOKEN" in
   "")    unset HF_TOKEN; echo "== HF token: ABSENT or EMPTY (~/.hf_token) — anonymous rate limits apply" ;;
   *)     unset HF_TOKEN; echo "== HF token: ~/.hf_token does not look like a token (expected hf_…) — ignoring it" ;;
 esac
+# Which code this job runs. The container takes atr_serving from this checkout via
+# PYTHONPATH, so a job runs whatever the checkout held when it STARTED — not what is
+# on main. That has now cost two runs: the medieval v3 eval scored the head of
+# val.jsonl a day after #120 fixed it, and xix-v2 died on a GPU-release call that
+# main had removed the night before. Warn loudly; do not pull inside a job.
+echo "== code: $(git -C "$REPO" log -1 --format='%h %cd %s' --date=short 2>/dev/null)"
+if git -C "$REPO" fetch -q origin main 2>/dev/null; then
+  BEHIND=$(git -C "$REPO" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
+  if [ "${BEHIND:-0}" -gt 0 ]; then
+    echo "!! WARNING: checkout is $BEHIND commit(s) behind origin/main — run 'git -C $REPO pull' before submitting"
+  fi
+fi
 export ATR_TRAIN_JOBS_ROOT=$S/runs/jobs
 export ATR_TRAIN_CHECKPOINT_ROOT=$S/runs/checkpoints
 export ATR_TRAIN_TRAINED_ROOT=$S/runs/trained
