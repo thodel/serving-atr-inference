@@ -532,7 +532,7 @@ def test_without_that_field_the_card_is_unchanged(tmp_path: Path):
 
 # ── the code row (#147) ─────────────────────────────────────────────────────
 def _provenance_code(card: str) -> str:
-    return next(l for l in card.splitlines() if l.startswith("| code |"))
+    return next(line for line in card.splitlines() if line.startswith("| code |"))
 
 
 def test_the_card_names_the_commit_that_evaluated(tmp_path):

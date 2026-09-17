@@ -86,11 +86,13 @@ def clones(tmp_path: Path):
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
     seed = tmp_path / "seed"
     subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
-    for r in (seed,):
-        _git(r, "config", "user.email", "t@example.org"); _git(r, "config", "user.name", "t")
+    _git(seed, "config", "user.email", "t@example.org")
+    _git(seed, "config", "user.name", "t")
     (seed / "f.txt").write_text("one\n")
-    _git(seed, "add", "f.txt"); _git(seed, "commit", "-q", "-m", "one")
-    _git(seed, "remote", "add", "origin", str(origin)); _git(seed, "push", "-q", "origin", "main")
+    _git(seed, "add", "f.txt")
+    _git(seed, "commit", "-q", "-m", "one")
+    _git(seed, "remote", "add", "origin", str(origin))
+    _git(seed, "push", "-q", "origin", "main")
     mine = tmp_path / "mine"
     subprocess.run(["git", "clone", "-q", str(origin), str(mine)], check=True)
     return origin, seed, mine
@@ -116,7 +118,8 @@ def test_an_unreadable_checkout_is_unknown_not_fine(tmp_path):
 
 def test_main_refuses_a_stale_checkout_and_can_be_overridden(clones, tmp_path, monkeypatch, capsys):
     _, seed, mine = clones
-    (seed / "f.txt").write_text("two\n"); _git(seed, "commit", "-qam", "two")
+    (seed / "f.txt").write_text("two\n")
+    _git(seed, "commit", "-qam", "two")
     _git(seed, "push", "-q", "origin", "main")
     script = tmp_path / "t.sbatch"
     script.write_text(TRAIN)
