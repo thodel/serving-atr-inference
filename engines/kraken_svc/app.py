@@ -32,6 +32,8 @@ from PIL import Image
 from atr_serving.contracts import Line, RecognitionResult, Region, SegmentResponse
 from atr_serving.kraken_loader import load_recognition_model, resolve_weights
 
+from . import regions as region_detect
+
 KRAKEN_VERSION = _pkg_version("kraken")
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 CACHE_DIR = Path(__file__).resolve().parent / "models_cache"
@@ -153,6 +155,33 @@ def _line_regions(line) -> list[str]:
     return [str(r) for r in (getattr(line, "regions", None) or [])]
 
 
+def _segmented_by(found: list[Region]) -> str:
+    """Name what actually did the work, so a reading can be traced to it."""
+    if not found or not region_detect.regions_enabled():
+        return "kraken-blla"
+    return f"kraken-blla+{region_detect.region_model_id()}"
+
+
+def _detected_regions(img, seg, line_boxes) -> tuple[list[Region], list[list[str]]]:
+    """``(regions, per-line region ids)`` — YOLO's blocks when it has any.
+
+    kraken puts every line of these pages in one implicit region, so its own
+    grouping carries no information (measured 2026-09-16: 65 of 65 lines of
+    ``lassberg-letter-1345`` in a single ``_``-prefixed block). When the detector
+    finds real blocks they replace that; when it finds none, kraken's answer
+    stands and the page behaves exactly as it did before this existed.
+    """
+    if not region_detect.regions_enabled():
+        return _regions(seg), [_line_regions(ln) for ln in seg.lines]
+
+    found = region_detect.detect_regions(img)
+    if not found:
+        return _regions(seg), [_line_regions(ln) for ln in seg.lines]
+
+    assigned = region_detect.assign_regions(line_boxes, found)
+    return ([Region(id=r.id, type=r.type, bbox=list(r.bbox)) for r in found], assigned)
+
+
 def _regions(seg) -> list[Region]:
     """The blocks kraken found, flattened out of its ``{type: [region]}`` map.
 
@@ -225,13 +254,13 @@ async def segment(image: UploadFile = File(...), mode: str = Form(default="basel
         seg = blla.segment(img, device=DEVICE)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"segmentation failed: {exc}") from exc
-    lines = []
-    for idx, ln in enumerate(seg.lines):
-        bl, bbox = _geom(ln)
-        lines.append(Line(order=idx, baseline=bl, bbox=bbox, regions=_line_regions(ln)))
+    geoms = [_geom(ln) for ln in seg.lines]
+    found, assigned = _detected_regions(img, seg, [bbox for _, bbox in geoms])
+    lines = [Line(order=idx, baseline=bl, bbox=bbox, regions=assigned[idx])
+             for idx, (bl, bbox) in enumerate(geoms)]
     return SegmentResponse(
-        lines=lines, segmented_by="kraken-blla",
-        regions=_regions(seg), reading_order=_reading_order(seg, len(lines)))
+        lines=lines, segmented_by=_segmented_by(found),
+        regions=found, reading_order=_reading_order(seg, len(lines)))
 
 
 @app.post("/recognize", response_model=RecognitionResult)
@@ -252,6 +281,7 @@ async def recognize(
     out: list[Line] = []
     texts: list[str] = []
     confs: list[float] = []
+    _, assigned = _detected_regions(img, seg, [_geom(ln)[1] for ln in seg.lines])
     for idx, (ln, rec) in enumerate(zip(seg.lines, records)):
         text = _record_text(rec)
         conf = _record_conf(rec)
@@ -259,7 +289,7 @@ async def recognize(
             confs.append(conf)
         bl, bbox = _geom(ln)
         out.append(Line(order=idx, baseline=bl, bbox=bbox, text=text, confidence=conf,
-                        regions=_line_regions(ln)))
+                        regions=assigned[idx]))
         texts.append(text)
 
     return RecognitionResult(

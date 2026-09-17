@@ -8,3 +8,10 @@ pyyaml>=6.0
 kraken>=5.0
 torch>=2.2.0
 torchvision>=0.17.0
+
+# Text-region detection (regions.py). Optional: without it the service segments
+# lines exactly as it did before, and says so in the log. Both this and the
+# Riksarkivet weights it fetches are AGPL-3.0 — a licence decision for whoever
+# operates the service, not only a dependency.
+ultralytics>=8.2.0
+huggingface_hub>=0.23.0
