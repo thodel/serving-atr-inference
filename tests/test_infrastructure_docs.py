@@ -13,15 +13,23 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from atr_serving.clients import TRAINER_CONNECT_TIMEOUT_S
+import httpx
+from fastapi.testclient import TestClient
+
+from atr_serving.app import create_app
+from atr_serving.clients import TRAINER_CONNECT_TIMEOUT_S, TrainerClient
 from atr_serving.config import Settings
 from atr_serving.manager import MEASURED_VRAM_BUDGET_MB
-from atr_serving.shared_registry import RegistryWatch
+from atr_serving.shared_registry import TRAINED_DIRNAME, RegistryWatch
 
 REPO = Path(__file__).resolve().parents[1]
 INFRA = REPO / "docs" / "INFRASTRUCTURE.md"
 UNIT_DIR = REPO / "deploy" / "systemd"
 ENV_EXAMPLE = REPO / ".env.example"
+
+DEPLOY = REPO / "docs" / "DEPLOY.md"
+ROUTES = REPO / "src" / "atr_serving" / "api" / "routes.py"
+INSTALLER = REPO / "scripts" / "install_user_units.sh"
 
 IDHEFIX_IP = "130.92.59.240"
 ASTERAIX_IP = "130.92.59.242"
@@ -289,6 +297,46 @@ def mermaid_house_rules(lines: list[str]) -> list[str]:
     return problems
 
 
+def _bash_blocks(text: str) -> list[list[str]]:
+    """The lines of every ```bash block."""
+    blocks, current = [], None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if current is None:
+            if re.match(r"(`{3,})\s*(bash|sh|shell)\s*$", stripped):
+                current = []
+            continue
+        if stripped.startswith("```"):
+            blocks.append(current)
+            current = None
+            continue
+        current.append(stripped)
+    return blocks
+
+
+def _row(text: str, section: str, first_cell: str) -> list[str]:
+    """The row of a table in ``## section`` whose first cell is ``first_cell``."""
+    rows = [r for r in _table_rows(_section(text, section)) if r[0] == first_cell]
+    assert len(rows) == 1, f"docs/INFRASTRUCTURE.md#{section}: no single row {first_cell}"
+    return rows[0]
+
+
+def explained_by(first_cell: str, status: int, detail: str) -> bool:
+    """Whether a row of the failure table describes this answer.
+
+    The row starts with the status in backticks; each "quoted" alternative in it
+    is the detail with the variable parts written as "…", and every piece between
+    them must occur in the detail.
+    """
+    if not first_cell.startswith(f"`{status}`"):
+        return False
+    for quoted in re.findall(r'"([^"]*)"', first_cell):
+        pieces = [p.strip() for p in quoted.split("…") if p.strip()]
+        if pieces and all(p in detail for p in pieces):
+            return True
+    return False
+
+
 # ── the tests ────────────────────────────────────────────────────────────────
 def test_every_unit_is_documented():
     """Every unit in deploy/systemd has a row in the services table, with the
@@ -487,6 +535,9 @@ def test_the_numbers_quoted_from_the_code_match_it():
         "trainer connect timeout": (r"waits (\d+) s to connect", TRAINER_CONNECT_TIMEOUT_S),
         "startup wait for the share": (r"curated models after at most (\d+) s",
                                        RegistryWatch.startup_wait_s),
+        "what /health calls reachable": (
+            r'`reachable` in `/health` means "answered below (\d+)"',
+            re.search(r"reachable=r\.status_code < (\d+)", ROUTES.read_text()).group(1)),
     }
     problems = []
     for what, (pattern, value) in quoted.items():
@@ -496,3 +547,166 @@ def test_the_numbers_quoted_from_the_code_match_it():
         elif any(float(f) != float(value) for f in found):
             problems.append(f"{what}: the doc says {found}, the code says {value}")
     assert not problems, "\n".join(problems)
+
+
+def test_the_share_table_names_every_reader_the_code_has():
+    """The engines that are handed a registration's ``local_path`` read the
+    weights directory; a script that reads the shared registrations is named as
+    their reader, and as a reader of the weights if it takes ``local_path``."""
+    text = INFRA.read_text(encoding="utf-8")
+    weights = _row(text, "The research share", "`training_folder/trained/MODEL/`")[2]
+    registrations = _row(text, "The research share", "`registry/trained/ID.yaml`")[2]
+    engines = re.findall(r"(\w+)_ref = \(spec\.local_path\b", ROUTES.read_text())
+    assert engines, "routes.py no longer hands an engine spec.local_path; update this test"
+    problems = [f"the {engine} engine opens local_path but is not named in the "
+                f"training_folder/trained/MODEL/ row" for engine in sorted(set(engines))
+                if f"{engine} engine" not in weights]
+    for script in sorted((REPO / "scripts").glob("*.py")):
+        source = script.read_text(encoding="utf-8")
+        if not re.search(r"import[^\n]*\bread_trained\b", source):
+            continue
+        name = f"scripts/{script.name}"
+        if name not in registrations:
+            problems.append(f"{name} reads the shared registrations but is not named in "
+                            "the registry/trained/ID.yaml row")
+        if "local_path" in source and name not in weights:
+            problems.append(f"{name} takes weights from local_path but is not named in "
+                            "the training_folder/trained/MODEL/ row")
+    assert not problems, "\n".join(problems)
+
+
+def test_every_registry_source_is_named():
+    """The gateway reads three registry sources; the doc lists all three, with
+    the paths the settings really use."""
+    section = _section(INFRA.read_text(encoding="utf-8"), "The research share")
+    fields = Settings.model_fields
+    expected = {
+        "curated": fields["models_config"].default.relative_to(REPO).as_posix(),
+        "legacy overlay": fields["models_overlay"].default.relative_to(REPO).as_posix(),
+        "trained": f"registry/{TRAINED_DIRNAME}/ID.yaml",
+    }
+    rows = {r[0]: r for r in _table_rows(section)}
+    problems = [f"no '{kind}' row naming `{path}`" for kind, path in expected.items()
+                if kind not in rows or f"`{path}`" not in rows[kind][1]]
+    assert not problems, "docs/INFRASTRUCTURE.md, Where a model is registered:\n" + \
+        "\n".join(problems)
+
+
+def test_every_shared_value_says_how_a_mismatch_shows():
+    tables = _tables(_section(INFRA.read_text(encoding="utf-8"), "Shared values"))
+    unlabelled = [row[0] for row in tables[0][1:]
+                  if not re.match(r"(loud|silent|quiet)\b", row[-1])]
+    assert not unlabelled, ("shared values without 'loud', 'silent' or 'quiet' in the "
+                            f"last column: {unlabelled}")
+
+
+def test_every_trainer_failure_is_explained():
+    """Every way the proxy can fail is a row of the failure table, with the
+    status and the words the caller really reads. Driven through the real app
+    and the real TrainerClient, so a changed message or status fails here."""
+    asteraix = f"http://{ASTERAIX_IP}:8204"
+    answers = {
+        "a wrong key": (401, {"detail": "missing or invalid X-API-Key"}),
+        "a refused source": (403, {"detail": f"client {IDHEFIX_IP} is not in "
+                                             "ATR_TRAIN_ALLOWED_CLIENTS"}),
+        "a refused connection": httpx.ConnectError("Connection refused"),
+        "a silent address": httpx.ConnectTimeout(""),
+        "a hung trainer": httpx.ReadTimeout(""),
+        "a trainer without a key": (503, {"detail": "atr-train has no ATR_TRAIN_API_KEY "
+                                                    "configured; set it in .env and restart"}),
+        "a trainer not set up for remote callers": (
+            503, {"detail": "atr-train is not configured to serve remote callers: "
+                            "ATR_TRAIN_API_KEY is empty"}),
+        "a redirect": lambda: httpx.Response(302, headers={"Location": "https://login/"}),
+        "another service": lambda: httpx.Response(200, text="<html>not the trainer</html>"),
+    }
+    table = _tables(_section(INFRA.read_text(encoding="utf-8"), "Operations"))
+    failure_table = next((t for t in table if t[0][0] == "the caller sees"), None)
+    assert failure_table, "docs/INFRASTRUCTURE.md has no 'When /train/* fails' table"
+    problems = []
+    for what, answer in answers.items():
+        def trainer(request: httpx.Request, answer=answer) -> httpx.Response:
+            if isinstance(answer, Exception):
+                raise answer
+            if callable(answer):
+                return answer()
+            return httpx.Response(answer[0], json=answer[1])
+
+        settings = Settings(api_key="caller-key", require_auth=True, train_url=asteraix,
+                            train_api_key="t" * 40)
+        app = create_app(settings)
+        app.state.trainer_client = TrainerClient(
+            settings.train_url, api_key=settings.train_api_key,
+            timeout=settings.train_timeout_s, transport=httpx.MockTransport(trainer))
+        response = TestClient(app).get("/train/jobs", headers={"X-API-Key": "caller-key"})
+        detail = str(response.json().get("detail"))
+        if not any(explained_by(row[0], response.status_code, detail)
+                   for row in failure_table[1:]):
+            problems.append(f"{what}: {response.status_code} {detail!r}")
+    assert not problems, ("docs/INFRASTRUCTURE.md#when-train-fails explains none of:\n"
+                          + "\n".join(problems))
+
+
+def test_the_failure_table_check_sees_a_wrong_row():
+    detail = "training service could not connect within 5s at http://x/jobs"
+    assert explained_by('`504` "training service could not connect within 5s at …"',
+                        504, detail)
+    assert not explained_by('`502` "training service could not connect within 5s at …"',
+                            504, detail)
+    assert not explained_by('`504` "training service could not connect within 9s at …"',
+                            504, detail)
+    assert explained_by('`503` "a …" or "training service …"', 503, detail)
+
+
+def test_the_unit_files_are_copied_before_the_restart():
+    """install_user_units.sh only starts stopped units, so a documented deploy
+    that changes a unit copies it first and restarts afterwards."""
+    installer = INSTALLER.read_text(encoding="utf-8")
+    assert "systemctl --user start" in installer
+    assert "systemctl --user restart" not in installer, (
+        "install_user_units.sh restarts units now; the deploy docs say it only starts "
+        "stopped ones")
+    problems = []
+    for rel in CHECKED_DOCS:
+        for block in _bash_blocks(_doc(rel)):
+            installs = [i for i, line in enumerate(block) if "install_user_units.sh" in line]
+            restarts = [i for i, line in enumerate(block)
+                        if line.startswith("systemctl --user restart")]
+            if installs and restarts and min(installs) > min(restarts):
+                problems.append(f"{rel}: restarts before install_user_units.sh: {block}")
+    assert not problems, "\n".join(problems)
+
+
+def test_a_gateway_restart_waits_for_a_promotion_gate():
+    """The gate is not retried after a refused connection, so every documented
+    gateway restart first checks that no job is in ``registering``."""
+    problems = []
+    for rel in CHECKED_DOCS:
+        for block in _bash_blocks(_doc(rel)):
+            restart = next((i for i, line in enumerate(block)
+                            if line.startswith("systemctl --user restart atr-gateway")), None)
+            if restart is None:
+                continue
+            if not any("registering" in line for line in block[:restart]):
+                problems.append(f"{rel}: restarts atr-gateway without checking for a job "
+                                f"in registering: {block}")
+    assert not problems, "\n".join(problems)
+
+
+def test_the_firewall_block_admits_every_caller_of_the_gateway():
+    """Every host the network table shows calling :8200 gets a ufw rule in the
+    runbook; a rule for tei alone broke the promotion gate."""
+    rows = _table_rows(_section(INFRA.read_text(encoding="utf-8"), "Network and trust"))
+    callers = {row[1].split(" ")[0] for row in rows
+               if len(row) > 1 and "→ idhefix `:8200" in row[1]}
+    assert callers, "the network table shows nobody calling idhefix :8200"
+    rules = [line for block in _bash_blocks(DEPLOY.read_text(encoding="utf-8"))
+             for line in block if line.startswith("sudo ufw allow from")]
+    admitted = {"asteraix": any(f"from {ASTERAIX_IP} " in r and "port 8200" in r
+                                for r in rules),
+                "tei.dh.unibe.ch": any('from "$CLIENT_IP"' in r and "port 8200" in r
+                                       for r in rules)}
+    unknown = sorted(callers - admitted.keys())
+    assert not unknown, f"callers of :8200 this test does not know how to check: {unknown}"
+    missing = sorted(c for c in callers if not admitted[c])
+    assert not missing, f"docs/DEPLOY.md §6 has no ufw rule for: {missing}"

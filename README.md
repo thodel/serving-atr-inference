@@ -307,12 +307,18 @@ curl -s localhost:8204/health | jq .backends    # which backends this box can ac
 ```
 
 The gateway proxies `/train/*` to the training service at `ATR_TRAIN_URL`, which has
-been `http://130.92.59.242:8204` on asteraix since 16.09.2026 (#137). The `ufw` rule
-opens only `:8200` to the client host, so **this proxy is the only way in** for
-callers, with the same `X-API-Key` as recognition. The gateway authenticates itself to
-the trainer with a second, separate key, `ATR_TRAIN_API_KEY`, which both machines must
-hold ([shared values](docs/INFRASTRUCTURE.md#shared-values)). If the trainer refuses
-it, the caller gets `502`, not `401`. A trainer that does not answer
+been `http://130.92.59.242:8204` on asteraix since 16.09.2026 (#137). **Callers reach
+training only through this proxy**, with the same `X-API-Key` as recognition: the
+trainer's allowlist (`ATR_TRAIN_ALLOWED_CLIENTS`) admits only idhefix and asteraix's
+own loopback, because asteraix's `ufw` does not filter high ports. On idhefix, `ufw`
+opens `:8200` to tei (according to the code comments, not re-measured) and, as the
+promotion gate shows, to asteraix
+([network and trust](docs/INFRASTRUCTURE.md#network-and-trust)).
+
+The gateway authenticates itself to the trainer with a second, separate key,
+`ATR_TRAIN_API_KEY`, which both machines must hold
+([shared values](docs/INFRASTRUCTURE.md#shared-values)). If the trainer refuses it,
+the caller gets `502`, not `401`. A trainer that does not answer
 within `ATR_TRAIN_TIMEOUT_S` (20 s) is a `504` naming its URL; keep that below the bot's
 own 30 s, or the bot times out first and blames this box.
 
@@ -415,7 +421,10 @@ omitted entirely, because one CER over the union of their validation splits is
 not a result *on* any one of them.
 
 It needs `huggingface_hub`, which the gateway venv deliberately does not have, so
-run it from the trainer venv:
+run it **on idhefix**, from the old training venv in this checkout. training-atr-models
+has no copy of the script yet (moving it is training-atr-models#6), and #143 plans to
+remove this venv after the v5 acceptance run: whichever comes first decides where
+publishing runs next.
 
 ```bash
 .venvs/kraken-train/bin/hf auth login
@@ -514,7 +523,7 @@ connection is described in
 
 ```
 config/models.yaml          model registry (single source of truth)
-config/models.local.yaml    gitignored overlay — models the retired in-repo trainer registered
+config/models.local.yaml    gitignored legacy overlay: the retired trainer's registrations, still read until #143
 src/atr_serving/            gateway (FastAPI, no ML deps)
   training/                 in-repo training core (retired; training-atr-models carries it on)
     runner_base.py            the stage lifecycle + the shared prepare stage

@@ -46,9 +46,17 @@ bash scripts/make_venvs.sh gateway kraken party trocr vllm
 ```
 
 Without arguments, the script builds **every** venv it knows, including the three
-training venvs, which serve no purpose on this box any more. **Never run it without
-arguments on a live box.** Several requirement files specify ranges rather than pins, so
-a blanket run silently upgrades a serving engine under a running service.
+training venvs. No service on this box uses those any more, but two scripts still do:
+
+- `scripts/publish_to_hub.py` runs from `.venvs/kraken-train` until it moves to
+  training-atr-models (training-atr-models#6).
+- `scripts/merge_loras.py` stays in this repository, and for an adapter trained on
+  asteraix it usually needs `.venvs/vlm-train` (§8).
+
+#143 removes the three venvs after the v5 acceptance run. It does not yet say which
+venv merges our adapters after that. **Never run `make_venvs.sh` without arguments on
+a live box.** Several requirement files specify ranges rather than pins, so a blanket
+run silently upgrades a serving engine under a running service.
 
 `scripts/spike_engine_installs.sh` checked on 2026-06-29 that the engine stacks install
 on Python 3.12: all passed (results in
@@ -232,14 +240,21 @@ sudo loginctl enable-linger tobias
 
 According to the code comments, `ufw` opens `:8200` to tei; this was not re-measured on
 16.09.2026. asteraix's gate requests do arrive (measured 16.09.2026), so the current
-rules also admit 130.92.59.242. A rule scoped to tei alone would break the gate. The
-original setup needed an admin once:
+rules also admit 130.92.59.242. A rule scoped to tei alone would break the gate: every
+kraken model would stay disabled, while its job still completes. Setting up the
+firewall needs an admin:
 
 ```bash
 CLIENT_IP=$(getent hosts tei.dh.unibe.ch | awk '{print $1}')   # resolve to an IP
 sudo ufw allow from "$CLIENT_IP" to any port 8200 proto tcp
+sudo ufw allow from 130.92.59.242 to any port 8200 proto tcp    # asteraix: the promotion gate
 sudo ufw reload
 ```
+
+The tei rule is the one the code comments describe. The asteraix rule is reconstructed
+from the gate requests that arrive, not read from `ufw status`: an existing rule may
+be broader. If asteraix's address changes, this rule must follow it
+([INFRASTRUCTURE.md § Shared values](INFRASTRUCTURE.md#shared-values)).
 
 Engines stay on `127.0.0.1` and are never exposed. Authentication is the `X-API-Key`
 header. The gateway logs a SECURITY warning if it starts exposed with the default key,
@@ -256,8 +271,15 @@ KEY=$(grep ^ATR_API_KEY= .env | cut -d= -f2)
 curl -s -H "X-API-Key: $KEY" localhost:8200/models | python -m json.tool | head
 curl -s -H "X-API-Key: $KEY" localhost:8200/gpu | python -m json.tool | head        # this box
 curl -s -H "X-API-Key: $KEY" localhost:8200/train/gpu | python -m json.tool | head  # asteraix
+curl -s -H "X-API-Key: $KEY" localhost:8200/train/jobs | head -c 300                # key and allowlist
 journalctl --user -u atr-gateway -f
 ```
+
+`reachable` in `/health` only means that the service answered with a status below
+500. A trainer that refuses this gateway with `401` or `403` still reads as reachable,
+so `/train/jobs` is the check that proves the trainer accepts this box. What each
+`/train/*` failure means is in
+[INFRASTRUCTURE.md § When /train/* fails](INFRASTRUCTURE.md#when-train-fails).
 
 From the agentic_historian host (`tei.dh.unibe.ch`):
 
@@ -282,6 +304,22 @@ This box needs only three things for training to work:
 - `ATR_REGISTRY_ROOT` (§3), so that trained models are served without a restart.
 - `scripts/merge_loras.py` (§4), before a trained VLM adapter can be served.
 
+**Merging an adapter trained on asteraix.** peft writes its own version into the
+adapter, and an older peft misreads it with an `AttributeError` that names neither
+peft nor a version. Merge in a venv whose peft is at least as new as the one in
+asteraix's `.venvs/vlm-train`. On this box that is usually `.venvs/vlm-train`, not
+`.venvs/vllm`. The script's preflight compares the two versions and stops before
+loading anything if the venv is too old:
+
+```bash
+cd ~/Repo/serving-atr-inference              # .env there names ATR_REGISTRY_ROOT, so trained/ is read
+.venvs/vlm-train/bin/python scripts/merge_loras.py --list
+.venvs/vlm-train/bin/python scripts/merge_loras.py --only ID
+```
+
+The merged model is still registered `enabled: false`. Enabling it is described in
+[INFRASTRUCTURE.md § When the gate did not promote a model](INFRASTRUCTURE.md#when-the-gate-did-not-promote-a-model).
+
 **The in-repo trainer stays retired.** It is disabled and stopped, and its unit file
 was moved to `~/atr-cache/retired-units/`. It is no longer in
 `deploy/systemd/` or `install_user_units.sh`. It has none of training-atr-models#15's
@@ -301,18 +339,32 @@ removing the in-repo training code is a follow-up named there.
 ## 9. Deploying an update
 
 ```bash
+cd ~/Repo/serving-atr-inference
+KEY=$(grep ^ATR_API_KEY= .env | cut -d= -f2)
 ss -tn state established '( sport = :8200 )'     # any requests in flight? Wait for them.
-cd ~/Repo/serving-atr-inference && git pull --ff-only
+curl -s -H "X-API-Key: $KEY" localhost:8200/train/jobs | python3 -c \
+  'import json,sys; print([j["id"] for j in json.load(sys.stdin)["jobs"] if j["status"] == "registering"])'
+                                                  # must print []; otherwise wait
+git pull --ff-only
 systemctl --user restart atr-gateway
 ```
 
+- **Wait while a job is in `registering`.** Its promotion gate may be running, and a
+  gateway that refuses the connection ends the gate at once, without a retry. The
+  model then stays disabled
+  ([INFRASTRUCTURE.md § What survives what](INFRASTRUCTURE.md#what-survives-what)).
+  `ss` can miss it, because the gate holds no connection between two attempts.
 - **A gateway restart drops every resident vLLM model.** The models run as children of
   the unit. The next request for a model reloads it, which takes about 45 s for the 4B
   xix. The registry is read again: the curated models from the checkout, the trained
-  ones from the share.
+  ones from the share, and the legacy overlay `config/models.local.yaml`
+  ([INFRASTRUCTURE.md § Where a model is registered](INFRASTRUCTURE.md#where-a-model-is-registered)).
 - **Engines** are restarted individually:
   `systemctl --user restart atr-kraken` (or `atr-trocr`, `atr-party`).
-- **A changed unit file** needs `bash scripts/install_user_units.sh`.
+- **A changed unit file**: run `bash scripts/install_user_units.sh`, then
+  `systemctl --user restart` that unit. The script copies the units and reloads
+  systemd, but it only starts units that are stopped, so a running service keeps the
+  old unit until it is restarted.
 - **A changed requirements file** needs a rebuild of that venv, by name (§2), followed
   by `bash scripts/check_venvs.sh`. `git pull` alone never changes a venv.
 

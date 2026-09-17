@@ -68,6 +68,7 @@ flowchart LR
   run -- "logs, data" --> jobs
   run -- "datasets, base models" --> hf
   kr -. "opens local_path" .-> wts
+  tr -. "opens local_path" .-> wts
 ```
 
 A trained model never travels over the network. Its weights and its registration are
@@ -212,6 +213,17 @@ outside the allowlist gets a `403`, a wrong key a `401`. On 16.09. the test port
 also reached from a VPN client, so the network position of a caller protects nothing
 here.
 
+**Reaching the hosts from outside.** agentic_historian's `atr_status.py` records that
+the gateway on idhefix is reachable only over the UniBE VPN, which is why its
+connection errors name the URL. That is a note in code, not a measurement of 16.09.
+asteraix was reached from a VPN client (16.09.), and its launcher assumes that a bind
+beyond loopback is reachable from the whole university network
+(`atr_training/serve.py`).
+
+> TODO: measure whether idhefix's `:8200`, asteraix's `:8204` and SSH to both hosts
+> answer from outside the university network without the VPN. Until then, assume
+> that a laptop needs the VPN for both.
+
 **The proxy's timeouts are shorter than the bot's.** The gateway waits 5 s to connect
 and 20 s for an answer (`ATR_TRAIN_TIMEOUT_S`). On a timeout the caller gets a `504`
 that names the trainer's URL. The bot gives up after 30 s. With 30 s on both sides,
@@ -251,10 +263,10 @@ Paths are relative to `/mnt/wbkolleg_dh_1/Textrecognition_Training/`.
 
 | path | written by | read by | notes |
 |---|---|---|---|
-| `registry/models.yaml` | the gateway (idhefix), at every start, from `config/models.yaml` in git | asteraix, only for kraken jobs, to resolve a `base_model` given as a registry id | disabled entries included; do not edit it on the share, the next gateway start overwrites it |
-| `registry/trained/ID.yaml` | the trainer (asteraix), one file per model, tmp file + `os.replace`; file name = id | the gateway, at most every 5 s (`ATR_REGISTRY_RELOAD_INTERVAL_S`) | `enabled: true` entries are served without a restart; an id equal to a curated id is skipped |
+| `registry/models.yaml` | the gateway (idhefix), at every start, from `config/models.yaml` in git | asteraix, for every engine: at every submit and again before every registration and every promotion gate, to refuse a `model_id` that is a curated id. kraken jobs also use it to resolve a `base_model` given as a registry id | disabled entries included; do not edit it on the share, the next gateway start overwrites it |
+| `registry/trained/ID.yaml` | the trainer (asteraix), one file per model, tmp file + `os.replace`; file name = id. By hand: `python -m atr_training.registration` on asteraix ([below](#when-the-gate-did-not-promote-a-model)) | the gateway, at most every 5 s (`ATR_REGISTRY_RELOAD_INTERVAL_S`); `scripts/merge_loras.py` on idhefix, which lists disabled entries too | `enabled: true` entries are served without a restart; an id equal to a curated id is skipped |
 | `training_folder/jobs/JOB/` | the trainer: `job.json`, `logs/`, `data/`, `spawn.claim` | the trainer, which acts only on its own jobs; the gateway reads none of it (logs and curves go over HTTP) | the single shared job store: 51 records on 16.09., of which 48 are legacy records from idhefix without `host` and 3 carry `host: asteraix` |
-| `training_folder/trained/MODEL/` | the trainer's register stage: weights, then `metadata.json` last | the kraken engine on idhefix, through the absolute `local_path` of the registration; `scripts/publish_to_hub.py` | 12 directories on 16.09. |
+| `training_folder/trained/MODEL/` | the trainer's register stage: weights, then `metadata.json` last | on idhefix: the kraken engine and the trocr engine, which are handed the registration's absolute `local_path`; `scripts/merge_loras.py`, which takes a trained VLM adapter from there; `scripts/publish_to_hub.py` | 12 directories on 16.09. |
 | `trained-ubelix/` | UBELIX training | — | weights trained on UBELIX |
 | `hf_hub/` | both hosts and `lassberg/vlm_training`, through `~/.cache/huggingface/hub`, which is a symlink to it on both hosts | both hosts | 1.8 T; **never set `HF_HOME`**, it routes around the symlink |
 
@@ -268,6 +280,27 @@ only if all of the following hold:
 
 A registration writes `metadata.json` last, so until then another host's model in
 progress looks exactly like an orphan.
+
+### Where a model is registered
+
+The gateway builds its registry from three sources. Only the second is on the share.
+
+| source | where | written by | when the gateway notices a change |
+|---|---|---|---|
+| curated | `config/models.yaml`, in git on idhefix | a commit. A new vLLM entry also needs `scripts/download_models.py`, and a LoRA adapter `scripts/merge_loras.py` ([`DEPLOY.md` §4](DEPLOY.md#4-prefetch-model-weights-and-merge-vllm-lora-adapters)) | only at a restart of `atr-gateway`, which drops the resident vLLM models |
+| trained | `registry/trained/ID.yaml` on the share | the trainer, or `python -m atr_training.registration` on asteraix | at the next look at the share, without a restart |
+| legacy overlay | `config/models.local.yaml` on idhefix, gitignored | the retired in-repo trainer, until 16.09. | at the next look, like `trained/` |
+
+**The legacy overlay is still read.** On 16.09. it held 11 registrations from the old
+trainer, all `enabled: false`, and their weights are already on the share (#143).
+#143 moves them to `registry/trained/` with the same writer; a follow-up named there
+then stops the gateway from reading the file. Until then:
+
+- An id in both the overlay and `trained/` is served from `trained/`, and the gateway
+  logs the collision.
+- An overlay id that is also a curated id stops the gateway from starting. On a
+  reload, the same clash is logged and the previous registry stays in service.
+- `scripts/merge_loras.py` reads all three sources, disabled entries included.
 
 ### CIFS rules, each one learned the hard way
 
@@ -340,15 +373,67 @@ Whether the gate runs depends on the engine:
 
 | engine | gate | how the model reaches `/models` |
 |---|---|---|
-| `kraken` | runs it | automatically, once the gate passes |
-| `trocr` | none (the backend keeps the default "no promotion gate") | not automatically: it stays registered and disabled |
-| `vllm` | never | a LoRA adapter cannot be served by vLLM 0.11 until `scripts/merge_loras.py` on idhefix has merged it into its base, see [`VLM_TRAINING.md`](VLM_TRAINING.md) |
+| `kraken` | runs it | automatically, once the gate passes; by hand if it failed ([below](#when-the-gate-did-not-promote-a-model)) |
+| `trocr` | none (the backend keeps the default "no promotion gate") | by hand: it stays registered and disabled until someone enables it ([below](#when-the-gate-did-not-promote-a-model)) |
+| `vllm` | never | by hand, after a merge: a LoRA adapter cannot be served by vLLM 0.11 until `scripts/merge_loras.py` on idhefix has merged it into its base ([below](#when-the-gate-did-not-promote-a-model)). The background is in [`VLM_TRAINING.md`](VLM_TRAINING.md#serving-what-you-trained), written before the split: where it says "overlay entry", read the registration `registry/trained/ID.yaml` |
 
 A `model_id` equal to a curated id is refused at every step: by the API (`409`), by the
 runner, by the gate, and by the gateway when it reads `trained/`. If two sets of weights
 answered to one name, nobody could tell which one had transcribed a page.
 
-**Who owns a job** (training-atr-models#15):
+### When the gate did not promote a model
+
+A job can be `completed` while its model is missing from `/models`. The job record
+says why:
+
+```bash
+curl -s -H "X-API-Key: $ATR_API_KEY" localhost:8200/train/jobs/JOB | python -m json.tool | grep -E '"(status|promoted|promotion_reason)"'
+```
+
+`promoted: false` with a `promotion_reason` is a normal outcome, not a failure. The
+reason names the cause: a backend without a gate (trocr, vllm), a registration the
+gateway never saw (check `ATR_REGISTRY_ROOT` against `ATR_TRAIN_REGISTRY_ROOT`), an
+engine that returned no text, or a connection error, for example because the gateway
+was restarting ([What survives what](#what-survives-what)). Nothing runs the gate
+again, so a person decides what happens next:
+
+1. **vllm only: merge first**, on idhefix, as in
+   [`DEPLOY.md` §8](DEPLOY.md#8-training-is-not-on-this-box), which also says which
+   venv to use: `scripts/merge_loras.py --only ID`.
+2. **Try the model before anyone sees it** (kraken and trocr). A disabled trained
+   registration without a `disabled_reason` answers the gate's own request:
+
+   ```bash
+   curl -s -H "X-API-Key: $ATR_API_KEY" -H "X-ATR-Promotion-Gate: 1" \
+        -F image=@page.jpg -F model=ID localhost:8200/ocr
+   ```
+
+   A merged VLM cannot be tried this way, because the gateway never serves a disabled
+   vLLM registration. Try it with `/recognize` right after step 3, and disable it
+   again if it fails.
+3. **Enable it**, on asteraix, with the trainer's own writer. It validates the file
+   and replaces it with a tmp file and `os.replace`, as the
+   [CIFS rules](#cifs-rules-each-one-learned-the-hard-way) require:
+
+   ```bash
+   cd ~/Repo/training-atr-models
+   sed 's/^enabled: false$/enabled: true/' \
+       /mnt/wbkolleg_dh_1/Textrecognition_Training/registry/trained/ID.yaml \
+     | PYTHONPATH=src .venvs/kraken-train/bin/python -m atr_training.registration \
+         --root /mnt/wbkolleg_dh_1/Textrecognition_Training/registry
+   ```
+
+   The gateway serves the model at its next look at the share. Disabling works the
+   same way, with `true` and `false` swapped.
+
+**Never edit `registry/trained/ID.yaml` in place with an editor.** While the editor
+writes, the gateway can read a half-written file. training-atr-models has no
+`promote` command yet, so this is the procedure until it has one. Its own runbook for
+registering by hand is part of training-atr-models#16.
+
+### Who owns a job
+
+training-atr-models#15 settles who owns a job:
 
 - The service that accepts a job stamps it with its `host`.
 - A record without `host` belongs to `ATR_TRAIN_LEGACY_JOB_HOST`, which defaults to
@@ -366,10 +451,17 @@ the training machine's documentation (training-atr-models#16).
 ## Shared values
 
 Since the split, the gateway and the trainer read **two `.env` files on two machines**.
-These values must agree across them. Both `.env.example` files mark their side with
-`>>> SHARED <<<`, and `tests/test_infrastructure_docs.py` checks this repository's
-markers against this table. Two of the values fail loudly when they disagree. The
-others fail silently, which makes them the more dangerous ones.
+These values must agree across them. This repository's `.env.example` marks its
+side of each row with `>>> SHARED <<<`, and `tests/test_infrastructure_docs.py`
+checks those markers against this table. training-atr-models' `.env.example` marks
+only four of the values today: `ATR_TRAIN_API_KEY`, `ATR_TRAIN_TRAINED_ROOT`,
+`ATR_TRAIN_REGISTRY_ROOT` and `ATR_TRAIN_GATEWAY_API_KEY`. `ATR_TRAIN_ALLOWED_CLIENTS`
+and `ATR_TRAIN_GATEWAY_URL` also carry idhefix's address but are not marked there yet;
+marking them is part of training-atr-models#16.
+
+The two keys, the trainer's URL and its allowlist fail loudly when they disagree. The
+two paths fail silently, which makes them the more dangerous ones, and a wrong
+`ATR_TRAIN_GATEWAY_URL` only leaves trained models disabled.
 
 | idhefix `.env` (gateway, prefix `ATR_`) | asteraix `.env` (trainer, prefix `ATR_TRAIN_`) | value | if they disagree |
 |---|---|---|---|
@@ -377,12 +469,22 @@ others fail silently, which makes them the more dangerous ones.
 | `ATR_API_KEY` | `ATR_TRAIN_GATEWAY_API_KEY` | the same secret, idhefix's caller key | loud: the gate gets a `401`, and the model stays disabled |
 | `ATR_REGISTRY_ROOT` | `ATR_TRAIN_REGISTRY_ROOT` | `/mnt/wbkolleg_dh_1/Textrecognition_Training/registry` | silent: models register into a directory the gateway never reads, and base models resolve against a file it never publishes |
 | none; the gateway opens `local_path` exactly as written | `ATR_TRAIN_TRAINED_ROOT` | `/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/trained`, absolute, the same path on both hosts, on the same filesystem as the registry | silent until a request: the gateway logs the missing path, and a request for the model fails naming it |
-| `ATR_TRAIN_URL` | the unit's bind, `--host 0.0.0.0 --port 8204` | `http://130.92.59.242:8204` | loud: `/train/*` is a `502` naming the URL |
+| `ATR_TRAIN_URL` | the unit's bind, `--host 0.0.0.0 --port 8204` | `http://130.92.59.242:8204` | loud: `/train/*` is a `502` naming the URL if the connection is refused, or a `504` ("could not connect within 5s") if nobody answers at that address |
 | none (the gateway's own address) | `ATR_TRAIN_ALLOWED_CLIENTS` | `130.92.59.240` | loud: the trainer refuses the gateway, and the caller sees a `502` |
-| the gateway's bind, `:8200` in its unit | `ATR_TRAIN_GATEWAY_URL` | `http://130.92.59.240:8200` | the gate cannot reach the gateway, and models stay disabled |
+| the gateway's bind, `:8200` in its unit | `ATR_TRAIN_GATEWAY_URL` | `http://130.92.59.240:8200` | quiet: every job completes, but the gate cannot reach the gateway, and trained models stay disabled |
 
 The trainer derives its curated file from its root (`<root>/models.yaml`). Do not also
 set `ATR_TRAIN_MODELS_CONFIG`: two settings that name one place drift apart.
+
+**If an address changes**, more than one place must follow:
+
+- asteraix gets a new address: `ATR_TRAIN_URL` on idhefix, and the `ufw` rule on
+  idhefix that admits asteraix to `:8200` for the promotion gate. That rule needs an
+  admin ([`DEPLOY.md` §6](DEPLOY.md#6-who-may-reach-the-gateway)).
+- idhefix gets a new address: `ATR_TRAIN_ALLOWED_CLIENTS` and `ATR_TRAIN_GATEWAY_URL`
+  on asteraix, and every client's gateway URL (agentic_historian's
+  `ATR_GATEWAY_URL`, or the legacy `KRAKEN_SERVICE_URL` it falls back to, and the
+  ATR-MCP's).
 
 Settings that exist **only on asteraix** but belong to this seam:
 
@@ -401,12 +503,29 @@ Settings that exist **only on asteraix** but belong to this seam:
 **Serving on idhefix.** The full runbook is [`DEPLOY.md`](DEPLOY.md#9-deploying-an-update).
 
 ```bash
-ss -tn state established '( sport = :8200 )'     # any requests in flight?
-cd ~/Repo/serving-atr-inference && git pull --ff-only
+cd ~/Repo/serving-atr-inference
+KEY=$(grep ^ATR_API_KEY= .env | cut -d= -f2)
+ss -tn state established '( sport = :8200 )'     # any requests in flight? Wait for them.
+curl -s -H "X-API-Key: $KEY" localhost:8200/train/jobs | python3 -c \
+  'import json,sys; print([j["id"] for j in json.load(sys.stdin)["jobs"] if j["status"] == "registering"])'
+                                                  # must print []; otherwise wait (see below)
+git pull --ff-only
+bash scripts/install_user_units.sh --no-start     # only if a unit file changed
 systemctl --user restart atr-gateway              # drops resident vLLM models
-systemctl --user restart atr-kraken               # or atr-trocr / atr-party, if their code changed
-bash scripts/install_user_units.sh                # only if a unit file changed
+systemctl --user restart atr-kraken               # or atr-trocr / atr-party, if their code or unit changed
 ```
+
+**The unit files are copied before the restart**, because `install_user_units.sh` only
+starts units that are stopped. Run after the restart, it would leave the running
+services on the old unit.
+
+**A job in `registering` may be in its promotion gate.** The gate retries only a `404`
+for a model the gateway does not know yet. A connection refused by a restarting
+gateway ends it at once: the model stays disabled, and nothing runs the gate again.
+`ss` does not catch this, because the gate holds no connection during the 10 s between
+two attempts. If a gate was lost anyway, the job's `promotion_reason` names the
+connection error, and the model is enabled
+[by hand](#when-the-gate-did-not-promote-a-model).
 
 **Training on asteraix.** More detail is in training-atr-models.
 
@@ -426,7 +545,7 @@ checked for v5 on 16.09.
 
 | event | survives | ends |
 |---|---|---|
-| restart of `atr-gateway` | the curated registry (read again from the checkout and published again) and the trained registrations (read again from the share) | resident vLLM models (the next request reloads them, about 45 s for the 4B xix) and requests in flight |
+| restart of `atr-gateway` | the curated registry (read again from the checkout and published again), the trained registrations (read again from the share) and the legacy overlay `config/models.local.yaml` (read again; an overlay id that is also curated stops the start) | resident vLLM models (the next request reloads them, about 45 s for the 4B xix); requests in flight; a kraken job's promotion gate, if one is running: it fails without a retry, the model stays disabled, and the job's `promotion_reason` names the connection error ([what to do](#when-the-gate-did-not-promote-a-model)) |
 | restart of `atr-train` | running jobs (`KillMode=process`) and every job record | nothing that is running; at startup the service reconciles its own jobs and cleans up orphaned weights under the conditions [above](#who-writes-and-who-reads-what) |
 | reboot of either host | every enabled unit comes back (`WantedBy=default.target`, linger on) | everything that ran. The retired `atr-train` on idhefix stays down: it is disabled and its unit file has been moved away |
 | the share goes away | the gateway keeps serving the registrations it has read. A gateway that starts during the outage serves the curated models after at most 10 s and publishes `models.yaml` once the share returns | requests for trained models whose weights cannot be opened; the stage logs, which live on the share (#134) |
@@ -454,7 +573,35 @@ bash scripts/check_venvs.sh                                    # imports and ver
 
 # on asteraix
 curl -s localhost:8204/health     # no key, but only from loopback or an allowlisted host
+systemctl --user status atr-train
 ```
+
+**`reachable` in `/health` means "answered below 500".** A trainer that refuses the
+gateway with `401` or `403` still counts as reachable, while every `/train/*` call
+fails with a `502`. The trainer checks its allowlist even before it serves its own
+`/health`, so a gateway outside `ATR_TRAIN_ALLOWED_CLIENTS` sees a `403` there too.
+`GET /train/jobs` is the check that uses the key and the allowlist.
+
+### When `/train/*` fails
+
+The bot passes the gateway's answer on as `URL answered STATUS: DETAIL`. The detail
+says where to look:
+
+| the caller sees | cause | first check |
+|---|---|---|
+| a connection error or timeout against `:8200` itself | the gateway on idhefix is down, or the caller is outside the VPN | on idhefix: `systemctl --user status atr-gateway`, `journalctl --user -u atr-gateway` |
+| `401` from the gateway ("the gateway rejected the API key") | the client's key is not idhefix's `ATR_API_KEY` | the client's configuration |
+| `502` "… refused the gateway with 401 …" | `ATR_TRAIN_API_KEY` differs between the hosts, or is empty on idhefix | in each host's checkout: `grep ^ATR_TRAIN_API_KEY= .env \| sha256sum`; the two hashes must match |
+| `502` "… refused the gateway with 403 (client … is not in ATR_TRAIN_ALLOWED_CLIENTS) …" | asteraix's allowlist does not name the address idhefix calls from | `ATR_TRAIN_ALLOWED_CLIENTS` in asteraix's `.env`; the detail names the address the trainer saw |
+| `502` "training service unreachable at …" | the connection was refused: `atr-train` is down, or `ATR_TRAIN_URL` names the wrong port | on asteraix: `systemctl --user status atr-train`, `journalctl --user -u atr-train`. Exit status 2 means the launcher refused the bind: `bash scripts/install_user_unit.sh --no-start` asks it again and prints what is missing |
+| `504` "training service could not connect within 5s at …" | nobody answers at that address: asteraix is down, or `ATR_TRAIN_URL` names an old address | whether asteraix is up; `ATR_TRAIN_URL` on idhefix |
+| `504` "training service did not answer within 20s at …" | the trainer accepted the connection and then hung | on asteraix: `journalctl --user -u atr-train` |
+| `503` "training service at …: atr-train has no ATR_TRAIN_API_KEY configured …" or "… is not configured to serve remote callers …" | the trainer's own `.env` is incomplete; the detail lists what is missing | asteraix's `.env`, then `systemctl --user restart atr-train` |
+| `502` "… answered 302 (redirect to …); ATR_TRAIN_URL must name the trainer itself" or "… with a non-JSON body …" | `ATR_TRAIN_URL` names some other HTTP service | `ATR_TRAIN_URL` on idhefix |
+
+Every other error status from the trainer reaches the caller as it is (`400`, `404`,
+`409`, `507` and so on). A `5xx` detail is prefixed with the trainer's URL, because it
+describes asteraix, not idhefix.
 
 ### `.env`
 

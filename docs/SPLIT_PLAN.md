@@ -377,5 +377,5 @@ Stand der Epics am 16.09.2026:
 | T2 Proxy | serving#137 | geschlossen |
 | T3 Handover | serving#138, training-atr-models#14 und #5 | #14 und #5 geschlossen, serving#138 offen |
 | T4 `eval/` | training-atr-models#11 | offen |
-| T5 Cutover und Rückbau | serving#139, training-atr-models#10 | offen. Cutover (T5.3, T5.4) und der Rückbau im Serving-Repo (T5.5) erledigt, die Trainerseite des Rückbaus folgt in training-atr-models; asteraix nutzt seit 22:47 den gemeinsamen Job-Speicher; der Abnahmetest mit v5 (#10) ist offen |
+| T5 Cutover und Rückbau | serving#139, training-atr-models#10 | offen. Cutover (T5.3, T5.4) und der Rückbau auf beiden Seiten (T5.5) erledigt, die Trainerseite mit training-atr-models efd0f7b und aadb890, deployt um 23:08; asteraix nutzt seit 22:47 den gemeinsamen Job-Speicher; serving#139 bleibt offen bis zum Abnahmetest mit v5 (#10) |
 | T6 Ausbau | training-atr-models#12 | offen |
