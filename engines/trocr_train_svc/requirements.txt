@@ -13,7 +13,7 @@
 #     root partition is the binding constraint, and an untested CUDA level for
 #     driver 565 / CUDA 12.7.
 #   * 2.8.0+cu128 is the build proven on this driver by the vLLM venv
-#     (docs/asteraix-environment.md), so the trainer reuses it.
+#     (docs/idhefix-environment.md), so the trainer reuses it.
 # The runner executes the SHARED BasePipeline (atr_serving.training.runner_base),
 # so this venv needs the same core as every other backend — not just the model
 # stack. Missing pydantic-settings made `python -m trocr_train_svc.runner` fail

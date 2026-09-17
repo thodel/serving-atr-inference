@@ -107,7 +107,7 @@ def test_german_xix_models_are_registered_as_page_level_vllm(model_id: str, base
     assert spec.level == "page"
     assert spec.base_model == base
     assert spec.hf_repo == f"dh-unibe/{model_id}"
-    # lazy + GPU 1: GPU 0 is shared with the RAG service (docs/asteraix-environment.md)
+    # lazy + GPU 1: GPU 0 is shared with the RAG service (docs/idhefix-environment.md)
     assert spec.residency == "lazy"
     assert spec.gpu_affinity == 1
 

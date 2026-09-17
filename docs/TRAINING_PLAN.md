@@ -15,7 +15,7 @@ added later by pointing at the same gateway with the same `X-API-Key`.
 
 ## 1. Verified facts this plan rests on
 
-**Host** (`docs/asteraix-environment.md`, probe 2026-06-26): 2× A40 (~45 GB), GPU 0
+**Host** (`docs/idhefix-environment.md`, probe 2026-06-26): 2× A40 (~45 GB), GPU 0
 shared with a RAG service (~10 GB used), GPU 1 hosts our engines + vLLM. Python 3.12,
 no passwordless sudo, `systemctl --user` units, `/` **80 % full, ~356 GB free**.
 

@@ -18,7 +18,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENVS="${ROOT}/.venvs"
-# asterAIx ships Python 3.12 only (no 3.11) — see docs/asteraix-environment.md
+# asterAIx ships Python 3.12 only (no 3.11) — see docs/idhefix-environment.md
 PY="${PYTHON:-python3.12}"
 
 # pip stages a package's EXISTING files into TMPDIR before overwriting them, so a
@@ -141,7 +141,7 @@ if wanted vllm; then
   # Driver 565 / CUDA 12.7: current vLLM (0.2x) is a CUDA-13 build (needs libcudart.so.13
   # / driver >=580) and fails on this box. vLLM 0.11.0 is the last CUDA-12.8 build that
   # still supports Qwen3-VL — it pins torch==2.8.0, which we install from the cu128 index
-  # first so pip keeps the CUDA-12.8 wheel. See docs/asteraix-environment.md.
+  # first so pip keeps the CUDA-12.8 wheel. See docs/idhefix-environment.md.
   new_venv vllm
   "${VENVS}/vllm/bin/pip" install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
   "${VENVS}/vllm/bin/pip" install -r "${ROOT}/engines/vllm/requirements.txt"

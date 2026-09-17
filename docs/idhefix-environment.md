@@ -1,4 +1,12 @@
-# asterAIx — environment & derived decisions
+# idhefix — environment & derived decisions
+
+> **This file describes idhefix** (130.92.59.240, `hostname` `srv`), the serving box.
+> Until 16.09.2026 it was named `asteraix-environment.md`, and the text below still
+> calls the box "asterAIx" throughout. Read every "asterAIx" here as idhefix: the name
+> asteraix now belongs to the training box. Fixing the text is #136. The probe below is
+> from June 2026. The current state of both machines is in
+> [`INFRASTRUCTURE.md`](INFRASTRUCTURE.md). Where the two files differ (linger, disk,
+> what runs on the cards), trust `INFRASTRUCTURE.md`: it was measured on 16.09.2026.
 
 Captured from `scripts/probe_host.sh` on **2026-06-26**. This is the authoritative
 description of the target host; engine pins and deploy choices derive from it.

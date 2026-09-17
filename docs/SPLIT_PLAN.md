@@ -1,5 +1,12 @@
 # Training und Serving trennen — `training-atr-models`
 
+> **Umgesetzt (16.09.2026).** Wie die beiden Maschinen, ihre Dienste und der Share
+> heute aussehen, beschreibt [`INFRASTRUCTURE.md`](INFRASTRUCTURE.md) (auf Englisch).
+> Dort steht der am 16.09. gemessene Stand. Wo die beiden Dokumente sich widersprechen,
+> gilt `INFRASTRUCTURE.md`, zum Beispiel beim Treiber von idhefix: 565.57.01, nicht
+> 580.95.05 wie in §1. Dieser Plan bleibt als Begründung stehen: warum getrennt wurde
+> und in welcher Reihenfolge. Was davon erledigt ist, steht in §8.
+
 Zweite Fassung, 16.09.2026. Die erste war an sechs Stellen sachlich falsch; sie
 stehen in §0, weil ein Plan, der seine eigenen Irrtümer verschweigt, sie
 weitergibt.
@@ -351,3 +358,24 @@ T0 (Namen)  →  T1 (Repo grün)  →  T2 (Proxy)  ┐
   Umstellungs-Issue**.
 - **UBELIX**: zieht mit T1.6 um, aber ob asteraix es ersetzt oder ergänzt, ist
   offen.
+
+---
+
+## 8. Ergebnis
+
+Der Split ist vollzogen: idhefix bedient, asteraix trainiert, und die Übergabe läuft
+über den Share. Das Ergebnis beschreibt [`INFRASTRUCTURE.md`](INFRASTRUCTURE.md):
+Maschinen, Dienste, Kanten und Schlüssel, Share-Layout, der Weg eines Modells und die
+Werte, die auf beiden Maschinen übereinstimmen müssen.
+
+Stand der Epics am 16.09.2026:
+
+| Epic | Issues | Stand |
+|---|---|---|
+| T0 Namen | serving#136 | offen; T0.2 (die Umbenennung in `docs/idhefix-environment.md`) ist mit #142 erledigt |
+| T1 Repo grün | training-atr-models#1 | offen: #2 bis #5 und #8 geschlossen, #6 (Skripte) und #7 (`ubelix/`) offen |
+| T2 Proxy | serving#137 | geschlossen |
+| T3 Handover | serving#138, training-atr-models#14 und #5 | #14 und #5 geschlossen, serving#138 offen |
+| T4 `eval/` | training-atr-models#11 | offen |
+| T5 Cutover und Rückbau | serving#139, training-atr-models#10 | offen. Cutover (T5.3, T5.4) und der Rückbau im Serving-Repo (T5.5) erledigt, die Trainerseite des Rückbaus folgt in training-atr-models; asteraix nutzt seit 22:47 den gemeinsamen Job-Speicher; der Abnahmetest mit v5 (#10) ist offen |
+| T6 Ausbau | training-atr-models#12 | offen |

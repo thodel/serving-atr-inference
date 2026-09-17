@@ -15,7 +15,7 @@ START=1
 [ "${1:-}" = "--no-start" ] && START=0
 
 # Engines + gateway. vLLM is NOT a unit — the ModelManager spawns it as a
-# subprocess (see docs/asteraix-environment.md / IMPLEMENTATION_PLAN.md §8).
+# subprocess (see docs/idhefix-environment.md / IMPLEMENTATION_PLAN.md §8).
 #
 # atr-train is NOT here any more. Training moved to asteraix on 16.09.2026
 # (training-atr-models, #137/#139). The in-repo trainer has none of that

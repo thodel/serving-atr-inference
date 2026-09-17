@@ -1,36 +1,45 @@
 # serving-atr-inference
 
-Flexible ATR/OCR/HTR inference server. Runs many heterogeneous recognition models
-(vLLM VLMs, TrOCR, kraken, party) side by side on a dedicated 2× A40 box and serves
-them behind one HTTP API. Clients (e.g. `agentic_historian`) call in over the
-network and never run models locally.
+Flexible ATR/OCR/HTR inference server. It runs many heterogeneous recognition models
+(vLLM VLMs, TrOCR, kraken, party) side by side on **idhefix**, a 2× A40 box, and serves
+them behind one HTTP API. Clients (e.g. `agentic_historian`) call in over the network
+and never run models locally.
 
-See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the full design. Work is
+Since 16.09.2026, training runs on a second machine, **asteraix**, from its own
+repository, [training-atr-models](https://github.com/thodel/training-atr-models). This
+gateway still fronts it at `/train/*`, and the models it trains reach `/models` through
+a registry on the shared research share. Which machine does what, which service runs
+where, and which values must agree across the two machines is described in
+**[`docs/INFRASTRUCTURE.md`](docs/INFRASTRUCTURE.md)**.
+
+See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the gateway's design. Work is
 tracked as independently-codeable [GitHub issues](../../issues).
 
 ## Architecture (one line)
 
 A dependency-free **FastAPI gateway** routes to **isolated per-engine services**
-(kraken / trocr / party / vLLM, plus a training service), each in its own venv +
-systemd unit, because the engine families need mutually incompatible
-`torch`/`transformers` pins.
+(kraken, trocr and party as systemd units; vLLM as children of the gateway), each in
+its own venv, because the engine families need mutually incompatible
+`torch`/`transformers` pins. `/train/*` is a thin proxy to the trainer on asteraix.
 
 ## Status
 
-Serving **and** training are implemented and run on asterAIx as `systemctl --user`
-units (`deploy/systemd/`). What is done, and what the open issues still cover:
+Serving runs on idhefix as `systemctl --user` units (`deploy/systemd/`). Training runs
+on asteraix; this repository's in-repo trainer is retired
+([`docs/INFRASTRUCTURE.md` § Services](docs/INFRASTRUCTURE.md#services)).
 
 | part | state |
 |---|---|
-| gateway `:8200` — registry (49 models), `/health`, `/models`, recognition routing | done |
-| engine services — kraken, TrOCR, party, vLLM (`engines/`) | done; **#30** open (3 of 7 engines 500 in production), **#32** fixed in code (both engines load safetensors via `kraken.models.load_models`), unverified on the box |
-| training service `:8204` — one supervisor, one queue, one GPU guard | done (M1–M3, #33–#35) |
-| kraken backend (`ketos`) | done; has produced real models |
-| VLM backend (QLoRA on Qwen3-VL) | done, and **verified on GPU end to end** (#47) — see the measured run below |
-| serving what we trained | done (#36) — `local_path` specs, the overlay merged into `/models`, and a promotion gate that advertises only what has actually transcribed a page |
-| per-epoch metrics — `GET /train/jobs/{id}/curve` | done (#38/#51) — read off checkpoint filenames, since ketos' metrics never reach the log |
-| publishing trained models to HuggingFace | done (`scripts/publish_to_hub.py`) |
-| **are any of the numbers meaningful?** | **open (#52)** — see below; this gates the interpretation of every CER here |
+| gateway `:8200`: curated registry (`config/models.yaml`), `/health`, `/models`, recognition routing | done |
+| engine services: kraken, TrOCR, party, vLLM (`engines/`) | done; #30 (3 of 7 engines returning 500 in production) and #32 (party could not load its safetensors) are closed |
+| `GET /gpu` for idhefix's cards and the vLLM budget; `GET /train/gpu` for asteraix's | done (#139) |
+| serving what was trained | in code: `local_path` specs and a promotion gate that advertises only what has actually transcribed a page (#36); since #138 the trained registrations are read from the shared registry and served without a restart |
+| `/train/*` proxy to the trainer on asteraix | done (#137): timeouts, a separate key, errors that name the trainer |
+| training: the kraken, VLM (QLoRA on Qwen3-VL) and TrOCR backends, per-epoch curves, hub publishing | built here until 16.09.2026, now developed in [training-atr-models](https://github.com/thodel/training-atr-models); the in-repo copy is retired, and its removal is a follow-up of #143 |
+| **are any of the numbers meaningful?** | answered (#52): the eval material is sound, and the first bad rows were a training-design problem (below) |
+
+The results below were measured on idhefix, before the split. They stay attributed to
+the machine they were measured on ([`docs/SPLIT_PLAN.md`](docs/SPLIT_PLAN.md), T0.4).
 
 First full VLM run (2026-08-08, Thun demo pair, `max_pages: 40`, 1 epoch): 52 pages →
 783 line crops, 38 steps in 5 min, **CER 0.466** against **1.837** for the un-adapted
@@ -149,7 +158,8 @@ No CER here should be quoted or compared outside this table, and nothing has bee
 to the hub. `base_model` takes a registry id, a Zenodo DOI or a local path, validated at
 submit (#76).
 
-Open work is grouped into three epics:
+Open work was grouped into three epics when training still lived here. Training work
+now continues in [training-atr-models](https://github.com/thodel/training-atr-models):
 
 - **#49** — the training subsystem from "it runs" to "it is trustworthy": #52 is
   diagnosed and its **step-count guard has landed** (#72 — a run whose lines,
@@ -157,18 +167,15 @@ Open work is grouped into three epics:
   and compile, before any GPU time, with the arithmetic in the error); then
   metric decomposition #55, 1..n datasets #40, chunked prepare #39, line-level
   sources #45, runbook + eval #37.
-- **#41** — TrOCR fine-tuning as the third backend: #42 (shared cropping) → #43
-  (contracts + argv) → #44 (the engine). No longer blocked — the three bad CERs are
-  explained, so a third backend will not inherit an unexplained result.
+- **#41** (closed): TrOCR fine-tuning as the third backend, #42 (shared cropping) →
+  #43 (contracts + argv) → #44 (the engine).
 - **#48** — deployment robustness. Its two concrete children landed (#53 version
   assertions in the venv smoke test, #54 an environment check); the epic stays open
   because the pattern behind them — five failure modes in two days, every one the
   shell and the service having drifted apart — is not closed by two scripts.
 
-**#30** remains open from production: three of seven engines were returning 500s in
-July. #32 — the one diagnosed cause, party unable to load its safetensors — is fixed
-in code but the restart that proves it has not happened, so #30 cannot be closed on
-the strength of it.
+**#30** (three of seven engines returning 500s in production, July) and **#32** (its
+one diagnosed cause, party unable to load its safetensors) are closed.
 
 Every surprise so far has had one shape: **something assumed, nothing checked, the
 failure surfacing far from its cause.** The rule this subsystem already enforces — *no
@@ -182,7 +189,7 @@ filesystem and the reporting; the next ones have to protect the *experiment*.
 ## Quickstart (dev)
 
 ```bash
-bash scripts/make_venvs.sh                 # builds .venvs/gateway
+bash scripts/make_venvs.sh gateway         # builds .venvs/gateway only
 .venvs/gateway/bin/uvicorn atr_serving.app:app --reload
 # in another shell:
 curl localhost:8000/health
@@ -195,52 +202,58 @@ Run tests:
 .venvs/gateway/bin/pytest
 ```
 
-## Target host: asterAIx (DH)
+## Serving host: idhefix
 
-This deployment is **custom-built for asterAIx** (`srv`, 2× A40). Full probe results
-and the decisions derived from them are in
-[`docs/asteraix-environment.md`](docs/asteraix-environment.md). To refresh after the
-box changes:
+This deployment is **custom-built for idhefix** (130.92.59.240, `hostname` `srv`,
+2× A40), the serving box. The June 2026 probe, and the decisions derived from it, are
+in [`docs/idhefix-environment.md`](docs/idhefix-environment.md). The state of both
+machines as measured on 16.09.2026 is in
+[`docs/INFRASTRUCTURE.md`](docs/INFRASTRUCTURE.md#hosts). To refresh the probe after
+the box changes:
 
 ```bash
-# ON asterAIx (read-only, changes nothing):
-bash scripts/probe_host.sh | tee asteraix-probe.txt
+# ON idhefix (read-only, changes nothing):
+bash scripts/probe_host.sh | tee idhefix-probe.txt
 ```
 
-### What the box actually is (probed 2026-06-26)
+### What the box is
 
-- **Ubuntu 24.04**, kernel 6.8, Threadripper PRO (48 threads), 251 GB RAM.
-- **2× A40 (~45 GB each)**, compute 8.6, driver **565.57.01 / CUDA 12.7** — any cu12x
-  `torch` wheel works; no system CUDA toolkit dependency.
-- **Python 3.12 only** (no 3.11) → all venvs use `python3.12`.
-- **GPU 0 is shared** with a live RAG service (~10 GB); **GPU 1 is free** → our stack
-  defaults to GPU 1, GPU 0 is overflow-only.
-- **No passwordless sudo, `Linger=no`, docker socket denied** → run as `systemctl --user`
-  units (one-time `enable-linger` needs admin) and have the ModelManager spawn vLLM as
-  **child subprocesses** rather than root systemd units. Rootless **podman** is the
-  container fallback (not docker).
-- **`:8000/:8080/:9000/:11434/:80` are taken** (incl. Ollama + nginx) → gateway on
-  **`:8200`**, engines `:8201–:8203`, vLLM `:8210+`, training `:8204`.
+- **Ubuntu 24.04**, Threadripper PRO (48 threads), 251 GB RAM.
+- **2× A40 (46068 MiB each)**, compute 8.6, driver **565.57.01 / CUDA 12.7**. Any cu12x
+  `torch` wheel works, and there is no dependency on a system CUDA toolkit.
+- **Python 3.12 only** (no 3.11), so all venvs use `python3.12`.
+- **GPU 0 belongs to the neighbours' RAG service** (~10 GB), so our stack runs on
+  GPU 1.
+- **No passwordless sudo, docker socket denied** (June probe). Everything runs as
+  `systemctl --user` units (linger is on), and the ModelManager spawns vLLM as **child
+  subprocesses** rather than as root systemd units. Rootless **podman** is the
+  container fallback, not docker.
+- **`:8000/:8080/:9000/:11434/:80` are taken** (including Ollama and nginx). The
+  gateway therefore listens on **`:8200`**, the engines on `:8201–:8203` and vLLM on
+  `:8210+`. `:8204` belonged to the in-repo trainer, which is retired.
 - `/` filled to **100 %** on 2026-08-06 and was cleared to ~660 G free by moving the
-  HuggingFace cache to the research share. **Do not set `HF_HOME`** —
+  HuggingFace cache to the research share. After the cleanup in #143 it was at 71 %
+  (16.09.2026). **Do not set `HF_HOME`** —
   `~/.cache/huggingface/hub` is a symlink to
   `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub`, so the *standard* path already
   resolves there and the cache is shared. Setting `HF_HOME` re-routes downloads to a
   second location and re-downloads models that are already on disk (this cost 16 GB on
   2026-08-08 — **#48**).
 - **The share is CIFS**, which refuses `chmod`, `utime` and symlinks to a non-owner.
-  That is not cosmetic: it is why the trainer copies weights with `copyfile` rather than
-  `copy2`, why `TMPDIR` must be on local disk, and why `pip` cannot *replace* an
-  installed package when `TMPDIR` points at the share (installs succeed, upgrades fail
-  with `EPERM`, and the venv silently keeps the old version).
+  That has real consequences. It is why the trainer copies weights with `copyfile`
+  rather than `copy2`, why `TMPDIR` must be on local disk, and why `pip` cannot
+  *replace* an installed package when `TMPDIR` points at the share: installs succeed,
+  upgrades fail with `EPERM`, and the venv silently keeps the old version. The full set
+  of rules is in
+  [`docs/INFRASTRUCTURE.md`](docs/INFRASTRUCTURE.md#cifs-rules-each-one-learned-the-hard-way).
 
 ### Setup principles
 
-- One venv per engine family
-  (`.venvs/{gateway,vllm,kraken,trocr,party,kraken-train,vlm-train}`, all Python 3.12),
-  each pinning its own cu12x `torch`. The gateway venv has **no** ML deps — this
-  isolation avoids the `torch`/`transformers` conflicts documented in `os-vlm-tester`'s
-  README.
+- One venv per engine family (`.venvs/{gateway,vllm,kraken,trocr,party}` on idhefix,
+  all Python 3.12), each pinning its own cu12x `torch`. The training venvs
+  (`kraken-train`, `vlm-train`, `trocr-train`) belong to training-atr-models on
+  asteraix. The gateway venv has **no** ML deps — this isolation avoids the
+  `torch`/`transformers` conflicts documented in `os-vlm-tester`'s README.
 - vLLM: published wheel (pulls matching `torch`+CUDA), version pinned in
   `engines/vllm/requirements.txt`.
 - kraken / trocr / party: separate venvs, separate pins; small models on GPU 1.
@@ -248,7 +261,7 @@ bash scripts/probe_host.sh | tee asteraix-probe.txt
   venv resolved to **5.14.1** on its first real build — a major version the training
   script was not written against. Requirement files say which API surface their code
   targets; keep it that way.
-- `scripts/make_venvs.sh` takes targets (`bash scripts/make_venvs.sh vlm-train`).
+- `scripts/make_venvs.sh` takes targets (`bash scripts/make_venvs.sh trocr`).
   **Never re-run it bare on a live box** — several requirement files are ranges, so a
   blanket run silently upgrades a serving engine under a running service.
 
@@ -257,38 +270,49 @@ Provisioning is documented in [`docs/DEPLOY.md`](docs/DEPLOY.md) (clone → venv
 
 ## Training API
 
-`atr-train` (`:8204`) pulls ground truth from [dh-unibe](https://huggingface.co/dh-unibe),
-runs the job on GPU 1, and registers the result in the gitignored overlay registry —
-**disabled** until something has actually served it.
+Training runs on asteraix, from
+[training-atr-models](https://github.com/thodel/training-atr-models). Callers still use
+`/train/*` on this gateway, which forwards every call there. This section describes the
+API as callers see it. The trainer's internals, venvs and deploy rules are documented
+in training-atr-models, and the path of a model from submission to `/models` is in
+[`docs/INFRASTRUCTURE.md`](docs/INFRASTRUCTURE.md#how-a-trained-model-reaches-models).
 
-| `engine` | what it trains | venv | docs |
+`atr-train` (`:8204` on asteraix) pulls ground truth from
+[dh-unibe](https://huggingface.co/dh-unibe) and runs the job on the card
+`ATR_TRAIN_GPU` names (1 today). It registers the result in the shared registry on the
+research share, **disabled** until something has actually served it.
+
+| `engine` | what it trains | venv (on asteraix) | docs |
 |---|---|---|---|
 | `kraken` | recognition models via `ketos`, from scratch or fine-tuned from Zenodo | `.venvs/kraken-train` | [`docs/TRAINING.md`](docs/TRAINING.md) (runbook) · [`docs/TRAINING_PLAN.md`](docs/TRAINING_PLAN.md) (plan) |
 | `vllm` | QLoRA fine-tunes of a Qwen3-VL base | `.venvs/vlm-train` | [`docs/VLM_TRAINING.md`](docs/VLM_TRAINING.md) |
 | `trocr` | fine-tunes a TrOCR base (`VisionEncoderDecoderModel`) on line crops | `.venvs/trocr-train` | epic **#41** |
 
-**One service, one queue, one GPU guard**, because there is one GPU: two services would
-each enforce `max_concurrent=1` against their own job list and start two runs into the
-same card. **One venv per backend**, because kraken 7.0.2 and a `transformers` new enough
+**One service, one queue, one GPU guard**, because idhefix had one GPU for training
+when this was built. (asteraix has two; allocating them per job is
+training-atr-models#12.) Two services would each enforce `max_concurrent=1` against
+their own job list and start two runs into the same card. **One venv per backend**, because kraken 7.0.2 and a `transformers` new enough
 for Qwen3-VL cannot share a dependency tree. The service resolves that by importing
 neither: it spawns each job as a detached child of *that engine's* interpreter
-(`src/atr_serving/training/backends.py`).
+(`src/atr_serving/training/backends.py` in the retired in-repo copy).
 
 Both backends share the job envelope, the store, the state machine, the five stages, the
 resource guards and the whole `prepare` stage. A backend supplies four stage bodies and a
 params model — nothing else.
 
 ```bash
+# on asteraix, in ~/Repo/training-atr-models
 bash scripts/make_venvs.sh vlm-train            # only needed for the vllm backend
 curl -s localhost:8204/health | jq .backends    # which backends this box can actually run
 ```
 
-The gateway proxies `/train/*` to the training service at `ATR_TRAIN_URL` — `:8204` on
-this box, or on asteraix after the split (#137). The `ufw` rule opens only `:8200` to the
-client host, so **this proxy is the only way in** for callers, with the same `X-API-Key`
-as recognition. The gateway authenticates itself to the trainer with a second, separate
-key, `ATR_TRAIN_API_KEY`, which both machines must hold (see `.env.example`); if the
-trainer refuses it, the caller gets `502`, not `401`. A trainer that does not answer
+The gateway proxies `/train/*` to the training service at `ATR_TRAIN_URL`, which has
+been `http://130.92.59.242:8204` on asteraix since 16.09.2026 (#137). The `ufw` rule
+opens only `:8200` to the client host, so **this proxy is the only way in** for
+callers, with the same `X-API-Key` as recognition. The gateway authenticates itself to
+the trainer with a second, separate key, `ATR_TRAIN_API_KEY`, which both machines must
+hold ([shared values](docs/INFRASTRUCTURE.md#shared-values)). If the trainer refuses
+it, the caller gets `502`, not `401`. A trainer that does not answer
 within `ATR_TRAIN_TIMEOUT_S` (20 s) is a `504` naming its URL; keep that below the bot's
 own 30 s, or the bot times out first and blames this box.
 
@@ -314,7 +338,7 @@ curl -H "X-API-Key: $ATR_API_KEY" -H 'Content-Type: application/json' \
   https://<gateway>/train/jobs
 ```
 
-Training is **fire-and-forget**: the run is a detached process on the box and
+Training is **fire-and-forget**: the run is a detached process on asteraix and
 outlives both this request and a restart of either service. Poll the job record.
 
 **The dataset is checked against the hub before anything queues** (#46): the repo
@@ -341,12 +365,13 @@ envelope is otherwise identical.
 
 Errors keep the trainer's status and detail, because they name their own fix —
 `507` a full filesystem, `500` a `TMPDIR` on a network mount, `409` an
-already-terminal job, `503` a backend whose venv was never built on this box,
+already-terminal job, `503` a backend whose venv was never built on the trainer's box,
 `400` an engine with no backend at all. A gateway that cannot reach the trainer is
 a `502` naming the URL, never a job id for a job that was not created.
 
-Trained models are registered **disabled** in the gitignored
-`config/models.local.yaml`, and the **promotion gate** (#36) is what advertises
+Trained models are registered **disabled** in the shared registry, one file per model
+(`registry/trained/ID.yaml` on the share; the retired in-repo trainer used the
+gitignored `config/models.local.yaml`). The **promotion gate** (#36) is what advertises
 them: after registering, the trainer posts one held-out validation page to the
 gateway's `/ocr` with the new id, and only non-empty text flips the entry to
 `enabled: true`. Empty text does not — a `200` with `""` is exactly how the
@@ -373,7 +398,7 @@ improving when the epochs ran out, early ones mean it peaked and then got worse
 
 The register stage leaves each model's best-run weights and a `metadata.json` in one
 directory per model under `TrainerSettings.trained_root` — `~/atr-cache/trained/` by
-default, and on asterAIx the research share, wherever `.env` points it.
+default, and in production the research share, wherever `.env` points it.
 `scripts/publish_to_hub.py` pushes those directories to `<org>/<model_id>`, generating
 the model card from that metadata — CER/WER, dataset selection, hyperparameters, job id.
 
@@ -472,26 +497,35 @@ or a bare record id) is accepted; anything else is a `404`.
 
 ## Security
 
-Two VMs on the same private university network, behind the same firewall, no TLS.
-Auth is a **static shared API key** in the `X-API-Key` header (`ATR_API_KEY`,
-identical on gateway and client). Only the gateway port is exposed; engine
-services bind `127.0.0.1`.
+Three machines on the university network (tei, idhefix and asteraix), no TLS. Two
+static keys travel in the `X-API-Key` header:
+
+- **`ATR_API_KEY`** lets callers into this gateway: agentic_historian on tei, the
+  ATR-MCP, and asteraix's promotion gate.
+- **`ATR_TRAIN_API_KEY`** lets this gateway into the trainer on asteraix.
+
+A leak of one key opens only one direction. On idhefix, only the gateway listens beyond
+loopback; the engines and vLLM bind `127.0.0.1`. On asteraix, `ufw` does not filter high
+ports, so the trainer checks its key and a client allowlist itself. What protects each
+connection is described in
+[`docs/INFRASTRUCTURE.md`](docs/INFRASTRUCTURE.md#network-and-trust).
 
 ## Layout
 
 ```
 config/models.yaml          model registry (single source of truth)
-config/models.local.yaml    gitignored overlay — models trained on this box
+config/models.local.yaml    gitignored overlay — models the retired in-repo trainer registered
 src/atr_serving/            gateway (FastAPI, no ML deps)
-  training/                 training core — pure, testable in the repo venv, no GPU
+  training/                 in-repo training core (retired; training-atr-models carries it on)
     runner_base.py            the stage lifecycle + the shared prepare stage
     backends.py               engine → runner module + venv
     contracts.py              the engine-agnostic job envelope
 engines/                    per-engine services, one venv each
   kraken_svc/ trocr_svc/ party_svc/ vllm/     recognition
-  kraken_train_svc/         the training service (:8204) + the kraken backend
+  kraken_train_svc/         the retired in-repo training service + the kraken backend
   vlm_train_svc/            the VLM (QLoRA) backend
-deploy/systemd/             unit files
+deploy/systemd/             unit files for idhefix: gateway and engines
+docs/INFRASTRUCTURE.md      both machines, the share, the values they must agree on
 scripts/                    venv builder, model prefetch, LoRA merge, hub publishing
 eval/                       evaluation harness (ported from os-vlm-tester)
 tests/                      443 tests; none need a GPU or the network

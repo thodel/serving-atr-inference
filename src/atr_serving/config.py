@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # ── HTTP ──────────────────────────────────────────────────────────────
     # :8000/:8080/:9000/:11434/:80 are already taken on asterAIx — see
-    # docs/asteraix-environment.md. Gateway lives on :8200, engines on :820x.
+    # docs/idhefix-environment.md. Gateway lives on :8200, engines on :820x.
     host: str = "0.0.0.0"
     port: int = 8200
 

@@ -11,7 +11,7 @@ with the right libraries and in HF_HOME):
 - vllm / trocr models  -> huggingface_hub.snapshot_download(hf_repo)
 - kraken / party models -> `kraken get <zenodo_id>` (needs the kraken venv)
 
-Honors HF_HOME from the environment (set it in .env — see docs/asteraix-environment.md;
+Honors HF_HOME from the environment (set it in .env — see docs/idhefix-environment.md;
 the box's root partition is ~80% full).
 """
 

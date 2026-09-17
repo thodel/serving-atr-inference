@@ -35,7 +35,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          # asterAIx ships 3.12 only (docs/asteraix-environment.md); CI matches the
+          # asterAIx ships 3.12 only (docs/idhefix-environment.md); CI matches the
           # box rather than the newest release, so a green run means something here.
           python-version: "3.12"
           cache: pip

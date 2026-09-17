@@ -7,7 +7,7 @@ environment and job plumbing. Full context and cost estimates:
 
 | file | what it is |
 |---|---|
-| `vlm-train.def` | Apptainer image: Ubuntu 24.04 + python3.12 + torch 2.8.0+cu128, mirroring `docs/asteraix-environment.md`. The repo is **not** baked in — it is bind-mounted, so code edits need no rebuild. |
+| `vlm-train.def` | Apptainer image: Ubuntu 24.04 + python3.12 + torch 2.8.0+cu128, mirroring `docs/idhefix-environment.md`. The repo is **not** baked in — it is bind-mounted, so code edits need no rebuild. |
 | `submit_job.py` | The one thing the service did that the runner cannot: turn a JSON `TrainRequest` into a `JobStore` record. |
 | `smoke.sbatch` | Phase 1: reproduce the Thun run on 1× RTX 4090, free QoS. |
 | `report.py` | Print a finished job's status / metrics / error. |

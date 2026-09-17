@@ -187,7 +187,7 @@ Then `systemctl --user restart atr-gateway` and read one real page through it.
 ### Disk, before you start
 
 `/` on asterAIx is a single partition and **hit 100 % full on 2026-08-06**
-(`asteraix-environment.md` §7). Merging all three needs roughly:
+(`idhefix-environment.md` §7). Merging all three needs roughly:
 
 | | ~size |
 |---|---|
