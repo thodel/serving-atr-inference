@@ -11,7 +11,9 @@ package is needed instead (see issue #3).
 
 from __future__ import annotations
 
+import asyncio
 import time
+import threading
 from importlib.metadata import version as _pkg_version
 from io import BytesIO
 from pathlib import Path
@@ -39,6 +41,7 @@ app = FastAPI(title="Party Engine", version=__version__)
 _net = None
 _loaded = False
 _error: str | None = None
+_model_lock = threading.Lock()  # kraken model is not safe for concurrent inference
 
 
 def _model_file() -> Path:
@@ -76,20 +79,28 @@ async def health():
     })
 
 
-@app.post("/recognize", response_model=RecognitionResult)
-async def recognize(file: UploadFile = File(...), model: str = Form(default="party")):
-    if not _loaded or _net is None:
-        raise HTTPException(status_code=503, detail=f"party model not loaded: {_error}")
-    t0 = time.perf_counter()
-    try:
-        img = Image.open(BytesIO(await file.read())).convert("RGB")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"invalid image: {exc}") from exc
-    try:
-        seg = blla.segment(img, device=DEVICE)
+# ---------------------------------------------------------------------------
+# Internal helpers — all blocking kraken calls run in the thread pool so the
+# event loop stays responsive.  The _model_lock serialises inference on the
+# GPU; /health answers within milliseconds even when the model is busy.
+# ---------------------------------------------------------------------------
+
+def _segment_and_recognize(img: Image.Image):
+    """Run blla.segment + rpred.rpred off the event loop (thread-safe).
+
+    The lock serialises pages through the GPU.  Without it concurrent calls
+    would OOM or corrupt GPU state.  The lock does not prevent /health from
+    answering — only the event-loop thread touches it.
+    """
+    seg = blla.segment(img, device=DEVICE)
+    with _model_lock:
         records = list(rpred.rpred(_net, img, seg))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"recognition failed: {exc}") from exc
+    return seg, records
+
+
+async def _do_recognize(img: Image.Image) -> tuple[list[Line], list[str], list[float]]:
+    """Async wrapper: run blocking segment + recognise in a thread pool."""
+    seg, records = await asyncio.to_thread(_segment_and_recognize, img)
 
     out: list[Line] = []
     texts: list[str] = []
@@ -110,6 +121,22 @@ async def recognize(file: UploadFile = File(...), model: str = Form(default="par
         bl = [[float(p[0]), float(p[1])] for p in baseline] if baseline else None
         out.append(Line(order=idx, baseline=bl, bbox=bbox, text=text, confidence=conf))
         texts.append(text)
+    return out, texts, confs
+
+
+@app.post("/recognize", response_model=RecognitionResult)
+async def recognize(file: UploadFile = File(...), model: str = Form(default="party")):
+    if not _loaded or _net is None:
+        raise HTTPException(status_code=503, detail=f"party model not loaded: {_error}")
+    t0 = time.perf_counter()
+    try:
+        img = Image.open(BytesIO(await file.read())).convert("RGB")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid image: {exc}") from exc
+    try:
+        out, texts, confs = await _do_recognize(img)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"recognition failed: {exc}") from exc
 
     return RecognitionResult(
         model=MODEL_ID, engine="party", text="\n".join(texts), lines=out,
