@@ -382,6 +382,9 @@ class Pipeline(BasePipeline):
                     "model_id": model_id,
                     "job_id": job.id,
                     "engine": "kraken",
+                    # The commit behind each stage; "test" is the evaluator that
+                    # measured the metrics below (#147).
+                    "code": job.code_summary(),
                     "created": utcnow().isoformat(),
                     "weights": dest.name,
                     "source_weights": str(weights),

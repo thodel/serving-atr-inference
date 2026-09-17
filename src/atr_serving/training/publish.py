@@ -448,6 +448,7 @@ def model_card(model: TrainedModel, repo_id: str, licence: str | None = None) ->
         f"| engine | `{model.engine}` |",
         f"| base model | {base} |",
         f"| training job | `{_plain(model.job_id)}` |",
+        f"| code | {_code_cell(model.metadata.get('code'))} |",
         f"| trained | {_plain(model.metadata.get('created'))} |",
         f"| weights | {', '.join(f'`{p.name}`' for p in model.weights) or '—'} |",
         "",
@@ -543,6 +544,33 @@ def _validation_scope(model: TrainedModel) -> list[str]:
                 "is one CER over both, so read it as *mostly in-domain*, not as a "
                 "held-out-hands benchmark. Scoring the held-out projects on their own "
                 "would give the stricter number."]
+
+
+def _code_cell(code: Any) -> str:
+    """The commit that measured the metrics, and the one the job began with if different.
+
+    ``metadata["code"]`` is ``TrainJob.code_summary()`` (#147). Models registered
+    before it have none, and the card says so rather than leaving the row out: an
+    absent provenance row reads as an oversight, an explicit one as a fact.
+    """
+    if not isinstance(code, dict):
+        return "not recorded (trained before #147)"
+
+    def short(entry: Any) -> str | None:
+        if not isinstance(entry, dict) or not entry.get("commit"):
+            return None
+        return str(entry["commit"])[:12] + ("+dirty" if entry.get("dirty") else "")
+
+    measured, created = short(code.get("test")), short(code.get("created"))
+    trained = short(code.get("train"))
+    if measured is None and created is None:
+        return "not recorded"
+    parts = [f"evaluated with `{measured}`" if measured else "evaluator commit not recorded"]
+    if trained and trained != measured:
+        parts.append(f"trained with `{trained}`")
+    if created and created not in (measured, trained):
+        parts.append(f"submitted with `{created}`")
+    return ", ".join(parts)
 
 
 def _projects(projects: Any) -> str:

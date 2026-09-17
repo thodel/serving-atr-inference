@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -678,6 +678,29 @@ class Progress(BaseModel):
     artefact: str | None = None
 
 
+class CodeVersion(BaseModel):
+    """Which code did something: the git commit of the checkout it was imported from.
+
+    A job record says what was trained and what it scored, and until #147 not
+    with which code — so a CER could not be tied to the evaluator that measured
+    it. On UBELIX that mattered twice: the container imports ``atr_serving`` from
+    a checkout via ``PYTHONPATH``, a job runs whatever that checkout holds when it
+    **starts**, and two runs started on a checkout a day behind ``main``.
+
+    ``commit`` is ``None`` when the code does not run from a git checkout (an
+    installed wheel) or git is unavailable: unknown is recorded as unknown, never
+    guessed. ``dirty`` means tracked files differed from ``commit``.
+    """
+
+    commit: str | None = None
+    dirty: bool | None = None
+
+    def short(self) -> str:
+        if not self.commit:
+            return "unknown"
+        return self.commit[:12] + ("+dirty" if self.dirty else "")
+
+
 class StageRecord(BaseModel):
     name: JobStage
     status: Literal["pending", "running", "completed", "failed", "cancelled"] = "pending"
@@ -685,6 +708,9 @@ class StageRecord(BaseModel):
     finished_at: datetime | None = None
     exit_code: int | None = None
     log: str | None = None  # path, relative to the job dir
+    #: The code this stage actually ran with, which on a resumed or requeued job
+    #: need not be the code the job was created with (#147).
+    code: CodeVersion | None = None
 
 
 class TrainJob(BaseModel):
@@ -694,6 +720,9 @@ class TrainJob(BaseModel):
 
     id: str
     request: TrainRequest
+    #: The code the job was created with (#147). Each stage records its own in
+    #: ``StageRecord.code``; see :meth:`code_summary`.
+    code: CodeVersion | None = None
     status: JobStatus = "queued"
     stage: JobStage | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -739,3 +768,16 @@ class TrainJob(BaseModel):
     @property
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
+
+    def code_summary(self) -> dict[str, dict[str, Any] | None]:
+        """``{"created": …, "<stage>": …}`` — the code behind each part of this job.
+
+        Written into ``metadata.json`` by the register stage, so a published CER
+        names the commit of the evaluator that measured it (the ``test`` entry),
+        not only the one the job was submitted with.
+        """
+        out: dict[str, dict[str, Any] | None] = {
+            "created": self.code.model_dump() if self.code else None}
+        for record in self.stages:
+            out[record.name] = record.code.model_dump() if record.code else None
+        return out

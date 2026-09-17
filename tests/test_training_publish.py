@@ -528,3 +528,30 @@ def test_without_that_field_the_card_is_unchanged(tmp_path: Path):
     card = card_for(tmp_path, KRAKEN_META)
     assert "this run's own held-out validation split" in card
     assert "page-level and seeded" in card
+
+
+# ── the code row (#147) ─────────────────────────────────────────────────────
+def _provenance_code(card: str) -> str:
+    return next(l for l in card.splitlines() if l.startswith("| code |"))
+
+
+def test_the_card_names_the_commit_that_evaluated(tmp_path):
+    meta = {**VLM_META, "code": {"created": {"commit": "a" * 40, "dirty": False},
+                                 "train": {"commit": "a" * 40, "dirty": False},
+                                 "test": {"commit": "b" * 40, "dirty": True}}}
+    row = _provenance_code(card_for(tmp_path, meta, weights="adapter_model.safetensors"))
+    assert "evaluated with `bbbbbbbbbbbb+dirty`" in row
+    assert "trained with `aaaaaaaaaaaa`" in row
+    assert "submitted with" not in row   # same as trained, not repeated
+
+
+def test_one_commit_throughout_is_said_once(tmp_path):
+    same = {"commit": "c" * 40, "dirty": False}
+    meta = {**VLM_META, "code": {"created": same, "train": same, "test": same}}
+    row = _provenance_code(card_for(tmp_path, meta, weights="adapter_model.safetensors"))
+    assert row == "| code | evaluated with `cccccccccccc` |"
+
+
+def test_a_model_from_before_147_says_so(tmp_path):
+    row = _provenance_code(card_for(tmp_path, VLM_META, weights="adapter_model.safetensors"))
+    assert "not recorded" in row and "#147" in row

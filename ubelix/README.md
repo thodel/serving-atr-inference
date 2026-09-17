@@ -52,12 +52,21 @@ apptainer exec --bind /storage/research --bind /scratch --bind /rs_scratch \
 
 # 2. add the measured training params to that spec (see the table below)
 
-# 3. STAGE 1 — build the corpus on a free CPU node, no GPU
-sbatch --export=ALL,SPEC=$HOME/ubelix/specs/<name>.json ubelix/prepare.sbatch
+# 0. ALWAYS first: the job runs the code this checkout holds when it STARTS
+git -C ~/serving-atr-inference pull
 
-# 4. STAGE 2 — train it, resumable, on a GPU
-sbatch --export=ALL,JOB_ID=<id from stage 1> ubelix/train.sbatch
+# 3. STAGE 1 — build the corpus on a free CPU node, no GPU
+ubelix/submit.sh ubelix/prepare.sbatch ~/ubelix/specs/<name>.json
+
+# 4. STAGE 2 — train it on one H100, not preemptable, inside job_gratis's cap
+JOB_ID=<id from stage 1> ubelix/submit.sh ubelix/train.sbatch -- \
+    --partition=gpu --qos=job_gratis --cpus-per-task=12 --time=15:00:00
 ```
+
+`submit.sh` refuses a checkout behind `origin/main` (`ALLOW_STALE_CHECKOUT=1` to
+override) and a request above `job_gratis`'s 11,520 CPU-minutes — both have
+already cost a run (#147, `docs/UBELIX_PLAN.md` §20–§21b). Every job and every
+stage records the commit it ran with (`code` in `job.json`).
 
 Stage 1 leaves the job in `training` — **the same state a preemption leaves it
 in** — so stage 2 takes the ordinary resume path and there is no second contract
@@ -124,7 +133,7 @@ costs 10–31 h of copying at full scale (§9.2).
 
 ## Run
 
-Use `submit.sh`, not `sbatch` — it validates the spec on the login node first.
+Use `submit.sh`, not `sbatch` — it checks the checkout and the CPU-minute cap, and validates the spec, on the login node first. Extra `sbatch` options go after `--`.
 `submit_job.py` does validate, but it runs *inside* the batch job, so a bad spec
 costs a queue wait and a GPU allocation before anything says so (job 14431367
 died 13 s in over a capital letter in a `model_id`).

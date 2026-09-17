@@ -34,6 +34,7 @@ from loguru import logger
 
 from atr_serving.training.artefact_cache import ArtefactCache, ArtefactCacheError
 from atr_serving.training.chunking import CHUNK_PLAN_FILENAME
+from atr_serving.training.codeversion import current_code, describe_drift
 from atr_serving.training.contracts import (
     DatasetCounts,
     DatasetSelectionError,
@@ -160,7 +161,13 @@ class BasePipeline(ABC):
     @contextmanager
     def _stage(self, job: TrainJob, name: JobStage):
         record = StageRecord(name=name, status="running", started_at=utcnow(),
-                             log=f"logs/{name}.log")
+                             log=f"logs/{name}.log", code=current_code())
+        drift = describe_drift(job.code, record.code)
+        if drift:
+            # Not a failure: a resumed job legitimately runs newer code. It is the
+            # thing to know when a result surprises, so it goes into the log the
+            # stage writes and the record keeps both commits (#147).
+            logger.warning("stage {}: {}", name, drift)
         job.stages = [s for s in job.stages if s.name != name] + [record]
         self.store.save(job)
         try:

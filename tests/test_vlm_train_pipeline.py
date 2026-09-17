@@ -666,3 +666,49 @@ def test_the_sample_length_cap_is_part_of_the_key(store, settings):
 
     page = store.create(request_with(params=VlmTrainParams(granularity="page")))
     assert pipeline._cache_key(page).digest != line.digest
+
+
+# ── which code ran (#147) ───────────────────────────────────────────────────
+def _pin_code(monkeypatch, created: str, running: str) -> None:
+    from atr_serving.training import codeversion, runner_base
+    from atr_serving.training.contracts import CodeVersion
+    monkeypatch.setattr(codeversion, "current_code", lambda: CodeVersion(commit=created, dirty=False))
+    monkeypatch.setattr(runner_base, "current_code", lambda: CodeVersion(commit=running, dirty=False))
+
+
+def test_the_job_and_every_stage_record_their_code(store, settings, monkeypatch):
+    _pin_code(monkeypatch, "c" * 40, "c" * 40)
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+
+    assert job.status == "completed", job.error
+    assert job.code.commit == "c" * 40
+    assert [s.code.commit for s in job.stages] == ["c" * 40] * len(job.stages)
+    # and it survives the round trip through job.json
+    assert store.load(job.id).stages[-1].code.commit == "c" * 40
+
+
+def test_a_stage_on_newer_code_is_recorded_and_warned_about(store, settings, monkeypatch):
+    from loguru import logger
+    _pin_code(monkeypatch, "a" * 40, "b" * 40)
+    seen: list[str] = []
+    sink = logger.add(lambda m: seen.append(str(m)), level="WARNING")
+    try:
+        job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    finally:
+        logger.remove(sink)
+
+    assert job.status == "completed", job.error  # drift is information, not failure
+    assert job.code.commit == "a" * 40
+    assert {s.code.commit for s in job.stages} == {"b" * 40}
+    assert any("stage test" in m and "aaaaaaaaaaaa" in m and "bbbbbbbbbbbb" in m for m in seen)
+
+
+def test_the_published_metadata_names_the_evaluator_commit(store, settings, monkeypatch):
+    _pin_code(monkeypatch, "a" * 40, "b" * 40)
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+
+    meta = json.loads((settings.trained_root / job.request.model_id / "metadata.json").read_text())
+    assert meta["code"]["created"]["commit"] == "a" * 40
+    assert meta["code"]["test"]["commit"] == "b" * 40
+    # register writes metadata.json while its own stage is still running
+    assert "register" in meta["code"]

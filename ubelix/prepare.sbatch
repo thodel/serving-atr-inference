@@ -15,7 +15,8 @@
 # Compute nodes do have internet (verified: huggingface.co -> 200 from bnode009),
 # so the corpora do not need to be pre-cached on the share.
 #
-#   sbatch --export=ALL,SPEC=$HOME/ubelix/specs/<spec>.json ubelix/prepare.sbatch
+#   ubelix/submit.sh ubelix/prepare.sbatch $HOME/ubelix/specs/<spec>.json
+#   (submit.sh refuses a stale checkout and an over-cap request first, #147)
 #
 #SBATCH --job-name=prep
 #SBATCH --account=gratis
@@ -107,4 +108,4 @@ run python -m vlm_train_svc.runner --root "$ATR_TRAIN_JOBS_ROOT" \
 
 echo
 echo "== corpus ready. Stage 2:"
-echo "   sbatch --export=ALL,JOB_ID=$JOB_ID ubelix/train.sbatch"
+echo "   JOB_ID=$JOB_ID ubelix/submit.sh ubelix/train.sbatch -- --partition=gpu --qos=job_gratis --cpus-per-task=12 --time=15:00:00"

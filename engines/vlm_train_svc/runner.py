@@ -368,6 +368,9 @@ class Pipeline(BasePipeline):
                     "model_id": model_id,
                     "job_id": job.id,
                     "engine": "vllm",
+                    # The commit behind each stage; "test" is the evaluator that
+                    # measured the metrics below (#147).
+                    "code": job.code_summary(),
                     "created": utcnow().isoformat(),
                     "base_model": job.request.base_model,
                     "adapter": "LoRA (peft) — merge with scripts/merge_loras.py to serve",

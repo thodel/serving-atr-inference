@@ -6,7 +6,9 @@
 # _resume_artifacts — the same path a preempted job takes. Nothing is
 # re-streamed, and the seeded split is the one the corpus was built with.
 #
-#   sbatch --export=ALL,JOB_ID=<id> ubelix/train.sbatch
+#   JOB_ID=<id> ubelix/submit.sh ubelix/train.sbatch [-- sbatch options]
+#   e.g. -- --partition=gpu --qos=job_gratis --cpus-per-task=12 --time=15:00:00
+#   (submit.sh refuses a stale checkout and an over-cap request first, #147)
 #
 # Preemptable and resumable: --requeue, a stable job id (it is given, not
 # generated), SIGTERM requeues from the trap, and the trainer resumes from the
