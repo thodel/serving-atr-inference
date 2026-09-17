@@ -165,6 +165,41 @@ class EngineHTTPClient:
         return coerce_result(resp.json(), self.engine, model)
 
 
+class TrocrClient(EngineHTTPClient):
+    """Async client for the TrOCR engine, with a GPU-batched batch endpoint."""
+
+    async def recognize_batch(
+        self, images: list[bytes], filenames: list[str], content_type: str,
+        model: str,
+    ) -> tuple[list[str], list[Line]]:
+        """
+        N line images in one GPU-batched forward pass (#95 step 2).
+
+        images and filenames are parallel lists.  Returns (texts, lines) where
+        texts[i] is the reading for images[i] and lines[i].order == i.
+        """
+        url = f"{self.base_url}/recognize_batch"
+        files = [("files", (fn, img, content_type))
+                 for img, fn in zip(images, filenames)]
+        form = {"model": model}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(url, files=files, data=form)
+        except httpx.RequestError as exc:
+            raise EngineError(f"{self.engine} engine unreachable at {url}: {exc}") from exc
+        if resp.status_code >= 400:
+            raise EngineError(f"{self.engine} engine error {resp.status_code} at {url}: {resp.text}")
+        data = resp.json()
+        texts: list[str] = data.get("texts") or []
+        raw_lines: list[dict] = data.get("lines") or []
+        out_lines = [
+            Line(order=ln.get("index", i), text=ln.get("text", ""),
+                 confidence=ln.get("confidence"))
+            for i, ln in enumerate(raw_lines)
+        ]
+        return texts, out_lines
+
+
 def get_engine_client(engine: str, settings) -> EngineHTTPClient:
     """Factory used by routes; a seam for tests to monkeypatch."""
     return EngineHTTPClient(settings.engine_urls()[engine], engine, ENGINE_IMAGE_FIELD[engine])

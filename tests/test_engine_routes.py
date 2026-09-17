@@ -33,6 +33,7 @@ class FakeEngineClient:
         self.engine = engine
         self.text = text
         self.calls = 0
+        self.batch_calls = 0
 
     async def recognize(self, image, filename, content_type, model, lines=None) -> RecognitionResult:
         self.calls += 1
@@ -40,6 +41,13 @@ class FakeEngineClient:
             model=model, engine=self.engine, text=self.text,
             lines=[Line(order=0, text=self.text)], version="x",
         )
+
+    async def recognize_batch(self, images, filenames, content_type, model):
+        """Batched fallback for FakeEngineClient (#95)."""
+        self.batch_calls += 1
+        texts = [self.text] * len(images)
+        lines = [Line(order=i, text=self.text) for i in range(len(images))]
+        return texts, lines
 
 
 @pytest.fixture
@@ -78,8 +86,10 @@ def test_trocr_line_pipeline(client: TestClient):
     assert body["segmented_by"] == "kraken-blla"
     assert len(body["lines"]) == 2          # one per segmented line
     assert body["text"] == "T\nT"
-    # engine called once per line
-    assert client.app.state.engine_clients["trocr"].calls == 2
+    # With line_concurrency=6 (default), gateway sends crops in one batched call
+    # instead of N sequential /recognize calls (#95 step 2).
+    # Old sequential path: calls=2. New batched path: batch_calls=1.
+    assert client.app.state.engine_clients["trocr"].batch_calls == 1
 
 
 def _ocr(client, model):
@@ -100,7 +110,9 @@ def test_ocr_trocr_auto_segments_to_page_text(client: TestClient):
     assert body["text"] == "T\nT"                       # one line per segmented baseline
     assert body["model"] == "trocr-kurrent-xvi-xvii"
     assert "version" in body and "confidence" in body
-    assert client.app.state.engine_clients["trocr"].calls == 2   # one call per line
+    # With line_concurrency=6 (default), gateway uses batched /recognize_batch
+    # instead of N sequential /recognize calls (#95 step 2).
+    assert client.app.state.engine_clients["trocr"].batch_calls == 1
 
 
 def test_ocr_rejects_non_kraken_non_trocr_engine(client: TestClient):
