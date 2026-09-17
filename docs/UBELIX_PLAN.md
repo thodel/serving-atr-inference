@@ -2023,3 +2023,168 @@ The v3 medieval run had fitted only because it asked for 16 × 8 h.
 Resubmitted as 12 CPUs × 15 h = 10,800. The chain script now uses the same, with
 the reason next to it, and lives in the repo as `ubelix/chain_train_score.sbatch`
 beside `ubelix/score_federal_minutes.sbatch`.
+
+### 21b. Seven seconds: a stale checkout, the second time
+
+A note on names first: #136 established that the serving box at 130.92.59.240 is
+**idhefix**, not asterAIx; asterAIx is 130.92.59.242 and becomes the training
+host. Sections up to §21a use the old name for .240. From here on it is idhefix.
+
+Resubmitted after §21a, the training job `15449955` failed after **7 seconds**:
+
+```
+File ".../runner_base.py", line 1009, in _finish
+    self._release_gpu()
+File ".../gpu_release.py", line 55, in release_gpu
+    import httpx  # trainer venv only
+ModuleNotFoundError: No module named 'httpx'
+```
+
+`_finish` asked the idhefix gateway (`127.0.0.1:8200`) to free its GPU before
+training (#129). UBELIX has no such gateway and the container has no `httpx`. `main`
+had made that call non-fatal at 13:56 the day before (`02fd666`) and removed it
+entirely at 22:08 (`4f3ab24`, #139) — but the UBELIX checkout had last been pulled
+that morning, before the prepare was submitted, and the train job runs whatever the
+checkout holds when it **starts**.
+
+That is §20's failure again. The first time it cost a mis-scored evaluation; this
+time a failed job and a manual repair.
+
+**Repair.** `failed` is terminal in `jobstore.py` — nothing leaves it. No training
+had happened (no checkpoint directory) and the compiled corpus was intact, so the
+record was set back to `training` by hand, the failed `train` stage record dropped,
+and the failed state kept beside it as `job.json.failed-15449955`. Resubmitted as
+`15450030` (train, 12 CPUs × 15 h) and `15450031` (score, after it).
+
+**Mitigation** (`b53d990`). `train.sbatch` and `prepare.sbatch` now log the commit
+they run and fetch `origin/main`, printing a loud warning when the checkout is
+behind. They do not pull: a job changing its own code while it waits in the queue
+is worse than a visible warning. The warning is after-the-fact. What actually
+prevents this is pulling on the login node **before every** `sbatch` — and job
+records do not say which code produced them, which is the underlying gap (§22).
+
+---
+
+## 22. Open problems, and which of them need an issue
+
+Everything that went wrong between §16 and §21b, sorted by whether it needs to be
+tracked. The test for "needs an issue": the problem will recur without a code
+change, or its consequences outlive this document (published models, other
+people's numbers). An operational habit already fixed in a script does not.
+
+| # | problem | existing | recommendation |
+|---|---|---|---|
+| A | parser bug also truncated the federal-protocol sources; models trained on them | #125 (open) | **comment on #125** |
+| B | artefact-cache store takes 14 h on GPFS | #109 (open) | **new issue**, linked to #109 |
+| C | #120's attribution missed line granularity | #120 (closed) | **comment on #120**, no reopen |
+| D | jobs run whatever the checkout holds; records carry no code commit | — | **new issue** |
+| E | `job_gratis` CPU-minute cap applies to GPU jobs | — | no issue |
+| F | the recorded CER is never a held-out number | — | **new issue** (the most important) |
+| G | first-word collapse on the Federal Council test set | — | wait for v2 |
+| H | near-square block crops | — | no issue (§19) |
+| I | no way out of `failed` after an environmental failure | — | no issue, for now |
+
+### A — the 19th-century damage belongs in #125
+
+*For tracking:* the consequences outlive the fix. Three published 19th-century
+cards, the Qwen3.5 variants (#132) and the four medieval v1 adapters were trained
+on truncated text; #125 today only knows about the medieval sources.
+`nr-sr-vereinigte-bundesversammlung-xix` (6.35× the characters after the fix) and
+`parlamentsdienste-protokolle` (4.54×) are missing from it, and so is the
+downstream evidence: first-word collapse on a held-out benchmark.
+
+*Against a new issue:* same root cause, same fix; a second issue splits the record.
+
+*So:* a comment on #125 with the per-source table, the list of models trained
+before `33f55fc`, and a closing criterion — #125 closes when each of those is
+retrained or marked superseded.
+
+### B — the store step of the artefact cache
+
+*For:* measured, and it nearly failed a job. `_store_artefact` copied 966,748
+crop files (87.5 GB) one at a time — 14 of the prepare's 16.5 hours, against a 20 h
+walltime. A larger corpus will time out *after* its corpus is built, leaving the job
+at `compiling`. It also doubles scratch use. The obvious fixes are cheap: move or
+hard-link instead of copy when source and cache share a filesystem, or store a tar
+of the crops, or an opt-out for runs that will never be reused.
+
+*Against:* specific to network filesystems with many small files; on local disk the
+same copy may be fast. And `xix-v2`'s corpus is unlikely to be reused, so the cache
+bought nothing here.
+
+*So:* a new, focused issue — it is a defect with a clear fix, and folded into #109
+it would disappear when #109 is closed as implemented.
+
+### C — traceability for #120
+
+*For a comment:* anyone investigating an odd stratified draw will open #120. The
+hole (crop names carry no source; `page` does) and its fix `e829028` should be
+findable from there.
+
+*Against reopening:* it is fixed and tested.
+
+### D — a job does not know what code it ran
+
+*For:* it has cost two runs (§20, §21b), and the mitigation only warns after the
+fact. The deeper problem is reproducibility: `job.json` records the request, the
+data and the metrics, but not the commit that produced them — so a CER cannot be
+tied to the evaluator that measured it, which is exactly what §20 had to
+reconstruct by hand. A fix: record `git rev-parse HEAD` at submission, carry it in
+the job record, and run from that commit (a worktree per job) or refuse to start
+when HEAD differs.
+
+*Against:* one operator, and "pull before `sbatch`" is a habit, not a system.
+Worktree-per-job adds moving parts on a shared home directory.
+
+*So:* a new issue, framed as reproducibility rather than as UBELIX housekeeping.
+Recording the commit is small and valuable on its own; pinning can follow.
+
+### E — `job_gratis` and GPU jobs
+
+*Against an issue:* one incident, rejected at submission (so it cost queue time,
+not compute), documented in §21a and handled in `chain_train_score.sbatch`.
+
+*For:* `submit.sh` could compute CPUs × walltime and refuse early. Worth a line in
+D's issue if that one grows a "submission checks" section; not an issue of its own.
+
+### F — the recorded CER is not a held-out number
+
+*For:* this is the thread running through §16–§21. The number in `job.json`, on
+the share and on every published card comes from the run's own validation split —
+seeded partition, mostly the same documents as training — and for two campaigns it
+was read as model quality. Getting the real number took a hand-built evaluation
+directory, a one-off sbatch and hand-written notes on four cards. Now a published
+benchmark exists in the right shape (`dh-unibe/image-text_federal-minutes-testset`,
+doi:10.5281/zenodo.4746342). The test stage should take optional named benchmarks
+(`params.benchmarks: [hf_repo, …]`), score them beside the split, record both, and
+`publish.py` should put the benchmark first on the card and the split second,
+labelled as such.
+
+*Against:* benchmarks exist only for some periods (federal minutes for the 19th
+century; `escript_test` for one medieval source), and scoring 2,751 extra lines
+adds about an hour per run.
+
+*So:* a new issue, and the most important of these — it removes the conditions
+under which A, C and the medieval misreadings went unnoticed.
+
+### G — the first-word collapse
+
+*Wait.* `qwen3vl-german-xix-v2` is training on the repaired corpus. If its
+collapse rate on the test set falls from v1's 18.4 % to near zero, this is A's
+consequence and needs no issue of its own. If it does not, it is a new problem and
+gets one — with the v2 numbers, not a hypothesis.
+
+### H — block crops
+
+*No.* Measured in §19: at most 6.5 % of the errors can be recovered, and a filter
+would also drop legitimate short lines.
+
+### I — leaving `failed`
+
+*Against, for now:* `failed` being terminal is a deliberate invariant, and a
+"retry" transition would make it easy to resume jobs that should not be resumed.
+One manual repair, with the failed record kept beside it, is acceptable.
+
+*For, later:* if environmental failures before any training become common (D would
+make them rarer), a guarded `failed → training` for jobs with no checkpoint and an
+intact corpus would replace hand-edited JSON.
