@@ -2077,7 +2077,7 @@ people's numbers). An operational habit already fixed in a script does not.
 | A | parser bug also truncated the federal-protocol sources; models trained on them | #125 (open) | **comment on #125** — posted |
 | B | artefact-cache store takes 14 h on GPFS | #109 (open) | **#148**, linked from #109 |
 | C | #120's attribution missed line granularity | #120 (closed) | **comment on #120** — posted, not reopened |
-| D | jobs run whatever the checkout holds; records carry no code commit | — | **#147** |
+| D | jobs run whatever the checkout holds; records carry no code commit | — | **#147** — part 1 done (`14087a8`; training-atr-models#18) |
 | E | `job_gratis` CPU-minute cap applies to GPU jobs | — | no issue |
 | F | the recorded CER is never a held-out number | — | **#146** (the most important) |
 | G | first-word collapse on the Federal Council test set | — | wait for v2 |
