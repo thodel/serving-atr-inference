@@ -12,11 +12,13 @@ Since 16.09.2026 the ATR system runs on **two machines** with **two repositories
   the other.
 
 This file describes the whole system. The training machine is covered in more detail in
-training-atr-models (its documentation epic is training-atr-models#16). The reasons
+training-atr-models: [`docs/INFRASTRUCTURE.md`](https://github.com/thodel/training-atr-models/blob/main/docs/INFRASTRUCTURE.md) and its runbook
+[`docs/OPERATIONS.md`](https://github.com/thodel/training-atr-models/blob/main/docs/OPERATIONS.md). The reasons
 for the split are in [`SPLIT_PLAN.md`](SPLIT_PLAN.md).
 The serving runbook is [`DEPLOY.md`](DEPLOY.md).
 
-- [The picture](#the-picture)
+- [The system and interaction of servers](#the-system-and-interaction-of-servers)
+- [idhefix at a glance](#idhefix-at-a-glance): the recognition path
 - [Hosts](#hosts)
 - [Services](#services)
 - [Network and trust](#network-and-trust)
@@ -27,7 +29,7 @@ The serving runbook is [`DEPLOY.md`](DEPLOY.md).
 - [UBELIX, the third place](#ubelix-the-third-place)
 - [Decisions this setup rests on](#decisions-this-setup-rests-on)
 
-## The picture
+## The system and interaction of servers
 
 ```mermaid
 flowchart LR
@@ -52,6 +54,7 @@ flowchart LR
     jobs["training_folder/jobs/"]
     hf["hf_hub/"]
   end
+  hub["🤗 Hugging Face Hub<br/>huggingface.co · dh-unibe"]
   bot -- "X-API-Key = ATR_API_KEY" --> gw
   mcp -- "X-API-Key = ATR_API_KEY" --> gw
   gw -- "loopback" --> kr
@@ -67,6 +70,9 @@ flowchart LR
   at -- "job.json, spawn.claim" --> jobs
   run -- "logs, data" --> jobs
   run -- "datasets, base models" --> hf
+  hub -- "datasets and base models<br/>downloaded on first use" --> hf
+  run -- "uploads: trained models, page datasets<br/>private · by hand or auto-publish" --> hub
+  vl -. "VLM weights" .-> hf
   kr -. "opens local_path" .-> wts
   tr -. "opens local_path" .-> wts
 ```
@@ -74,6 +80,85 @@ flowchart LR
 A trained model never travels over the network. Its weights and its registration are
 **files on the share**. The only network calls between the machines are control calls
 (`/train/*`) and the promotion gate, which checks that idhefix can serve the model.
+
+**Hugging Face is the one outside place data comes from and goes to.** Datasets
+(`dh-unibe/image-text_*`), base models and the VLM weights idhefix serves are
+downloaded on first use into `hf_hub/` on the share: `~/.cache/huggingface/hub` is a
+symlink to it on both machines, and no service sets `HF_HOME`, so whatever one machine
+fetched, the other and UBELIX reuse. The TrOCR engine is the exception: it passes its
+own `cache_dir` and keeps its weights in `engines/trocr_svc/models_cache` inside the
+checkout on idhefix's local disk. Uploads are always private repositories under `dh-unibe`: trained models through
+the trainer's auto-publish (off unless `ATR_TRAIN_AUTO_PUBLISH_MIN_ACCURACY` is set) or
+by hand with `scripts/publish_to_hub.py`, and page datasets built from TEI editions with
+`scripts/tei_edition_to_hf.py`. Both scripts still live in this repository and move to
+training-atr-models with its #6. kraken and party models come from Zenodo by DOI
+instead.
+
+## idhefix at a glance
+
+```mermaid
+flowchart TB
+  clients["Discord bot and ATR-MCP<br/>on tei.dh.unibe.ch"]
+  subgraph idhefix["idhefix · srv · 130.92.59.240"]
+    gw["atr-gateway :8200<br/>/ocr /recognize /segment<br/>/models /gpu /v1/chat/completions"]
+    mm["ModelManager in the gateway<br/>lazy vLLM start, LRU eviction"]
+    subgraph engines["engines on loopback · CUDA_VISIBLE_DEVICES=1"]
+      kr["atr-kraken :8201<br/>baseline segmentation, kraken HTR"]
+      tr["atr-trocr :8202<br/>one line per call"]
+      pa["atr-party :8203<br/>whole pages"]
+    end
+    vl["vllm serve :8210 and up<br/>one per resident model"]
+    merged["~/atr-cache/vllm-merged<br/>LoRA adapters merged into their base"]
+    subgraph gpus["2x A40 · NVLink"]
+      g0["card 0<br/>the neighbours' RAG service, not ours"]
+      g1["card 1<br/>engines and vLLM"]
+    end
+  end
+  share[("research share /mnt/wbkolleg_dh_1<br/>registry · trained · hf_hub")]
+  hub["🤗 Hugging Face Hub"]
+  zen["Zenodo<br/>kraken and party models by DOI"]
+  trainer["atr-train on asteraix :8204"]
+  clients -- "X-API-Key" --> gw
+  gw -- "segmentation for TrOCR and line VLMs<br/>kraken pages in one call" --> kr
+  gw -- "TrOCR: one call per line crop<br/>6 crops at a time" --> tr
+  gw -- "party pages<br/>and a second opinion on every request" --> pa
+  gw -- "asks for a port" --> mm
+  mm -- "starts on the first request" --> vl
+  gw -- "VLM page: one call<br/>VLM line: one call per crop" --> vl
+  vl -- "loads a merged model if present" --> merged
+  kr --> g1
+  tr --> g1
+  pa --> g1
+  vl --> g1
+  gw -- "publishes models.yaml<br/>reads trained/" --> share
+  hub -- "VLM weights on first use, into hf_hub" --> share
+  hub -- "TrOCR weights on first use<br/>into engines/trocr_svc/models_cache" --> tr
+  zen -- "weights by DOI" --> kr
+  zen -- "weights by DOI" --> pa
+  gw -- "/train/* proxy" --> trainer
+```
+
+How a request is recognized depends on the model's engine and level:
+
+| route | engine | what happens |
+|---|---|---|
+| `/segment` | kraken | baseline segmentation of a page |
+| `/recognize`, `/ocr` | kraken | one call: the engine segments and transcribes the page |
+| `/recognize`, `/ocr` | trocr | the gateway segments through kraken, crops the lines and sends them to TrOCR one per call, `line_concurrency` (6) at a time, then reassembles them top to bottom |
+| `/recognize` | party | one call: the engine segments and transcribes the page |
+| `/recognize` | vllm, page level | the ModelManager starts the model if it is not resident, the gateway scales the page to the pixel budget the model was trained at and makes one call |
+| `/recognize` | vllm, line level | kraken segmentation, then one chat call per line crop |
+| `/v1/chat/completions` | vllm | passed through to a resident model |
+
+- **party runs beside every request** as a second opinion (`party_second_opinion`,
+  on by default), except when party is the engine that was asked for. Its text comes
+  back in `second_opinion`; a failed second opinion never fails the request.
+- `/ocr` accepts only kraken and TrOCR; a VLM goes through `/recognize`.
+- **Card 1 is the only card serving uses.** The engines hold about 15.8 GB of it, and
+  the vLLM budget is what is left after them and a 2048 MiB reserve (see
+  [Two GPU views](#two-gpu-views)). Card 0 belongs to a neighbouring service.
+- A trained model is opened from `local_path` on the share; a curated one from its
+  Zenodo DOI (kraken, party) or its Hugging Face repository (TrOCR, vLLM).
 
 ## Hosts
 
@@ -428,8 +513,9 @@ again, so a person decides what happens next:
 
 **Never edit `registry/trained/ID.yaml` in place with an editor.** While the editor
 writes, the gateway can read a half-written file. training-atr-models has no
-`promote` command yet, so this is the procedure until it has one. Its own runbook for
-registering by hand is part of training-atr-models#16.
+`promote` command yet, so this is the procedure until it has one. Its runbook covers
+[registering by hand](https://github.com/thodel/training-atr-models/blob/main/docs/OPERATIONS.md#registering-by-hand) and
+[promoting by hand](https://github.com/thodel/training-atr-models/blob/main/docs/OPERATIONS.md#promoting-by-hand).
 
 ### Who owns a job
 
@@ -445,28 +531,31 @@ foreign live job they answer `409` and name the host. A stuck foreign record is 
 without sending a signal:
 `python -m atr_training.close_job JOB --reason … [--yes]`. The job statuses are
 `queued`, `preparing`, `compiling`, `training`, `testing`, `registering`, `completed`,
-`failed` and `cancelled`. The last three are terminal. Their state diagram belongs to
-the training machine's documentation (training-atr-models#16).
+`failed` and `cancelled`. The last three are terminal. Their state diagram is in
+[the training machine's documentation](https://github.com/thodel/training-atr-models/blob/main/docs/INFRASTRUCTURE.md#the-life-of-a-job).
 
 ## Shared values
 
 Since the split, the gateway and the trainer read **two `.env` files on two machines**.
 These values must agree across them. This repository's `.env.example` marks its
 side of each row with `>>> SHARED <<<`, and `tests/test_infrastructure_docs.py`
-checks those markers against this table. training-atr-models' `.env.example` marks
-only four of the values today: `ATR_TRAIN_API_KEY`, `ATR_TRAIN_TRAINED_ROOT`,
-`ATR_TRAIN_REGISTRY_ROOT` and `ATR_TRAIN_GATEWAY_API_KEY`. `ATR_TRAIN_ALLOWED_CLIENTS`
-and `ATR_TRAIN_GATEWAY_URL` also carry idhefix's address but are not marked there yet;
-marking them is part of training-atr-models#16.
+checks those markers against this table. training-atr-models' `.env.example` marks its
+six values the same way and links each one here; its
+[own table](https://github.com/thodel/training-atr-models/blob/main/docs/INFRASTRUCTURE.md#values-shared-with-idhefix) lists them from the
+trainer's side.
 
-The two keys, the trainer's URL and its allowlist fail loudly when they disagree. The
-two paths fail silently, which makes them the more dangerous ones, and a wrong
-`ATR_TRAIN_GATEWAY_URL` only leaves trained models disabled.
+In the last column, **loud** means the next `/train/*` call fails with an error that
+names the setting. **Quiet** means only the promotion gate fails: the job still
+completes with `promoted: false` and the reason in `promotion_reason`, and the model
+stays disabled, which shows only at the end of a run. **Silent** means nothing fails
+at the time. The trainer key, the trainer's URL and its allowlist are loud; the caller
+key and the gateway's URL are quiet; the two paths are silent, which makes them the
+most dangerous ones.
 
 | idhefix `.env` (gateway, prefix `ATR_`) | asteraix `.env` (trainer, prefix `ATR_TRAIN_`) | value | if they disagree |
 |---|---|---|---|
 | `ATR_TRAIN_API_KEY` | `ATR_TRAIN_API_KEY` | the same secret, at least 32 characters | loud: every `/train/*` call is a `502` naming the setting |
-| `ATR_API_KEY` | `ATR_TRAIN_GATEWAY_API_KEY` | the same secret, idhefix's caller key | loud: the gate gets a `401`, and the model stays disabled |
+| `ATR_API_KEY` | `ATR_TRAIN_GATEWAY_API_KEY` | the same secret, idhefix's caller key | quiet: the gate gets a `401`, which only `promotion_reason` records, and the model stays disabled |
 | `ATR_REGISTRY_ROOT` | `ATR_TRAIN_REGISTRY_ROOT` | `/mnt/wbkolleg_dh_1/Textrecognition_Training/registry` | silent: models register into a directory the gateway never reads, and base models resolve against a file it never publishes |
 | none; the gateway opens `local_path` exactly as written | `ATR_TRAIN_TRAINED_ROOT` | `/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/trained`, absolute, the same path on both hosts, on the same filesystem as the registry | silent until a request: the gateway logs the missing path, and a request for the model fails naming it |
 | `ATR_TRAIN_URL` | the unit's bind, `--host 0.0.0.0 --port 8204` | `http://130.92.59.242:8204` | loud: `/train/*` is a `502` naming the URL if the connection is refused, or a `504` ("could not connect within 5s") if nobody answers at that address |
