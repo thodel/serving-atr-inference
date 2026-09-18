@@ -102,6 +102,46 @@ models:
       - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
       - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
 
+  # v2 replaces v1, and the reason is worth keeping: v1 was trained on a corpus
+  # whose PageXML converter had truncated lines to their first word — 6.35x the
+  # characters of nr-sr-vereinigte-bundesversammlung-xix and 4.54x of
+  # parlamentsdienste-protokolle — so it learned to write the first word and
+  # stop. On the published federal-minutes benchmark it wrote little more than
+  # that on 507 of 2751 lines (18.4%) and scored CER 0.2551. v2 is the same four
+  # repositories, the same seed and the same split after the converter fix, and
+  # collapses on none of them: **CER 0.0765 on 2751 held-out lines**, no document
+  # shared with training (Hodel & Schoch 2021, doi:10.5281/zenodo.4746342).
+  #
+  # Served at `level: line`, unlike v1 above, and deliberately: 0.0765 is a
+  # line-level number, measured on line crops at this pixel budget, and it is the
+  # only measurement this model has. Page-level serving is the cheaper shape and
+  # an unmeasured distribution shift — v1's whole-page readings of the Lassberg
+  # correspondence came back as 3-36 characters a page, which nobody could tell
+  # apart from the truncation defect until the benchmark separated them. Switching
+  # is one word, and costs one call per line instead of one per page.
+  #
+  # `max_pixels` is left at the default because for `line` it already is what this
+  # model trained at: VLM_PIXEL_BUDGET["line"] is 256*32*32 = 262144, the
+  # `max_pixels` in its own hyperparameters.
+  - id: qwen3vl-german-xix-v2
+    engine: vllm
+    hf_repo: dh-unibe/qwen3vl-german-xix-v2
+    base_model: Qwen/Qwen3-VL-4B-Instruct
+    task: htr
+    level: line          # the configuration its published CER was measured in
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 12000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
   - id: qwen3.5-4b-german-xix-v1
     engine: vllm
     # Not servable on asterAIx (verified 2026-09-14): transformers 4.57.6 has no
