@@ -37,14 +37,16 @@ looked exactly like the pixel-budget mismatch that #136 fixed, and applying the
 budget did not change them. Two plausible mechanisms, one symptom; what separated
 them was a benchmark, not an argument.
 
-**v2 is registered at `level: line`** — the configuration its 7.65 % was measured
-in, and the only measurement it has. The v1-era `level: page` reasoning below still
-applies to v1; for v2 it would be an unmeasured distribution shift, and switching
-is one word in its entry.
+**v2 is registered at `level: page`**, like v1 and for the same reasons (below).
+The honest consequence: 7.65 % is a *line-level* number, measured on line crops at
+262 144 pixels, and page-level serving asks this model for something its training
+never showed it at eight times that budget. Nothing here measures the page shape.
+Quote 7.65 % as the reason to expect good page readings, never as evidence of
+them — `level: line` is one word away if a comparison on the same pages says the
+page shape is worse.
 
-The v1-era entries are registered in `config/models.yaml` as `engine: vllm`,
-`level: page` (v2 is `level: line`, see above). Two properties of that
-registration are load-bearing:
+All of them are registered in `config/models.yaml` as `engine: vllm`,
+`level: page`. Two properties of that registration are load-bearing:
 
 * **`level: page`.** The gateway sends the whole image in one call
   (`pipeline.recognize_page_vllm`). This is a deployment decision rather than a

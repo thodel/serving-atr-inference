@@ -112,23 +112,31 @@ models:
   # collapses on none of them: **CER 0.0765 on 2751 held-out lines**, no document
   # shared with training (Hodel & Schoch 2021, doi:10.5281/zenodo.4746342).
   #
-  # Served at `level: line`, unlike v1 above, and deliberately: 0.0765 is a
-  # line-level number, measured on line crops at this pixel budget, and it is the
-  # only measurement this model has. Page-level serving is the cheaper shape and
-  # an unmeasured distribution shift — v1's whole-page readings of the Lassberg
-  # correspondence came back as 3-36 characters a page, which nobody could tell
-  # apart from the truncation defect until the benchmark separated them. Switching
-  # is one word, and costs one call per line instead of one per page.
+  # Served `level: page`, like the v1-era entries, and for the same reasons: one
+  # call per page instead of one per line, and no dependency on the kraken
+  # segmenter being right about this material. It is a deployment decision, not a
+  # property of the weights.
   #
-  # `max_pixels` is left at the default because for `line` it already is what this
-  # model trained at: VLM_PIXEL_BUDGET["line"] is 256*32*32 = 262144, the
-  # `max_pixels` in its own hyperparameters.
+  # What that decision costs is knowing the accuracy. 0.0765 is a LINE-level
+  # number, measured on line crops at 262144 pixels; page-level serving asks this
+  # model for something its training never showed it, at eight times the pixel
+  # budget, and nothing here measures that. Do not quote 0.0765 for page-level
+  # readings of a new corpus — it is the reason to expect them to be good, not
+  # evidence that they are. `level: line` is one word away if a comparison on the
+  # same pages says the page shape is worse.
+  #
+  # `max_pixels` is left at the default so page-level serving gets
+  # VLM_PIXEL_BUDGET["page"] (2048*32*32), not the 262144 it trained at: a whole
+  # page squeezed into one line's budget is unreadable, and the budget that suits
+  # the input is the one the page has to be legible at. That is a second
+  # unmeasured knob on top of the first — if the smoke run comes back short, this
+  # is the thing to raise.
   - id: qwen3vl-german-xix-v2
     engine: vllm
     hf_repo: dh-unibe/qwen3vl-german-xix-v2
     base_model: Qwen/Qwen3-VL-4B-Instruct
     task: htr
-    level: line          # the configuration its published CER was measured in
+    level: page          # one call per page; its CER was measured per line
     prompt: Transcribe the handwritten text in this image exactly as written.
     languages: [de]
     scripts: [Kurrent]
