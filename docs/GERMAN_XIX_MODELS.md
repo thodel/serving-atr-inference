@@ -1,21 +1,50 @@
 # Serving the dh-unibe German XIX fine-tunes
 
-Three models trained by this repo's training service on the same four corpora and
-the same instruction, differing only in their base:
+Models trained by this repo's training service on the same four corpora and the
+same instruction, differing in their base and in the corpus fix between v1 and v2:
 
-| registry id | base | adapter | reported CER¹ |
-|---|---|---|---|
-| `qwen3vl-german-xix-v1` | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v1` | 1.00 % |
-| `qwen3.5-4b-german-xix-v1` | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v1` | 1.07 % |
-| `qwen3.5-2b-german-xix-v1` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v1` | — |
+| registry id | base | adapter | own split CER¹ | benchmark CER² |
+|---|---|---|---|---|
+| **`qwen3vl-german-xix-v2`** | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v2` | 5.33 % | **7.65 %** |
+| `qwen3vl-german-xix-v1` | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v1` | 1.00 % | 25.51 % |
+| `qwen3.5-4b-german-xix-v1` | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v1` | 1.07 % | — |
+| `qwen3.5-2b-german-xix-v1` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v1` | — | — |
 
 ¹ Each on **its own run's held-out validation split**, not a shared benchmark. The
 numbers say the training converged; they do not predict what these models do on a
-corpus they have not seen, and they are not comparable to any CER measured
-elsewhere in this project. That is what a run on new material is for.
+corpus they have not seen. **v1's 1.00 % and v2's 5.33 % are not comparable with
+each other either**: v1 was scored on the first 200 lines of `val.jsonl` — five
+in-domain pages — and v2 on the stratified draw introduced in #120.
 
-They are registered in `config/models.yaml` as `engine: vllm`, `level: page`. Two
-properties of that registration are load-bearing:
+² 2751 lines of *Minutes of the Swiss Federal Council (1848–1903)* (Hodel & Schoch
+2021, [doi:10.5281/zenodo.4746342](https://doi.org/10.5281/zenodo.4746342)), no
+document shared with training. This column is the one to quote, and the one that
+makes the first column's ordering look like what it is.
+
+## v1 → v2, and what it settles
+
+v1 was built before the PageXML converter fix (33f55fc, #125), which had been
+truncating lines to their first word: 6.35× the characters of
+`nr-sr-vereinigte-bundesversammlung-xix` and 4.54× of
+`parlamentsdienste-protokolle`. v1 learned to write the first word and stop — on
+the benchmark above it did so on **507 of 2751 lines (18.4 %)**. v2 is the same
+four repositories, the same seed and the same page-level split after the fix, and
+collapses on **none**. Its remaining errors are 5 499 substitutions against 1 538
+missing characters: misreadings rather than lost text.
+
+This also closes the Lassberg question below. v1's 3-to-36-character page readings
+looked exactly like the pixel-budget mismatch that #136 fixed, and applying the
+budget did not change them. Two plausible mechanisms, one symptom; what separated
+them was a benchmark, not an argument.
+
+**v2 is registered at `level: line`** — the configuration its 7.65 % was measured
+in, and the only measurement it has. The v1-era `level: page` reasoning below still
+applies to v1; for v2 it would be an unmeasured distribution shift, and switching
+is one word in its entry.
+
+The v1-era entries are registered in `config/models.yaml` as `engine: vllm`,
+`level: page` (v2 is `level: line`, see above). Two properties of that
+registration are load-bearing:
 
 * **`level: page`.** The gateway sends the whole image in one call
   (`pipeline.recognize_page_vllm`). This is a deployment decision rather than a
@@ -121,7 +150,7 @@ them:
 ```bash
 cd ~/Repo/serving-atr-inference
 . ./.env                                   # HF_TOKEN + HF_HOME
-.venvs/vlm-train/bin/python scripts/merge_loras.py --only qwen3vl-german-xix-v1
+.venvs/vlm-train/bin/python scripts/merge_loras.py --only qwen3vl-german-xix-v2
 ```
 
 `scripts/merge_loras.py` now checks this before loading anything heavy, and names
@@ -262,7 +291,7 @@ Then one real page through each, which is the only check that distinguishes
 "registered" from "servable":
 
 ```bash
-for m in qwen3vl-german-xix-v1 qwen3.5-4b-german-xix-v1 qwen3.5-2b-german-xix-v1; do
+for m in qwen3vl-german-xix-v2 qwen3vl-german-xix-v1 qwen3.5-4b-german-xix-v1 qwen3.5-2b-german-xix-v1; do
   echo "── $m"
   curl -sH "X-API-Key: $ATR_API_KEY" -F "image=@/path/to/page.jpg" -F "model=$m" \
        http://127.0.0.1:8200/recognize \
