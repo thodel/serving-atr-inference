@@ -2188,3 +2188,50 @@ One manual repair, with the failed record kept beside it, is acceptable.
 *For, later:* if environmental failures before any training become common (D would
 make them rarer), a guarded `failed → training` for jobs with no checkpoint and an
 intact corpus would replace hand-edited JSON.
+
+---
+
+## 23. `qwen3vl-german-xix-v2`: the retrained model settles §21
+
+§21 said the first-word collapse *fit* the truncated federal-protocol sources but
+was not proven by them, and that the proof would be a retrained model scored on
+the same benchmark. It was retrained on the corpus rebuilt with the fixed reader
+(#125) — same four repositories, same seed, same page split — and scored on the
+same 2,751 lines of the Federal Council test set.
+
+| | v1 | **v2** |
+|---|---:|---:|
+| CER | 0.2551 | **0.0765** |
+| WER | 0.3917 | **0.2458** |
+| `length_ratio` | 0.815 | **1.0019** |
+| missing characters | 22,831 | **1,538** |
+| **collapsed lines** (under a third of the reference) | **507 (18.4 %)** | **0 (0.0 %)** |
+
+The CER is 3.3× better, but the last row is the finding: the collapse does not
+shrink, it **disappears**. Nothing in the run addressed it except the corpus, so
+the truncated transcriptions in `nr-sr-vereinigte-bundesversammlung-xix` (6.35×
+the characters after the fix) and `parlamentsdienste-protokolle` (4.54×) were the
+cause. Those two are 0.8 % of the corpus and the material closest to the
+benchmark; the model had learned "on this kind of page, write the first word".
+
+The remaining errors are 5,499 substitutions against 1,538 missing characters —
+misreadings, which is the profile §18 arrived at for medieval v3.
+
+**Do not compare v2's own split CER (0.0533) with v1's 0.0100.** v2 was scored by
+the stratified draw (#120, fixed after v1 ran); v1's figure is five in-domain
+pages from the head of `val.jsonl` (§20). The benchmark row above is the
+comparison.
+
+Trained in 10 h 11 on one H100 (`gpu`, `job_gratis`, 12 CPUs × 15 h — see §21a
+for why not 16 × 24 h), from job `20260916T090417Z-qwen3vl-german-xix-v2`.
+
+### What the UBELIX tooling did during this
+
+`ubelix/` moved to `thodel/training-atr-models` (#7 there), together with the
+part-2 pinning of #147: `submit.sh` records the commit and every batch file runs
+a git worktree of it. A peer session's review found two defects in that work — a
+Slurm job still wrote the registry through the disable-before-replace and the
+promotion gate, and `pin_code` accepted a half-made worktree — both fixed before
+the merge, and the acceptance smoke on UBELIX then ran end to end from the merged
+tree: `completed`, registry untouched, the commit recorded in every stage and in
+`metadata.json`.
