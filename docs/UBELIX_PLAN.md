@@ -2235,3 +2235,64 @@ promotion gate, and `pin_code` accepted a half-made worktree — both fixed befo
 the merge, and the acceptance smoke on UBELIX then ran end to end from the merged
 tree: `completed`, registry untouched, the commit recorded in every stage and in
 `metadata.json`.
+
+## 24. The other three sizes: what four retrained models say together
+
+§23 proved the collapse on one model. The remaining three arms of the 19th-century
+grid — Qwen3.5 at 4B, 2B and 0.8B — were retrained on the same corrected corpus
+(UBELIX `15560727/28/29`) and scored on the same 2,751 benchmark lines on
+2026-09-19 (`15696149/50/51`).
+
+| model | base | CER v1 | **CER v2** | WER v2 | `length_ratio` v2 | collapsed v1 → v2 |
+|---|---|---:|---:|---:|---:|---|
+| `qwen3.5-4b-german-xix-v2` | Qwen3.5-4B | 0.3596 | **0.0680** | 0.2342 | 0.9996 | 807 (29.3 %) → **0** |
+| `qwen3vl-german-xix-v2` | Qwen3-VL-4B | 0.2551 | **0.0765** | 0.2458 | 1.0019 | 507 (18.4 %) → **0** |
+| `qwen3.5-2b-german-xix-v2` | Qwen3.5-2B | 0.2937 | **0.0895** | 0.2624 | 1.0005 | 611 (22.2 %) → **0** |
+| `qwen3.5-0.8b-german-xix-v2` | Qwen3.5-0.8B | — | **0.1115** | 0.3065 | 0.9975 | — → **0** |
+
+Three things this adds to §23, none of which one model could have shown:
+
+**The collapse was never architectural.** It disappears in all four models, across
+two different model families and a 5× spread in parameters, with nothing changed
+but the corpus. A single model going from 507 collapses to 0 left room for a lucky
+run; four independent runs going to exactly 0 do not.
+
+**v1 inverted the ranking.** Qwen3.5-4B was the *worst* of the three v1 models
+(0.3596, and 29.3 % collapsed — the highest of any arm) and is the *best* v2 model
+(0.0680, ahead of Qwen3-VL's 0.0765). The truncated corpus hurt it hardest, so its
+v1 number was a statement about the data and not about the architecture. Any
+model-selection decision taken on the v1 grid would have picked the wrong family.
+This is the concrete cost of §21's defect, and the reason the v1 cards name their
+successor rather than merely carrying a warning.
+
+**Scaling is monotone again**: 0.8B 0.1115 → 2B 0.0895 → 4B 0.0680. On the v1 grid
+it was not (4B worse than 2B worse than Qwen3-VL), which in hindsight was a second,
+quieter symptom of the same defect — a corpus that truncates a third of its
+characters rewards a model for stopping early, and the larger the model, the more
+reliably it learns to. The 0.8B size, left out in 2026-09 because it lost on the
+medieval corpus, beats every v1 model by a wide margin and is the cheap option for
+bulk runs.
+
+**What is not solved.** WER stays at 0.23–0.31 against CERs of 0.07–0.11.
+`convention_normalized` moves it by about 0.005, so this is not the
+whitespace/convention question of §20 — it is genuine word-level error spread thin
+across many lines (4B: 4,995 substitutions against 1,437 missing characters). For
+reading and for semantic search that is fine; for word-level search on these
+transcriptions it is not, and nothing in this grid addresses it.
+
+All four are on the share and published privately to `dh-unibe/…`. Two corrections
+made while publishing, both found by reading the result back rather than trusting
+the upload:
+
+* `dh-unibe/qwen3vl-german-xix-v2` had been **public** since 2026-09-18 — created
+  that way by the upload, not flipped afterwards — against the standing rule that
+  these repos are private. The check I ran at the time printed `private=False` and
+  I did not act on it. Now private.
+* The three new directories landed on the share as `drwxr-----`: `rsync --no-perms`
+  carried the umask, not the siblings' `drwxr-sr-x`, so the group — i.e. asteraix —
+  could not have read them. Now `2755`.
+
+`scan_trained` returns an empty scan, not an error, when its root is not a
+directory, and in the container `/scratch/network/…` needs the `/rs_scratch` bind
+to resolve. Publishing without that bind therefore reports "0 models" and exits 0.
+With `--only` it raises instead; without it, it succeeds silently.
