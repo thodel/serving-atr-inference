@@ -15,8 +15,8 @@
         "dh-unibe/image-text_rats-und-richtebuecher_xv-xvi"
       ],
       "arrows": [
-        "~/atr-cache/arrows/german_val.arrow",
-        "~/atr-cache/arrows/german_test.arrow"
+        "/mnt/wbkolleg_dh_1/Textrecognition_Training/archive/idhefix-2026-09/arrows/german_val.arrow",
+        "/mnt/wbkolleg_dh_1/Textrecognition_Training/archive/idhefix-2026-09/arrows/german_test.arrow"
       ],
       "test_documents": [
         "018155",
