@@ -1,0 +1,10 @@
+# The second vLLM on idhefix, for architectures vLLM 0.11 does not know (Qwen3.5).
+# A model opts in with `vllm_venv: vllm-next` in config/models.yaml; everything else
+# stays on .venvs/vllm. Pinned exactly: these are the versions measured working on
+# driver 565.57.01 (CUDA 12.7) on 2026-09-21 — the cu129 builds run there through
+# CUDA minor-version compatibility, the default cu130 builds do not (#132).
+# torch/torchvision come from the cu129 index (see scripts/make_venvs.sh).
+vllm==0.29.0+cu129
+transformers==5.17.0
+peft==0.21.0
+accelerate==1.15.0

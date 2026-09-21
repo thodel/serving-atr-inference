@@ -5,13 +5,13 @@ same instruction, differing in their base and in the corpus fix between v1 and v
 
 | model id | base | adapter | own split CER¹ | benchmark CER² | registered |
 |---|---|---|---|---|---|
-| **`qwen3.5-4b-german-xix-v2`** | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v2` | 4.78 % | **6.80 %** | no³ |
+| **`qwen3.5-4b-german-xix-v2`** | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v2` | 4.78 % | **6.80 %** | yes³ |
 | **`qwen3vl-german-xix-v2`** | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v2` | 5.33 % | **7.65 %** | yes |
 | `qwen3.5-2b-german-xix-v2` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v2` | 5.49 % | 8.95 % | no³ |
 | `qwen3.5-0.8b-german-xix-v2` | `Qwen/Qwen3.5-0.8B` | `dh-unibe/qwen3.5-0.8b-german-xix-v2` | 7.04 % | 11.15 % | no³ |
 | `qwen3vl-german-xix-v1` | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v1` | 1.00 % | 25.51 % | yes |
-| `qwen3.5-2b-german-xix-v1` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v1` | 1.41 % | 29.37 % | yes |
-| `qwen3.5-4b-german-xix-v1` | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v1` | 1.07 % | 35.96 % | yes |
+| `qwen3.5-2b-german-xix-v1` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v1` | 1.41 % | 29.37 % | disabled |
+| `qwen3.5-4b-german-xix-v1` | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v1` | 1.07 % | 35.96 % | disabled |
 
 ¹ Each on **its own run's held-out validation split**, not a shared benchmark. The
 numbers say the training converged; they do not predict what these models do on a
@@ -24,13 +24,33 @@ in-domain pages — and v2 on the stratified draw introduced in #120.
 document shared with training. This column is the one to quote, and the one that
 makes the first column's ordering look like what it is.
 
-³ Trained, scored and published (privately) on 2026-09-19/20, but **not in
-`config/models.yaml`**: registering them is a separate decision, and the Qwen3.5
-bases need transformers 5.x (UBELIX trained them in `vlm-train-tf5.sif`), which the
-merge and serving venvs here have not been checked against. The adapters are also on
-the research share under `Textrecognition_Training/trained-ubelix/`.
-`qwen3.5-4b-german-xix-v2` is the most accurate of the seven on the benchmark and
-the obvious candidate if one of them is registered. See `docs/UBELIX_PLAN.md` §24.
+³ `qwen3.5-4b-german-xix-v2` is registered and served from a **second vLLM**,
+`.venvs/vllm-next` (vLLM 0.29.0 cu129, transformers 5.17), selected per model by
+`vllm_venv: vllm-next` in `config/models.yaml`; every other vLLM model stays on
+`.venvs/vllm`. The 2B and 0.8B v2 models are trained, scored and published
+(privately) but not registered. The two Qwen3.5 v1 entries are registered
+`enabled: false` because they are superseded. The adapters are also on the research
+share under `Textrecognition_Training/trained-ubelix/`. See `docs/UBELIX_PLAN.md` §24.
+
+### Qwen3.5 on driver 565 (#132)
+
+vLLM 0.11 does not know Qwen3.5, and transformers 4.57 cannot even merge its
+adapter. A vLLM that serves it exists, but its **default** PyPI wheel is a CUDA 13
+build that stops on this box's driver (565.57.01, CUDA 12.7) with
+"driver too old". Its **cu129** build runs, through CUDA 12 minor-version
+compatibility — measured 2026-09-21: torch sees both A40s, a matmul runs on GPU 1,
+vLLM's compiled kernels load, and `Qwen3_5ForConditionalGeneration` is listed.
+So a driver upgrade is not needed. Build it with
+
+```bash
+bash scripts/make_venvs.sh vllm-next
+```
+
+and merge with **that** venv, the only one here whose transformers knows `qwen3_5`:
+
+```bash
+.venvs/vllm-next/bin/python scripts/merge_loras.py --only qwen3.5-4b-german-xix-v2
+```
 
 ## v1 → v2, and what it settles
 

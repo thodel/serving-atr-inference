@@ -7,6 +7,7 @@ against this metadata to choose a model, then call ``/recognize`` with its id.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -55,6 +56,19 @@ class ModelSpec(BaseModel):
     residency: Literal["pinned", "lazy"] = "lazy"
     gpu_affinity: int | None = None
     prompt: str | None = None  # optional VLM instruction; None = image-only (e.g. LightOnOCR)
+    #: The venv under ``.venvs/`` whose ``vllm`` serves this model. None = the
+    #: default, ``Settings.vllm_python``. Declared per model because one vLLM
+    #: cannot serve every architecture on this box: Qwen3.5 needs vLLM >= 0.17
+    #: with transformers 5, while the Qwen3-VL and LightOnOCR models are proven on
+    #: 0.11 and moving them is an unmeasured change (#132).
+    vllm_venv: str | None = None
+    #: ``--max-num-seqs`` for this model's vLLM. None = vLLM's default (256).
+    #: Hybrid models such as Qwen3.5 keep one Mamba-style state block per running
+    #: sequence, allocated up front; at 256 they refuse to start on the share of
+    #: the card this box can give them ("max_num_seqs (256) exceeds available
+    #: Mamba cache blocks (130)", measured 2026-09-21). The gateway sends a
+    #: handful of requests at a time, so a lower ceiling costs nothing here.
+    max_num_seqs: int | None = Field(default=None, ge=1)
     # Corpora this model was trained on, as DOIs or repository URLs. A model that
     # aggregates dozens of datasets cannot be checked for overlap with a test set
     # from its name or its score — only from this list. Optional, and empty for
@@ -69,6 +83,27 @@ class ModelSpec(BaseModel):
                 f"model '{self.id}': needs one of hf_repo, zenodo_id or local_path"
             )
         return self
+
+    @model_validator(mode="after")
+    def _check_vllm_venv(self) -> ModelSpec:
+        if self.engine != "vllm":
+            for field in ("vllm_venv", "max_num_seqs"):
+                if getattr(self, field) is not None:
+                    raise ValueError(
+                        f"model '{self.id}': {field} is only meaningful for engine vllm"
+                    )
+        if self.vllm_venv is None:
+            return self
+        # A directory name under .venvs/, nothing that could climb out of it.
+        if not _VENV_NAME.fullmatch(self.vllm_venv) or self.vllm_venv in {".", ".."}:
+            raise ValueError(
+                f"model '{self.id}': vllm_venv {self.vllm_venv!r} must be a directory "
+                "name under .venvs/ (letters, digits, '.', '_', '-')"
+            )
+        return self
+
+
+_VENV_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 
 class Registry:
