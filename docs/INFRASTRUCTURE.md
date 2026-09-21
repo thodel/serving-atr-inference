@@ -177,7 +177,7 @@ How a request is recognized depends on the model's engine and level:
 | OS / kernel | Ubuntu 24.04.3 / 6.8.0-87 | Ubuntu 24.04.3 / 6.14.0-37 |
 | CPU / RAM | Threadripper PRO 5965WX, 48 threads / 251 GB | the same |
 | GPUs | 2× A40, 46068 MiB each, NVLink (NV4); driver 565.57.01 | 2× A40, 46068 MiB each, NVLink (NV4), P2P ok; driver 580.95.05 |
-| GPU use | card 0: the neighbours' RAG service (`gunicorn.service`, 4 workers, ~10.4 GB), **not ours**. Card 1: our engines plus the gateway's vLLM children. 16.09.: engines 15.8 GB (party 8.9, trocr 3.8, kraken 3.1). 21.09. 08:05: **43.1 of 46.1 GB** — kraken 23.0 (grows within one process, #158), Qwen3.5 vLLM 12.4, party 6.1, trocr 1.6 | both cards free for training; jobs run on `ATR_TRAIN_GPU=1` until training-atr-models#12 |
+| GPU use | card 0: the neighbours' RAG service (`gunicorn.service`, 4 workers, ~10.4 GB), **not ours**. Card 1: our engines plus the gateway's vLLM children. 16.09.: engines 15.8 GB (party 8.9, trocr 3.8, kraken 3.1). 21.09. 08:05: **43.1 of 46.1 GB** — kraken 23.0 (11.0 of it from normal use since 17.09., #158; ~12 from one oversized smoke-test input), Qwen3.5 vLLM 12.4, party 6.1, trocr 1.6 | both cards free for training; jobs run on `ATR_TRAIN_GPU=1` until training-atr-models#12 |
 | disk `/` | 1.8 T, 71 % used after the cleanup in #143 | 1.8 T, 74 % used |
 | Python | 3.12.3 | 3.12.3 |
 | sudo / linger | no passwordless sudo / linger on | no passwordless sudo / linger on |

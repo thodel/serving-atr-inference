@@ -464,9 +464,11 @@ hand.
 
 **Card 1 is fuller than the table in `docs/INFRASTRUCTURE.md` says.** On
 2026-09-21 at 08:05 it held 43.1 of 46.1 GB: kraken 23.0 GB, the Qwen3.5 vLLM
-12.4 GB, party 6.1 GB, TrOCR 1.6 GB. Kraken's share grows within one process
-(3.1 GB on 16.09., 11.0 GB and 23.0 GB on 21.09., same pid since 17.09.) — #158.
-A restart at 08:09 reset it without explaining it. With 2.9 GB left, any second VLM
+12.4 GB, party 6.1 GB, TrOCR 1.6 GB. Kraken's share grows within one process:
+3.1 GB on 16.09., 11.0 GB on 21.09. at 07:28 after 814 requests of normal use
+(#158). The further jump to 23.0 GB by 08:05 was a smoke test — a 3391×253 line
+strip sent as a "page", which `blla` scaled to ~24 000 px wide — and the restart at
+08:09 freed it. One oddly shaped input is enough to make kraken keep 12 GB. With 2.9 GB left, any second VLM
 evicts the first, so a run over several VLMs should go model-major (next section).
 
 ## Residency: why callers should iterate model-major
