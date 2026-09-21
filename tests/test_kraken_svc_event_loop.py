@@ -1,14 +1,16 @@
-"""kraken_svc must not hold its event loop during inference (#111, step 1).
+"""kraken_svc must not hold its event loop during inference (#111).
 
-``/recognize`` is an ``async def`` handler. Segmentation (``blla.segment``) and
-recognition (``rpred.rpred``) called directly inside it hold the loop, so the
-service handles one request at a time whatever the gateway sends, and even
-``/health`` waits behind a running page. Both now run on the threadpool, under
-one lock that covers the model swap as well.
+``/recognize`` and ``/segment`` are ``async def`` handlers. blla, rpred and the
+YOLO region detector called directly inside them hold the loop, so the service
+answers one request at a time whatever the gateway sends — ``/health`` included,
+and the ``/segment`` calls that every TrOCR page makes. All three now run on the
+threadpool; recognition and the model cache stay serialised under one lock.
 
-The engine imports kraken/libtorch/htrmopo, which exist only in the engine's
-own venv on the host. These tests load it with those packages stubbed so what
-is checked is the service's concurrency, not a model.
+The engine imports kraken, torch and htrmopo, which exist only in the engine's
+own venv on the host. These tests import it **as the package the unit starts**
+(``kraken_svc.app``, from ``engines/``) with those three stubbed through
+``monkeypatch``, so nothing stubbed outlives a test, and what is checked is the
+service's concurrency, not a model.
 
 Offline. Run from the repo root:
     pytest tests/test_kraken_svc_event_loop.py
@@ -16,8 +18,10 @@ Offline. Run from the repo root:
 
 from __future__ import annotations
 
+import ast
 import asyncio
-import importlib.util
+import importlib
+import importlib.metadata
 import io
 import sys
 import threading
@@ -30,7 +34,6 @@ import pytest
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-ENGINE = ROOT / "engines" / "kraken_svc" / "app.py"
 
 
 def _png() -> bytes:
@@ -39,95 +42,44 @@ def _png() -> bytes:
     return buf.getvalue()
 
 
-# ---------------------------------------------------------------------------
-# Stub packages — injected into sys.modules BEFORE the engine is loaded,
-# so its top-level imports find the fakes and do not raise ModuleNotFoundError.
-# ---------------------------------------------------------------------------
+def _empty_seg(*_args, **_kwargs):
+    return types.SimpleNamespace(lines=[], regions={}, line_orders=[])
 
-def _make_stubs():
-    """Populate sys.modules with all the stubs the engine's top-level scope needs."""
-    # htrmopo — top-level import in app.py
+
+@pytest.fixture
+def kraken_svc(monkeypatch):
+    """``kraken_svc.app`` imported fresh against stubbed kraken/torch/htrmopo."""
+    torch = types.ModuleType("torch")
+    torch.cuda = types.SimpleNamespace(is_available=lambda: False, empty_cache=lambda: None)
+    kraken = types.ModuleType("kraken")
+    kraken.blla = types.SimpleNamespace(segment=_empty_seg)
+    kraken.rpred = types.SimpleNamespace(rpred=lambda net, img, seg: [])
+    kraken_lib = types.ModuleType("kraken.lib")
+    kraken_models = types.ModuleType("kraken.lib.models")
+    kraken_models.load_any = lambda path, device=None: object()
+    kraken_lib.models = kraken_models
     htrmopo = types.ModuleType("htrmopo")
     htrmopo.get_model = lambda model_id, path=None: Path(path or ".") / model_id
-    sys.modules["htrmopo"] = htrmopo
+    for name, module in {"torch": torch, "kraken": kraken, "kraken.blla": kraken.blla,
+                         "kraken.rpred": kraken.rpred, "kraken.lib": kraken_lib,
+                         "kraken.lib.models": kraken_models, "htrmopo": htrmopo}.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    real_version = importlib.metadata.version
+    monkeypatch.setattr(importlib.metadata, "version",
+                        lambda name: "7.0.2" if name == "kraken" else real_version(name))
+    monkeypatch.setenv("ATR_REGIONS", "false")  # a test that wants YOLO turns it on
 
-    # torch — used for DEVICE and CUDA checks
-    torch = types.ModuleType("torch")
-    torch.cuda = types.SimpleNamespace(is_available=lambda: False)
-    torch.cuda.empty_cache = lambda: None
-    sys.modules["torch"] = torch
-
-    # importlib.metadata — used for kraken version string
-    importlib_meta = types.ModuleType("importlib.metadata")
-    def _version(name):
-        if name == "kraken":
-            return "7.0.2"
-        raise Exception(f"not stubbed: {name}")
-    importlib_meta.version = _version
-    sys.modules["importlib.metadata"] = importlib_meta
-
-    # kraken top-level + kraken.blla + kraken.rpred
-    kraken = types.ModuleType("kraken")
-    kraken.blla = types.SimpleNamespace(
-        segment=lambda img, device=None: types.SimpleNamespace(
-            lines=[],
-            regions={"text": []},
-            line_orders=[],
-        )
-    )
-    kraken.rpred = types.SimpleNamespace(rpred=lambda net, img, seg: [])
-    sys.modules["kraken"] = kraken
-    sys.modules["kraken.blla"] = kraken.blla
-    sys.modules["kraken.rpred"] = kraken.rpred
-
-    # kraken.lib + kraken.lib.models (used by atr_serving.kraken_loader)
-    kraken.lib = types.ModuleType("kraken.lib")
-    kraken.lib.models = types.ModuleType("kraken.lib.models")
-    kraken.lib.models.load_any = lambda path, device=None: object()
-    sys.modules["kraken.lib"] = kraken.lib
-    sys.modules["kraken.lib.models"] = kraken.lib.models
-
-    # atr_serving lives in src/ — add it to sys.path so it resolves as a real
-    # package (with __path__, __init__.py, submodules) when the engine loads.
-    # Without this, a bare ModuleType makes Python think the package has no
-    # submodules and raises ModuleNotFoundError on the first submodule import.
-    if str(ROOT / "src") not in sys.path:
-        sys.path.insert(0, str(ROOT / "src"))
-
-    # Stub engines.kraken_svc.regions so the relative import `from . import regions`
-    # in app.py finds something when the module is loaded via spec_from_file_location
-    # (which provides no parent package context).
-    regions_mod = types.ModuleType("engines.kraken_svc.regions")
-    regions_mod.regions_enabled = lambda: False   # disables YOLO region detection
-    regions_mod.region_model_id = lambda: ""
-    regions_mod.detect_regions = lambda img: []
-    regions_mod.assign_regions = lambda boxes, regions: [[] for _ in boxes]
-    sys.modules["engines"] = types.ModuleType("engines")
-    sys.modules["engines.kraken_svc"] = types.ModuleType("engines.kraken_svc")
-    sys.modules["engines.kraken_svc.regions"] = regions_mod
-
-    # PIL is always available; no need to stub
-
-    # starlette.concurrency is already in sys.modules — do NOT clobber it;
-
-
-@pytest.fixture(autouse=False)
-def kraken_svc(monkeypatch):
-    """The engine module, imported against stub kraken / torch / htrmopo."""
-    _make_stubs()
-
-    spec = importlib.util.spec_from_file_location("kraken_svc_under_test", ENGINE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _post(client: httpx.AsyncClient, model: str):
-    return client.post(
-        "/recognize",
-        data={"model": model},
-        files={"image": ("page.png", _png(), "image/png")},
-    )
+    monkeypatch.delitem(sys.modules, "kraken_svc.app", raising=False)
+    module = importlib.import_module("kraken_svc.app")
+    monkeypatch.setattr(module, "_model_file", lambda model_id: Path(f"/fake/{model_id}"))
+    monkeypatch.setattr(module, "load_recognition_model", lambda path, device: object())
+    module._resident.clear()
+    yield module
+    # This copy was built against the stubs: the next importer gets a fresh one.
+    sys.modules.pop("kraken_svc.app", None)
+    package = sys.modules.get("kraken_svc")
+    if package is not None and getattr(package, "app", None) is module:
+        delattr(package, "app")
 
 
 def _client(module) -> httpx.AsyncClient:
@@ -135,77 +87,99 @@ def _client(module) -> httpx.AsyncClient:
                              base_url="http://kraken")
 
 
-def test_health_answers_while_a_page_is_being_recognised(kraken_svc, monkeypatch):
-    """The regression itself: with inference on the loop, /health could not be
-    served until the page finished — and here the page only finishes after
-    /health has answered, so a blocking handler fails instead of passing late."""
+def _recognize(client: httpx.AsyncClient, model: str = "any-kraken-model"):
+    return client.post("/recognize", data={"model": model},
+                       files={"image": ("page.png", _png(), "image/png")})
+
+
+def _segment(client: httpx.AsyncClient):
+    return client.post("/segment", files={"image": ("page.png", _png(), "image/png")})
+
+
+def _held(monkeypatch, module, name):
+    """Replace ``module.name`` with a call that blocks until released."""
     started, release = threading.Event(), threading.Event()
 
-    def inference(model_id, img):
+    def blocking(*_args, **_kwargs):
         started.set()
         if not release.wait(5):
-            raise AssertionError("inference was never released: the loop was held")
-        seg = types.SimpleNamespace(lines=[], regions={}, line_orders=[])
-        return seg, []
+            raise AssertionError("never released: the event loop was held")
+        return [] if name == "_run_recognition" else _empty_seg()
 
-    monkeypatch.setattr(kraken_svc, "_recognize_one", inference)
-    model = "any-kraken-model"
+    monkeypatch.setattr(module, name, blocking)
+    return started, release
 
+
+def _while_held(module, started, release, first, second):
+    """Start ``first``, wait until it is inside the blocking call, then ``second``
+    must complete while ``first`` is still held."""
     async def scenario():
-        async with _client(kraken_svc) as client:
-            page = asyncio.create_task(_post(client, model))
+        async with _client(module) as client:
+            running = asyncio.create_task(first(client))
             assert await asyncio.to_thread(started.wait, 5)
-            health = await asyncio.wait_for(client.get("/health"), 2)
+            answered = await asyncio.wait_for(second(client), 2)
             release.set()
-            return health, await page
+            return answered, await running
+    return asyncio.run(scenario())
 
-    health, page = asyncio.run(scenario())
+
+# ── the loop stays free ─────────────────────────────────────────────────────
+def test_health_answers_while_a_page_is_being_recognised(kraken_svc, monkeypatch):
+    """The regression itself. The inner call only returns after /health has
+    answered, so a handler that holds the loop fails instead of passing late."""
+    started, release = _held(monkeypatch, kraken_svc, "_run_recognition")
+    health, page = _while_held(kraken_svc, started, release, _recognize,
+                               lambda c: c.get("/health"))
     assert health.status_code == 200
     assert page.status_code == 200
 
 
 def test_segment_answers_while_a_page_is_being_recognised(kraken_svc, monkeypatch):
-    """Same as above for /segment vs a running /recognize — the cross-engine
-    path (TrOCR /ocr → kraken /segment) must not queue behind recognition."""
-    started, release = threading.Event(), threading.Event()
-
-    def inference(model_id, img):
-        started.set()
-        if not release.wait(5):
-            raise AssertionError("inference was never released: the loop was held")
-        seg = types.SimpleNamespace(lines=[], regions={}, line_orders=[])
-        return seg, []
-
-    monkeypatch.setattr(kraken_svc, "_recognize_one", inference)
-
-    async def scenario():
-        async with _client(kraken_svc) as client:
-            page = asyncio.create_task(_post(client, "model"))
-            assert await asyncio.to_thread(started.wait, 5)
-            seg = await asyncio.wait_for(
-                client.post("/segment", files={"image": ("p.png", _png(), "image/png")}),
-                2,
-            )
-            release.set()
-            return seg, await page
-
-    seg, page = asyncio.run(scenario())
-    assert seg.status_code == 200
+    """The cross-engine path: a TrOCR page segments through kraken, and must not
+    queue behind a kraken recognition."""
+    started, release = _held(monkeypatch, kraken_svc, "_run_recognition")
+    segmented, page = _while_held(kraken_svc, started, release, _recognize, _segment)
+    assert segmented.status_code == 200
     assert page.status_code == 200
 
 
+def test_health_answers_while_blla_segments(kraken_svc, monkeypatch):
+    started, release = _held(monkeypatch, kraken_svc, "_run_segmentation")
+    health, segmented = _while_held(kraken_svc, started, release, _segment,
+                                    lambda c: c.get("/health"))
+    assert health.status_code == 200
+    assert segmented.status_code == 200
+
+
+def test_health_answers_while_the_region_detector_runs(kraken_svc, monkeypatch):
+    """YOLO is a forward pass too, and ATR_REGIONS is on by default on idhefix."""
+    monkeypatch.setenv("ATR_REGIONS", "true")
+    started, release = threading.Event(), threading.Event()
+
+    def detect(image):
+        started.set()
+        if not release.wait(5):
+            raise AssertionError("never released: the event loop was held")
+        return []
+
+    monkeypatch.setattr(kraken_svc.region_detect, "detect_regions", detect)
+    health, segmented = _while_held(kraken_svc, started, release, _segment,
+                                    lambda c: c.get("/health"))
+    assert health.status_code == 200
+    assert segmented.status_code == 200
+
+
+# ── one recognition at a time ───────────────────────────────────────────────
 def test_one_recognition_at_a_time(kraken_svc, monkeypatch):
-    """Requests may now reach the engine together. The lock keeps inference —
-    and the model swap before it — to one at a time, so a request never runs on
-    a model another request just loaded."""
+    """Requests now reach the engine together. The lock keeps recognition — and
+    the model swap before it — to one at a time. Stubbed at the innermost call,
+    not at _recognize_one: the lock lives there, and replacing it would replace
+    the thing under test."""
     in_flight = 0
     peak = 0
     counter = threading.Lock()
 
-    # Stub the innermost inference call, NOT _recognize_one itself: the lock
-    # lives in _recognize_one, so replacing it would also replace the thing
-    # under test and every request would run unlocked in its own thread.
-    def inference(net, img, seg):
+    def recognition(net, img, seg):
         nonlocal in_flight, peak
         with counter:
             in_flight += 1
@@ -215,49 +189,85 @@ def test_one_recognition_at_a_time(kraken_svc, monkeypatch):
             in_flight -= 1
         return []
 
-    monkeypatch.setattr(kraken_svc, "_run_recognition", inference)
+    monkeypatch.setattr(kraken_svc, "_run_recognition", recognition)
 
     async def scenario():
         async with _client(kraken_svc) as client:
-            return await asyncio.gather(*(_post(client, f"model-{i % 3}") for i in range(6)))
+            return await asyncio.gather(*(_recognize(client, f"model-{i % 3}")
+                                          for i in range(6)))
 
     responses = asyncio.run(scenario())
     assert [r.status_code for r in responses] == [200] * 6
     assert peak == 1
 
 
-def test_ocr_is_an_alias_for_recognize(kraken_svc, monkeypatch):
-    """``/ocr`` just calls ``recognize``; verify the alias resolves."""
-    called_with = {}
+# ── a failure still says what failed ────────────────────────────────────────
+def test_a_failed_recognition_names_its_cause(kraken_svc, monkeypatch):
+    def broken(net, img, seg):
+        raise RuntimeError("CUDA out of memory")
 
-    def inference(model_id, img):
-        called_with["model"] = model_id
-        seg = types.SimpleNamespace(
-            lines=[
-                types.SimpleNamespace(
-                    baseline=[[0, 10], [40, 10]],
-                    boundary=[[0, 0], [40, 0], [40, 20], [0, 20]],
-                    regions=[],
-                )
-            ],
-            regions={},
-            line_orders=[],
-        )
-        rec = types.SimpleNamespace(prediction="hello", confidences=[0.9])
-        return seg, [rec]
-
-    monkeypatch.setattr(kraken_svc, "_recognize_one", inference)
+    monkeypatch.setattr(kraken_svc, "_run_recognition", broken)
 
     async def scenario():
         async with _client(kraken_svc) as client:
-            r = await client.post(
-                "/ocr",
-                data={"model": "my-model"},
-                files={"image": ("p.png", _png(), "image/png")},
-            )
-            return r
+            return await _recognize(client)
 
-    resp = asyncio.run(scenario())
-    assert resp.status_code == 200
-    assert "hello" in resp.json()["text"]
-    assert called_with["model"] == "my-model"
+    response = asyncio.run(scenario())
+    assert response.status_code == 500
+    assert response.json()["detail"] == "recognition failed: CUDA out of memory"
+
+
+def test_a_failed_segmentation_names_its_cause(kraken_svc, monkeypatch):
+    def broken(img):
+        raise RuntimeError("blla exploded")
+
+    monkeypatch.setattr(kraken_svc, "_run_segmentation", broken)
+
+    async def scenario():
+        async with _client(kraken_svc) as client:
+            return await _segment(client)
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 500
+    assert response.json()["detail"] == "segmentation failed: blla exploded"
+
+
+def test_ocr_is_an_alias_for_recognize(kraken_svc, monkeypatch):
+    def one_line(model_id, img):
+        line = types.SimpleNamespace(baseline=[[0, 10], [40, 10]],
+                                     boundary=[[0, 0], [40, 0], [40, 20], [0, 20]],
+                                     regions=[])
+        seg = types.SimpleNamespace(lines=[line], regions={}, line_orders=[])
+        return seg, [types.SimpleNamespace(prediction="hello", confidences=[0.9])]
+
+    monkeypatch.setattr(kraken_svc, "_recognize_one", one_line)
+
+    async def scenario():
+        async with _client(kraken_svc) as client:
+            return await client.post("/ocr", data={"model": "my-model"},
+                                     files={"image": ("p.png", _png(), "image/png")})
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 200
+    assert "hello" in response.json()["text"]
+
+
+# ── the import the unit can actually resolve ────────────────────────────────
+def test_no_engine_imports_through_an_engines_package():
+    """The units start ``python -m uvicorn <engine>_svc.app:app`` from
+    ``engines/`` with only ``src`` on PYTHONPATH: there is no ``engines``
+    package at runtime. pytest has ``.`` on its path, so an
+    ``engines.<svc>`` import passes every test and fails on the next restart —
+    #161 did exactly that. Siblings are imported relatively."""
+    offenders = []
+    for path in sorted((ROOT / "engines").glob("*/*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module]
+            elif isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            offenders += [f"{path.relative_to(ROOT)}:{node.lineno} {n}"
+                          for n in names if n == "engines" or n.startswith("engines.")]
+    assert not offenders, offenders

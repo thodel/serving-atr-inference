@@ -11,11 +11,13 @@ Lazy-loads recognition models and keeps the most recent
 KRAKEN_MODEL_CACHE_SIZE resident (default 3) — a cold load is 90-130 s
 and the ensemble asks for several models per page (#81).
 
-Thread-safety: ``_model_lock`` serialises the actual inference work on the GPU
-(#111). The handler hands that work to the threadpool via ``run_in_threadpool``,
-so the ASGI event loop is free to handle other requests while the GPU works.
-Without the lock two requests could race on the model cache or load different
-models simultaneously, which kraken's CoreML bindings do not tolerate.
+Thread-safety (#111): every forward pass — blla, rpred and the YOLO region
+detector — runs on the threadpool via ``run_in_threadpool``, so the ASGI event
+loop stays free for ``/health`` and for other requests while the GPU works.
+``_model_lock`` serialises recognition together with the model cache, so a
+request never runs on a model another one just swapped in; ``_regions_lock``
+does the same for the lazily loaded region detector. ``/segment`` alone is not
+serialised against recognition (see :func:`_run_segmentation`).
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from PIL import Image
 from atr_serving.contracts import Line, RecognitionResult, Region, SegmentResponse
 from atr_serving.kraken_loader import load_recognition_model, resolve_weights
 
-from engines.kraken_svc import regions as region_detect
+from . import regions as region_detect
 
 KRAKEN_VERSION = _pkg_version("kraken")
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -67,6 +69,10 @@ _resident: "OrderedDict[str, object]" = OrderedDict()
 # or two models could sit on the card at once. The one GPU serialises inference
 # anyway — the lock only makes that explicit and safe.
 _model_lock = threading.Lock()
+#: The region detector loads lazily into a module global (regions._load_detector),
+#: and whether ultralytics' predict is re-entrant is not something to learn in
+#: production. Its own lock, so a /segment never waits for a recognition.
+_regions_lock = threading.Lock()
 
 
 def _model_file(model_id: str) -> Path:
@@ -151,7 +157,13 @@ def _read_image(data: bytes) -> Image.Image:
 def _run_segmentation(img: "Image.Image"):
     """Synchronous blla segmentation. Runs on the threadpool so it never blocks
     the ASGI event loop — a blocking call in an ``async def`` handler serialises
-    every request on that loop, which is the whole bug in #111."""
+    every request on that loop, which is the whole bug in #111.
+
+    Not under :data:`_model_lock` when ``/segment`` calls it: blla uses its own
+    segmentation model, not the resident recognition model, so a TrOCR page's
+    segmentation may overlap a kraken recognition — which is what #111 is for.
+    The price is two blla passes on the card at once; see #158 for kraken's
+    memory on GPU 1."""
     return blla.segment(img, device=DEVICE)
 
 
@@ -170,6 +182,13 @@ def _recognize_one(model_id: str, img: "Image.Image"):
         seg = _run_segmentation(img)
         records = _run_recognition(net, img, seg)
     return seg, records
+
+
+def _regions_for(img, seg, line_boxes) -> tuple[list[Region], list[list[str]]]:
+    """:func:`_detected_regions` for the threadpool: YOLO is a forward pass too,
+    and on the event loop it held every other request as blla did (#111)."""
+    with _regions_lock:
+        return _detected_regions(img, seg, line_boxes)
 
 
 def _geom(line) -> tuple[list[list[float]] | None, list[float] | None]:
@@ -289,11 +308,15 @@ async def list_models():
 @app.post("/segment", response_model=SegmentResponse)
 async def segment(image: UploadFile = File(...), mode: str = Form(default="baseline")):
     img = _read_image(await image.read())
-    # run_in_threadpool moves _run_segmentation to a thread, so the event loop
-    # is free to handle other requests while the CPU works (#111).
-    seg = await run_in_threadpool(_run_segmentation, img)
+    # Off the event loop (#111): the loop stays free for other requests and
+    # /health while blla and the region detector work.
+    try:
+        seg = await run_in_threadpool(_run_segmentation, img)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"segmentation failed: {exc}") from exc
     geoms = [_geom(ln) for ln in seg.lines]
-    found, assigned = _detected_regions(img, seg, [bbox for _, bbox in geoms])
+    found, assigned = await run_in_threadpool(_regions_for, img, seg,
+                                              [bbox for _, bbox in geoms])
     lines = [Line(order=idx, baseline=bl, bbox=bbox, regions=assigned[idx])
              for idx, (bl, bbox) in enumerate(geoms)]
     return SegmentResponse(
@@ -309,14 +332,20 @@ async def recognize(
 ):
     t0 = time.perf_counter()
     img = _read_image(await image.read())
-    # run_in_threadpool moves _recognize_one to a thread, so the event loop is
-    # free to handle other requests while the GPU works (#111).
-    seg, records = await run_in_threadpool(_recognize_one, model, img)
+    # Off the event loop (#111): the loop stays free for other requests and
+    # /health while the model loads and the GPU works.
+    try:
+        seg, records = await run_in_threadpool(_recognize_one, model, img)
+    except HTTPException:
+        raise  # _load's own answers (unknown model, ...) keep their status
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"recognition failed: {exc}") from exc
 
     out: list[Line] = []
     texts: list[str] = []
     confs: list[float] = []
-    _, assigned = _detected_regions(img, seg, [_geom(ln)[1] for ln in seg.lines])
+    _, assigned = await run_in_threadpool(_regions_for, img, seg,
+                                          [_geom(ln)[1] for ln in seg.lines])
     for idx, (ln, rec) in enumerate(zip(seg.lines, records)):
         text = _record_text(rec)
         conf = _record_conf(rec)
