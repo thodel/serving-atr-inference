@@ -37,15 +37,22 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from atr_serving.registry import load_registry
+from atr_serving.training.base_models import BaseModelError, resolve_base_model
 from atr_serving.training.backends import BACKENDS, UnknownBackend, backend_for
 from atr_serving.training.contracts import TrainJob, TrainRequest
-from atr_serving.training.curves import CURVE_FILENAME
+from atr_serving.training.curves import (
+    CURVE_FILENAME,
+    curve_from_checkpoints,
+    curve_payload,
+    empty_curve,
+)
 from atr_serving.training.hf_source import (
     DatasetSelectionError,
     VerificationUnavailable,
     verify_dataset_spec,
 )
-from atr_serving.training.jobstore import JobStore, JobStoreError
+from atr_serving.training.jobstore import JobStore, JobStoreError, reap_children
 
 from atr_serving.training.preflight import (
     PreflightError,
@@ -72,6 +79,22 @@ def _store() -> JobStore:
         store = JobStore(_settings().jobs_root)
         app.state.store = store
     return store
+
+
+def _registry():
+    """The tracked registry for base_model lookups, or None if unreadable.
+
+    Overridable on ``app.state`` so tests need no models.yaml on disk. None means
+    "accept DOIs, cannot resolve ids" rather than a failure — a job naming a DOI
+    should not be refused because the registry file is missing.
+    """
+    if (override := getattr(app.state, "registry", None)) is not None:
+        return override
+    try:
+        return load_registry(_settings().models_config)
+    except (OSError, ValueError) as exc:
+        logger.warning("registry unavailable for base_model lookup: {}", exc)
+        return None
 
 
 def _spawn(settings: TrainerSettings, job: TrainJob) -> int:
@@ -114,6 +137,14 @@ def schedule_once(
     written to ``queued_reason`` — a queued job is not a failed job, and the
     caller deserves to know whether it is waiting on the GPU or on another run.
     """
+    # Before judging liveness: a finished runner stays defunct until someone waits
+    # on it, and a defunct pid used to read as alive (#118). `_pid_alive` no longer
+    # believes a zombie, so this is hygiene rather than correctness — but a process
+    # table that fills with dead runners is its own problem.
+    reaped = reap_children()
+    if reaped:
+        logger.debug("reaped {} finished runner(s)", reaped)
+
     jobs = [store.reconcile(j) for j in store.list()]
     # A job stays "queued" from the moment it is spawned until its detached runner
     # writes the first status — a window that a second submit lands in easily,
@@ -286,6 +317,15 @@ async def submit(request: TrainRequest, response: Response,
         check_disk(settings.jobs_root, settings.min_free_disk_gb)
     except PreflightError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
+    # A base_model that names nothing loadable is knowable now. It used to fail in
+    # the TRAIN stage - after prepare and compile - which on a large selection is
+    # ten hours to learn that a registry id was spelled as a DOI (#76).
+    if request.base_model:
+        try:
+            resolve_base_model(request.base_model, engine=request.engine,
+                               registry=_registry())
+        except BaseModelError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     # A network TMPDIR breaks temp-dir cleanup mid-compile; catch it at submit.
     try:
         check_tmpdir(os.environ.get("TMPDIR", "/tmp"))
@@ -355,14 +395,36 @@ def _verify(request: TrainRequest) -> dict:
     ``{valid: true,  checked: false}``  the hub could not be reached; unknown
     """
     check = getattr(app.state, "verify_spec", None) or verify_dataset_spec
-    try:
-        errors = check(request.dataset, _settings())
-    except DatasetSelectionError as exc:
-        return {"valid": False, "checked": True, "errors": [str(exc)]}
-    except VerificationUnavailable as exc:
-        return {"valid": True, "checked": False, "errors": [],
-                "unverified_reason": f"the hub could not be reached: {exc}"}
+    errors: list[str] = []
+    # Every dataset, not just the first (#40). Checking one of three and reporting
+    # "valid" would be the same class of mistake the guard exists to prevent — and
+    # each error is prefixed, because "project 'x' not found" is not actionable
+    # when the job named three repos.
+    for spec in request.datasets:
+        try:
+            found = check(spec, _settings(), chunk_capable=_chunk_capable(request.engine))
+        except DatasetSelectionError as exc:
+            return {"valid": False, "checked": True,
+                    "errors": [f"{spec.hf_repo}: {exc}"]}
+        except VerificationUnavailable as exc:
+            return {"valid": True, "checked": False, "errors": [],
+                    "unverified_reason": f"the hub could not be reached: {exc}"}
+        errors += ([f"{spec.hf_repo}: {e}" for e in found]
+                   if len(request.datasets) > 1 else found)
     return {"valid": not errors, "checked": True, "errors": errors}
+
+
+def _chunk_capable(engine: str) -> bool:
+    """Does this engine's backend actually implement chunked prepare?
+
+    Only kraken does. The size guard used to read ``ATR_TRAIN_CHUNK_PAGES`` alone
+    and cleared a 293 GB vllm corpus on the strength of a setting that backend
+    ignores (#85).
+    """
+    from atr_serving.training.backends import BACKENDS
+
+    backend = BACKENDS.get(engine)
+    return bool(backend and backend.supports_chunked_prepare)
 
 
 @app.post("/jobs/verify", status_code=200)
@@ -404,16 +466,45 @@ async def get_log(job_id: str, stage: str = Query("train"), lines: int = Query(2
 
 @app.get("/jobs/{job_id}/curve")
 async def get_curve(job_id: str) -> dict:
-    """The per-epoch record for a run (#38), or 404 before the train stage wrote it."""
-    job = _load(job_id)
+    """The per-epoch record for a run (#38) — including while it is still running.
+
+    Three sources, in order, and the shape is the same for all of them (#77):
+
+    1. ``training.json``, written when the train stage ends — the final record.
+    2. **The checkpoint directory, read live.** Lightning writes each epoch's
+       metric into the filename as it goes, so a running job's progress is on
+       disk long before the stage finishes. Reading it only at the end made the
+       endpoint useless for the thing it is most wanted for: deciding, mid-run,
+       whether a job is still improving or has plateaued and should be stopped.
+    3. Neither, because the job has not reached training — an empty ``points``
+       list and a note saying so, not a 404. Callers poll this; an answer that
+       changes shape between "not yet" and "here you go" makes every caller
+       handle two bodies to ask one question.
+    """
+    job = _store().reconcile(_load(job_id))
     path = _store().paths(job.id).root / CURVE_FILENAME
-    if not path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=(f"no {CURVE_FILENAME} for job {job_id} — it is written at the end of "
-                    "the train stage, so a job that has not trained yet has none"),
-        )
-    return json.loads(path.read_text(encoding="utf-8"))
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    if job.checkpoint_dir and Path(job.checkpoint_dir).is_dir():
+        curve = curve_from_checkpoints(job.checkpoint_dir)
+        if curve.points:
+            payload = curve_payload(curve, job.id)
+            payload["live"] = True
+            payload["note"] = (
+                f"read live from the checkpoint directory while the job is {job.status}; "
+                + curve.note
+            )
+            return payload
+
+    return curve_payload(
+        empty_curve(
+            f"no checkpoints yet — job is {job.status}"
+            + (f" in the {job.stage} stage" if job.stage else "")
+            + ". Metrics appear once the train stage starts writing checkpoints."
+        ),
+        job.id,
+    )
 
 
 @app.post("/jobs/{job_id}/cancel")

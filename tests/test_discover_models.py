@@ -620,3 +620,38 @@ class TestHubAuth:
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
         assert dm._hf_headers() == {}
+
+
+# ── #66: Zenodo anonymous page-size cap ──────────────────────────────────────
+class TestZenodoAnonymousPageSize:
+    """Zenodo caps anonymous results-per-page at 25 (verified 2026-09-17:
+    size=25 -> 200, size=26 -> 400). The script sends no Zenodo credentials,
+    so every query must stay at or below that cap. Before the fix the script
+    sent size=200 and the weekly report silently lost all Zenodo candidates."""
+
+    def test_the_page_size_constant_respects_the_anonymous_cap(self):
+        """ZENODO_PAGE_SIZE must be <= 25, the anonymous cap Zenodo enforces."""
+        import scripts.discover_models as dm
+        assert 1 <= dm.ZENODO_PAGE_SIZE <= 25
+
+    def test_no_query_requests_more_than_the_anonymous_cap(self):
+        """Every query the script builds must ask for <= 25 results per page,
+        otherwise Zenodo answers 400 and the report degrades (see #66)."""
+        import scripts.discover_models as dm
+
+        seen_params: list[dict] = []
+
+        def fake_search(session, params):
+            seen_params.append(dict(params))
+            # one hit on page 1, none on page 2 -> pagination stops quickly
+            return zenodo_response() if params.get("page", 1) == 1 else zenodo_response_page2()
+
+        with patch.object(dm, "ZENODO_COMMUNITIES", ["scribes"]), \
+             patch.object(dm, "_search_zenodo", fake_search):
+            discover_zenodo_models(MagicMock(spec=requests.Session))
+
+        assert seen_params, "discover_zenodo_models made no search calls"
+        for params in seen_params:
+            assert int(params.get("size", 0)) <= 25, (
+                f"anonymous Zenodo query requests size={params.get('size')}; "
+                "Zenodo caps anonymous pages at 25 (HTTP 400 above that)")

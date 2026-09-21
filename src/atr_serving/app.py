@@ -10,9 +10,15 @@ from loguru import logger
 from atr_serving import __version__
 from atr_serving.api.routes import router
 from atr_serving.api.train_routes import router as train_router
-from atr_serving.config import DEFAULT_INSECURE_KEY, Settings, get_settings
+from atr_serving.config import (
+    DEFAULT_INSECURE_KEY,
+    Settings,
+    get_settings,
+    is_loopback_url,
+)
 from atr_serving.manager import ModelManager
 from atr_serving.registry import Registry, load_registry
+from atr_serving.shared_registry import RegistryWatch
 from atr_serving.training.overlay import load_overlay, merge
 
 
@@ -27,6 +33,14 @@ def _check_auth_hardening(settings: Settings) -> None:
         )
     if not settings.require_auth and exposed:
         logger.warning("SECURITY: auth disabled (ATR_REQUIRE_AUTH=false) on exposed host {}.", settings.host)
+    if not settings.train_api_key and not is_loopback_url(settings.train_url):
+        # Said at startup because the first sign otherwise is a 502 on the next
+        # /train/* call — and the trainer on asteraix refuses every keyless call.
+        logger.warning(
+            "ATR_TRAIN_URL={} is not on this box but ATR_TRAIN_API_KEY is empty; the "
+            "trainer will refuse every /train/* call. Set it to the trainer's value.",
+            settings.train_url,
+        )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -39,14 +53,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # id that exists in both files is a hard error rather than a silent shadow:
     # when two sets of weights answer to one name you cannot tell which one
     # transcribed a page, which is #30/#31 with extra steps.
-    trained = load_overlay(settings.models_overlay)
-    if trained:
-        tracked = len(registry)
-        registry = merge(registry, trained)
-        logger.info("Merged {} of {} trained model(s) from {} ({} still awaiting the "
-                    "promotion gate)", len(registry) - tracked, len(trained),
-                    settings.models_overlay,
-                    len(trained) - (len(registry) - tracked))
+    watch: RegistryWatch | None = None
+    if settings.registry_root is None:
+        trained = load_overlay(settings.models_overlay)
+        if trained:
+            tracked = len(registry)
+            registry = merge(registry, trained)
+            logger.info("Merged {} of {} trained model(s) from {} ({} still awaiting the "
+                        "promotion gate)", len(registry) - tracked, len(trained),
+                        settings.models_overlay,
+                        len(trained) - (len(registry) - tracked))
+    else:
+        # The shared registry (#138): the same overlay as above, plus the trainer's
+        # trained/ on the share, published and read by the watch — in a thread, so
+        # a share that does not answer cannot keep the curated models from serving.
+        watch = RegistryWatch(registry, root=settings.registry_root,
+                              overlay=settings.models_overlay,
+                              source=settings.models_config,
+                              interval_s=settings.registry_reload_interval_s)
+        registry = watch.initial()
     _check_auth_hardening(settings)
 
     manager = ModelManager(registry, settings)
@@ -65,6 +90,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.registry = registry
     app.state.model_manager = manager
+    app.state.registry_watch = watch
+    if watch is not None:
+        watch.start(app.state)
     app.include_router(router)
     app.include_router(train_router)
     return app

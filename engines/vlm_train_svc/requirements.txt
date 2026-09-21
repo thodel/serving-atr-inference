@@ -26,7 +26,7 @@ transformers>=4.57,<5
 torchvision==0.23.0
 # torch is PINNED and installed from the cu128 index by make_venvs.sh BEFORE this
 # file, exactly as the kraken-train and vllm venvs do. 2.8.0+cu128 is the build
-# proven on driver 565 / CUDA 12.7 (docs/asteraix-environment.md); an unpinned
+# proven on driver 565 / CUDA 12.7 (docs/idhefix-environment.md); an unpinned
 # torch resolves to a CUDA 12.9 wheel — GBs of download on a box whose root
 # partition is the binding constraint, at an untested CUDA level.
 torch==2.8.0

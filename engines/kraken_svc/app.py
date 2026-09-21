@@ -4,15 +4,19 @@ kraken 7.x flow (verified against the installed lib):
   - download a Zenodo model by DOI via ``htrmopo.get_model``
   - segment with ``blla.segment(im)`` (built-in default segmentation model)
   - recognise with ``rpred.rpred(net, im, segmentation)`` where the net comes
-    from ``atr_serving.kraken_loader`` (``kraken.models.load_models``, which reads
-    safetensors as well as CoreML — see #32)
+    from ``atr_serving.kraken_loader`` → ``kraken.lib.models.load_any``, which is
+    what produces the ``TorchSeqRecognizer`` rpred's signature demands
 
-Lazy-loads recognition models, keeps one resident (LRU-of-1).
+Lazy-loads recognition models and keeps the most recent
+KRAKEN_MODEL_CACHE_SIZE resident (default 3) — a cold load is 90-130 s
+and the ensemble asks for several models per page (#81).
 """
 
 from __future__ import annotations
 
+import os
 import time
+from collections import OrderedDict
 from importlib.metadata import version as _pkg_version
 from io import BytesIO
 from pathlib import Path
@@ -25,8 +29,10 @@ from kraken import blla, rpred
 from loguru import logger
 from PIL import Image
 
-from atr_serving.contracts import Line, RecognitionResult, SegmentResponse
+from atr_serving.contracts import Line, RecognitionResult, Region, SegmentResponse
 from atr_serving.kraken_loader import load_recognition_model, resolve_weights
+
+from . import regions as region_detect
 
 KRAKEN_VERSION = _pkg_version("kraken")
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -36,8 +42,16 @@ CACHE_DIR.mkdir(exist_ok=True)
 app = FastAPI(title="ATR Kraken Engine", version="0.1.0")
 
 _model_files: dict[str, Path] = {}     # model_id -> resolved .mlmodel path
-_resident_id: str | None = None
-_resident_net = None
+
+# How many recognition models stay resident. One meant every switch paid a full
+# load — measured at 91-130 s — and the ensemble asks for several models per page,
+# so a single page loaded, evicted and reloaded the same model minutes apart (#81).
+# The ensemble plans up to ENSEMBLE_PER_ENGINE (3) kraken models per page, so 3
+# holds a whole page's set. Lower it if VRAM is tight; 1 restores the old behaviour.
+MODEL_CACHE_SIZE = max(1, int(os.getenv("KRAKEN_MODEL_CACHE_SIZE", "3")))
+
+#: model_id -> loaded net, most-recently-used last.
+_resident: "OrderedDict[str, object]" = OrderedDict()
 
 
 def _model_file(model_id: str) -> Path:
@@ -60,7 +74,8 @@ def _model_file(model_id: str) -> Path:
         _model_files[model_id] = local
         return local
     dest = CACHE_DIR / model_id.replace("/", "_")
-    existing = (sorted(dest.glob("*.safetensors")) + sorted(dest.glob("*.mlmodel"))
+    # CoreML first: it is the only format load_any can serve (see kraken_loader).
+    existing = (sorted(dest.glob("*.mlmodel")) + sorted(dest.glob("*.safetensors"))
                 if dest.is_dir() else [])
     if existing:
         p = existing[0]
@@ -80,14 +95,35 @@ def _model_file(model_id: str) -> Path:
 
 
 def _load(model_id: str):
-    global _resident_id, _resident_net
-    if _resident_id == model_id and _resident_net is not None:
-        return _resident_net
+    """The loaded net for *model_id*, from the LRU when possible.
+
+    A hit is what makes a multi-model page viable: the load itself is 90-130 s and
+    the ensemble asks for several models per page, so with one slot the same model
+    was loaded, evicted and loaded again within minutes.
+    """
+    net = _resident.get(model_id)
+    if net is not None:
+        _resident.move_to_end(model_id)                    # mark most-recently used
+        return net
     path = _model_file(model_id)
-    logger.info("Loading recognition model {} from {} on {}", model_id, path, DEVICE)
-    _resident_net = load_recognition_model(path, device=DEVICE)
-    _resident_id = model_id
-    return _resident_net
+    logger.info("Loading recognition model {} from {} on {} (cache {}/{})",
+                model_id, path, DEVICE, len(_resident), MODEL_CACHE_SIZE)
+    net = load_recognition_model(path, device=DEVICE)
+    _resident[model_id] = net
+    while len(_resident) > MODEL_CACHE_SIZE:
+        evicted_id, evicted = _resident.popitem(last=False)   # least-recently used
+        # popitem already removed it, so len(_resident) IS the new occupancy.
+        logger.info("Evicting recognition model {}, cache now {}/{}",
+                    evicted_id, len(_resident), MODEL_CACHE_SIZE)
+        del evicted
+        # The eviction is pointless if the VRAM is not actually returned, and a
+        # slow OOM is worse than the reload this cache exists to avoid.
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:                           # pragma: no cover
+            logger.warning("could not release CUDA cache after eviction: {}", exc)
+    return net
 
 
 def _read_image(data: bytes) -> Image.Image:
@@ -109,6 +145,85 @@ def _geom(line) -> tuple[list[list[float]] | None, list[float] | None]:
     return bl, bbox
 
 
+def _line_regions(line) -> list[str]:
+    """Region ids this line belongs to, as strings.
+
+    ``BaselineLine.regions`` is a list of ids in kraken 7. Read through
+    ``getattr`` because a segmenter that does not do regions is a supported
+    answer, not a crash.
+    """
+    return [str(r) for r in (getattr(line, "regions", None) or [])]
+
+
+def _segmented_by(found: list[Region]) -> str:
+    """Name what actually did the work, so a reading can be traced to it."""
+    if not found or not region_detect.regions_enabled():
+        return "kraken-blla"
+    return f"kraken-blla+{region_detect.region_model_id()}"
+
+
+def _detected_regions(img, seg, line_boxes) -> tuple[list[Region], list[list[str]]]:
+    """``(regions, per-line region ids)`` — YOLO's blocks when it has any.
+
+    kraken puts every line of these pages in one implicit region, so its own
+    grouping carries no information (measured 2026-09-16: 65 of 65 lines of
+    ``lassberg-letter-1345`` in a single ``_``-prefixed block). When the detector
+    finds real blocks they replace that; when it finds none, kraken's answer
+    stands and the page behaves exactly as it did before this existed.
+    """
+    if not region_detect.regions_enabled():
+        return _regions(seg), [_line_regions(ln) for ln in seg.lines]
+
+    found = region_detect.detect_regions(img)
+    if not found:
+        return _regions(seg), [_line_regions(ln) for ln in seg.lines]
+
+    assigned = region_detect.assign_regions(line_boxes, found)
+    return ([Region(id=r.id, type=r.type, bbox=list(r.bbox)) for r in found], assigned)
+
+
+def _regions(seg) -> list[Region]:
+    """The blocks kraken found, flattened out of its ``{type: [region]}`` map.
+
+    kraken has computed these on every page this service has ever segmented and
+    the response never carried them, so every caller saw one flat list of lines
+    and had to guess at the order. The type is kept — a margin and a body are
+    both regions and only one of them belongs in the running text.
+    """
+    found = getattr(seg, "regions", None) or {}
+    groups = found.items() if hasattr(found, "items") else [("text", found)]
+    out: list[Region] = []
+    for kind, items in groups:
+        for region in items or []:
+            _, bbox = _geom(region)
+            out.append(Region(
+                id=str(getattr(region, "id", f"{kind}-{len(out)}")),
+                type=str(kind), bbox=bbox))
+    return out
+
+
+def _reading_order(seg, line_count: int) -> list[int]:
+    """kraken's own reading order, if it produced a usable one.
+
+    ``line_orders`` is a list of orders; the first is kraken's preferred. It is
+    validated as a **permutation** of the line indices before being handed on,
+    because an order that drops or repeats an index would silently lose or
+    duplicate text — a corpus wrong in a way that reads as fluent.
+    """
+    orders = getattr(seg, "line_orders", None) or []
+    for order in orders:
+        try:
+            candidate = [int(i) for i in order]
+        except (TypeError, ValueError):
+            continue
+        if sorted(candidate) == list(range(line_count)):
+            return candidate
+        logger.warning(
+            "kraken reading order covers {} of {} line(s) — ignoring it",
+            len(set(candidate)), line_count)
+    return []
+
+
 def _record_text(rec) -> str:
     return getattr(rec, "prediction", None) or str(rec)
 
@@ -122,7 +237,8 @@ def _record_conf(rec) -> float | None:
 async def health():
     return JSONResponse({
         "status": "ok", "device": DEVICE, "kraken": KRAKEN_VERSION,
-        "resident_model": _resident_id,
+        "resident_models": list(_resident),
+        "model_cache_size": MODEL_CACHE_SIZE,
     })
 
 
@@ -138,11 +254,13 @@ async def segment(image: UploadFile = File(...), mode: str = Form(default="basel
         seg = blla.segment(img, device=DEVICE)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"segmentation failed: {exc}") from exc
-    lines = []
-    for idx, ln in enumerate(seg.lines):
-        bl, bbox = _geom(ln)
-        lines.append(Line(order=idx, baseline=bl, bbox=bbox))
-    return SegmentResponse(lines=lines, segmented_by="kraken-blla")
+    geoms = [_geom(ln) for ln in seg.lines]
+    found, assigned = _detected_regions(img, seg, [bbox for _, bbox in geoms])
+    lines = [Line(order=idx, baseline=bl, bbox=bbox, regions=assigned[idx])
+             for idx, (bl, bbox) in enumerate(geoms)]
+    return SegmentResponse(
+        lines=lines, segmented_by=_segmented_by(found),
+        regions=found, reading_order=_reading_order(seg, len(lines)))
 
 
 @app.post("/recognize", response_model=RecognitionResult)
@@ -163,13 +281,15 @@ async def recognize(
     out: list[Line] = []
     texts: list[str] = []
     confs: list[float] = []
+    _, assigned = _detected_regions(img, seg, [_geom(ln)[1] for ln in seg.lines])
     for idx, (ln, rec) in enumerate(zip(seg.lines, records)):
         text = _record_text(rec)
         conf = _record_conf(rec)
         if conf is not None:
             confs.append(conf)
         bl, bbox = _geom(ln)
-        out.append(Line(order=idx, baseline=bl, bbox=bbox, text=text, confidence=conf))
+        out.append(Line(order=idx, baseline=bl, bbox=bbox, text=text, confidence=conf,
+                        regions=assigned[idx]))
         texts.append(text)
 
     return RecognitionResult(

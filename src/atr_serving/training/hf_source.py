@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 from atr_serving.training.contracts import (
     DatasetNotOnHub,
     DatasetSelectionError,
@@ -42,6 +44,12 @@ __all__ = [
     "PROJECT_COLUMNS",
     "TEXT_COLUMNS",
     "data_files_for",
+    "keep_projects_for",
+    "only_projects",
+    "resolve_by_reading",
+    "whole_split_glob",
+    "collapse_complete_selection",
+    "resolve_to_files",
     "expand_all_projects",
     "granularity_files",
     "hub_cache_dir",
@@ -70,12 +78,12 @@ IMAGE_COLUMNS = ("image",)
 TEXT_COLUMNS = ("text", "transcription", "content")
 
 
-class DatasetSelectionError(ValueError):
-    """Raised when a DatasetSpec selects nothing, or something unsafe."""
-
-
-class DatasetNotOnHub(LookupError):
-    """The repo (or the pinned revision) is not there. A fact about the spec."""
+# DatasetSelectionError and DatasetNotOnHub live in contracts (#40 moved them
+# there so DatasetSpec's own validators can raise them) and are imported above.
+# They were *also* still defined here, which meant two distinct classes sharing a
+# name: `except DatasetSelectionError` in one module would not catch the other's,
+# and which one you got depended on where you imported from. Re-exported through
+# __all__ so `from ...hf_source import DatasetSelectionError` keeps working.
 
 
 class VerificationUnavailable(RuntimeError):
@@ -162,6 +170,226 @@ def expand_all_projects(spec: DatasetSpec) -> DatasetSpec:
     return expanded
 
 
+def whole_split_glob(split: str) -> str:
+    """One glob for every project under ``data/<split>/``."""
+    return f"data/{split}/**/*.parquet"
+
+
+def resolve_to_files(
+    split: str, projects: list[str], hf_repo: str, revision: str | None = None,
+    list_repo_files_fn=None,
+) -> list[str] | None:
+    """The selection as concrete parquet paths, or None if it cannot be listed (#89).
+
+    ``datasets`` resolves every *glob* in ``data_files`` with its own tree API
+    call, so a selection of 1,825 project directories costs 1,825 requests against
+    a quota of 1,000 per five minutes. Both corpus runs died on that, and
+    :func:`collapse_complete_selection` only helps when the selection covers the
+    repo exactly — `koenigsfelden-charters-post-1500` selects 1,185 of ~1,190
+    projects and still paid 1,185 requests.
+
+    Listing the repo once and handing over the file paths costs **one** request and
+    describes the same set exactly, without widening it the way a coarser glob
+    would. This is the listing `verify_dataset_spec` already makes.
+
+    **Not currently wired into** :func:`data_files_for`. Handing these bare paths
+    to ``load_dataset(repo_id, data_files=…)`` makes ``datasets`` resolve them on
+    the **local filesystem** — only patterns are treated as hub-relative — and the
+    job died with::
+
+        FileNotFoundError: Couldn't find any data file at
+        <cwd>/dh-unibe/image-text_koenigsfelden-charters-post-1500
+
+    **Measured, and it does not help.** The fully-qualified
+    ``hf://datasets/<repo>@<sha>/<path>`` form with the ``"parquet"`` loader —
+    the fix this docstring used to propose — was tried on 16.09.2026 against
+    ``dh-unibe/image-text_aaeb-xiv-xvii`` with the hub requests counted:
+    20 URIs cost 39 requests, one tree call per entry, exactly as the bare paths
+    would have. The cost is **per entry of** ``data_files``, not per file and not
+    per form of path, so no way of writing the paths makes a long selection
+    affordable. What does is having fewer entries — see
+    :func:`resolve_by_reading`, which reads the whole split and filters by
+    ``project_name`` when the selection is dense or too large to resolve.
+
+    Kept because the listing itself is still the cheap way to learn what a repo
+    holds, which is what :func:`list_projects` and the size check use it for.
+    """
+    lister = list_repo_files_fn or _default_list_repo_files
+    prefix = f"data/{split}/"
+    wanted = set(projects)
+    try:
+        files = list(lister(hf_repo, revision, "dataset"))
+    except Exception as exc:  # noqa: BLE001 — any failure means "keep the globs"
+        logger.debug("cannot list {} to resolve data_files: {}", hf_repo, exc)
+        return None
+    selected = [
+        f for f in files
+        if f.endswith(".parquet") and f.startswith(prefix)
+        and f[len(prefix):].split("/", 1)[0] in wanted
+    ]
+    return selected or None
+
+
+def collapse_complete_selection(
+    split: str, projects: list[str], hf_repo: str, revision: str | None = None,
+    list_projects_fn=None,
+) -> list[str] | None:
+    """One glob when ``projects`` is every project there is, else None (#89).
+
+    ``datasets`` resolves each entry of ``data_files`` with its own tree API call.
+    Four datasets selecting 1,825 project directories is 1,825 requests against a
+    quota of **1,000 per five minutes**, and both corpus runs died on it:
+
+        429: you hit the quota of 1000 api requests per 5 minutes period
+        url: .../tree/<sha>/data%2Ftrain%2Fu-17_0904?recursive=True
+
+    `koenigsfelden-charters-post-1500` is the case that makes the cost obvious: it
+    selects 1,185 of its ~1,190 projects — effectively the whole dataset — and paid
+    1,185 requests for a file set one glob describes exactly.
+
+    Collapsing is only correct when nothing is left out, so it is checked rather
+    than assumed, and a hub that cannot be listed falls back to the explicit globs
+    rather than quietly widening the selection.
+    """
+    lister = list_projects_fn or list_projects
+    try:
+        available = set(lister(hf_repo, split, revision))
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately broad: every failure here means "keep the explicit globs",
+        # which is correct in all of them — an unreachable hub, a missing
+        # huggingface_hub, a repo that does not exist. Narrowing this would trade a
+        # safe fallback for an exception in a function whose only job is to make
+        # the selection cheaper.
+        logger.debug("cannot check selection completeness for {}: {}", hf_repo, exc)
+        return None
+    if not available or not set(projects) >= available:
+        return None
+    return [whole_split_glob(split)]
+
+
+#: Measured on 16.09.2026 against ``dh-unibe/image-text_aaeb-xiv-xvii`` (349
+#: projects), counting the hub requests the client actually issued:
+#:
+#:     20 project entries in data_files   39 requests  (~2 per entry)
+#:     one whole-split glob               26 requests  (independent of the
+#:                                                      selection; it is the
+#:                                                      recursive tree, paged)
+#:
+#: Note what this overturns: qualifying the entries as
+#: ``hf://datasets/<repo>@<sha>/<path>`` — the fix hf_source's own docstring
+#: proposed — was measured too, and costs a tree call per entry all the same.
+#: The cost is per *entry*, not per file and not per form of path, so the only
+#: lever is how many entries there are.
+REQUESTS_PER_ENTRY = 2
+REQUESTS_PER_GLOB = 26
+#: Above this many entries the selection cannot fit the hub's quota of 1,000
+#: requests per five minutes at all. Königsfelden asked for 1,185 and that is
+#: exactly how the first v4 attempt died.
+MAX_ENTRIES = 200
+#: At or above this share of the split, reading the whole thing and discarding
+#: the rest is cheap enough to be worth one glob.
+DENSE_SELECTION = 0.5
+
+
+def resolve_by_reading(selected: int, available: int) -> tuple[bool, str]:
+    """Should the whole split be read and filtered, rather than selected?
+
+    ``datasets`` resolves every entry of ``data_files`` with its own tree call,
+    so an explicit selection costs requests in proportion to how many projects
+    it names — and a quota of 1,000 per five minutes is not many projects. One
+    glob costs a fixed handful, at the price of streaming shards that will be
+    thrown away.
+
+    Two independent reasons to take that price, and both are about the request
+    count being the binding constraint rather than the bytes:
+
+    * **The selection is dense.** Reading 1,202 projects to keep 1,185 wastes
+      1.4 % of the transfer to save 2,344 requests.
+    * **The selection is too large to resolve at all.** 600 of 5,000 projects is
+      1,200 requests against a quota of 1,000: it does not finish, and reading
+      eight times too much is better than not running.
+
+    Returns the decision and the sentence to log, because a job that silently
+    read a whole repo would be worse than one that said so.
+    """
+    if not available or selected <= 0:
+        return False, ""
+    explicit = selected * REQUESTS_PER_ENTRY
+    share = selected / available
+    if share >= DENSE_SELECTION:
+        return True, (f"selection covers {selected}/{available} projects "
+                      f"({share:.0%}) — reading the whole split and keeping those "
+                      f"costs ~{REQUESTS_PER_GLOB} hub requests instead of "
+                      f"~{explicit} (#89)")
+    if selected > MAX_ENTRIES:
+        return True, (f"selection names {selected} projects — ~{explicit} hub "
+                      f"requests would exceed the quota of 1,000 per 5 minutes, so "
+                      f"the whole split is read and filtered ({share:.0%} kept) (#89)")
+    return False, ""
+
+
+def _keep_for(spec: DatasetSpec) -> frozenset[str] | None:
+    """Project names to keep when the whole split is read, or None to select.
+
+    Asks :func:`resolve_by_reading` with the real numbers, which costs the one
+    listing call :func:`list_projects` already makes. A hub that cannot be listed
+    answers None — the explicit globs are the safe fallback, exactly as in
+    :func:`collapse_complete_selection`.
+    """
+    try:
+        available = set(list_projects(spec.hf_repo, spec.split, spec.revision))
+    except Exception as exc:  # noqa: BLE001 — any failure means "select explicitly"
+        logger.debug("cannot size the selection for {}: {}", spec.hf_repo, exc)
+        return None
+    wanted = set(spec.train_projects)
+    read_all, why = resolve_by_reading(len(wanted), len(available))
+    if not read_all:
+        return None
+    logger.info("{}: {}", spec.hf_repo, why)
+    return frozenset(wanted)
+
+
+def keep_projects_for(spec: DatasetSpec) -> frozenset[str] | None:
+    """What :func:`data_files_for` expects the caller to filter rows by.
+
+    None means the globs already name exactly the selection and every row they
+    return belongs in it. A set means the globs are wider than the selection on
+    purpose, and rows outside it must be dropped as they are read — see
+    :func:`only_projects`.
+    """
+    resolved = expand_all_projects(spec) if spec.all_projects else spec
+    if not resolved.train_projects or resolved.eval_projects:
+        return None
+    if collapse_complete_selection(resolved.split, resolved.train_projects,
+                                   resolved.hf_repo, resolved.revision):
+        return None
+    return _keep_for(resolved)
+
+
+def only_projects(rows, keep: frozenset[str] | None):
+    """Rows whose ``project_name`` is in ``keep``; everything when it is None.
+
+    ``project_name`` is the directory a shard lives in — verified on
+    ``dh-unibe/image-text_aaeb-xiv-xvii``, where the column and the path segment
+    are the same string — so filtering here reproduces exactly the selection the
+    per-project globs would have made.
+    """
+    if keep is None:
+        return rows
+
+    def gen():
+        kept = dropped = 0
+        for row in rows:
+            if row.get("project_name") in keep:
+                kept += 1
+                yield row
+            else:
+                dropped += 1
+        logger.info("kept {} rows, dropped {} outside the selection (#89)",
+                    kept, dropped)
+    return gen()
+
+
 def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
     """Map role → ``data_files`` globs.
 
@@ -178,8 +406,19 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
     resolved = expand_all_projects(spec) if spec.all_projects else spec
 
     if not resolved.train_projects:
-        # Whole-dataset selection: no project directories, use the split directly.
-        files = {"train": [f"data/{resolved.split}/*.parquet"]}
+        # Restored guard (docs/TRAINING_PLAN.md §1): an empty selection must never
+        # silently mean "everything". #40 made this the whole split, which is
+        # inconsistent with its own `all_projects` — that path requires max_pages,
+        # so the *explicit* way to ask for everything is capped while the implicit
+        # one was not. It also fails far from its cause: on a repo laid out as
+        # data/<split>/<project>/, `data/<split>/*.parquet` matches nothing, so the
+        # job dies pages later with an empty stream instead of here with a reason.
+        raise DatasetSelectionError(
+            f"DatasetSpec for {resolved.hf_repo!r} selects no train_projects. Name "
+            "the projects, or set `all_projects: true` (which requires `max_pages`) "
+            "to train on everything deliberately. A line-level dataset has no "
+            "project directories and is selected with `granularity: \"line\"`."
+        )
     else:
         overlap = sorted(set(resolved.train_projects) & set(resolved.eval_projects))
         if overlap:
@@ -187,9 +426,25 @@ def data_files_for(spec: DatasetSpec) -> dict[str, list[str]]:
                 f"projects appear in both train and eval: {overlap}. That leaks evaluation "
                 "pages into training."
             )
-        files = {
-            "train": [project_glob(resolved.split, p) for p in resolved.train_projects]
-        }
+        keep = _keep_for(resolved)
+        # Validate every name even when the globs collapse: a typo must still be
+        # an error, not silently absorbed into a whole-split glob.
+        train_globs = [project_glob(resolved.split, p) for p in resolved.train_projects]
+        if not resolved.eval_projects:
+            collapsed = collapse_complete_selection(
+                resolved.split, resolved.train_projects, resolved.hf_repo,
+                resolved.revision,
+            )
+            if collapsed:
+                logger.info("{}: selection covers every project — one glob instead "
+                            "of {} (#89)", resolved.hf_repo, len(train_globs))
+                train_globs = collapsed
+            elif keep is not None:
+                # Not complete, but too expensive to name one by one. Read the
+                # whole split and drop the rest on the way past; the caller is
+                # given the names to keep in `keep`.
+                train_globs = [whole_split_glob(resolved.split)]
+        files = {"train": train_globs}
 
     if resolved.eval_projects:
         files["eval"] = [project_glob(resolved.split, p) for p in resolved.eval_projects]
@@ -403,6 +658,11 @@ def _default_list_repo_files(hf_repo: str, revision: str | None, repo_type: str 
         raise VerificationUnavailable(f"{type(exc).__name__}: {exc}") from exc
 
 
+#: Paths per ``get_paths_info`` call. The endpoint 413s well below the 1,189 a
+#: single corpus dataset selects; 200 is comfortably under and costs few requests.
+PATHS_INFO_BATCH = 200
+
+
 def _default_paths_size(hf_repo: str, paths: list[str], revision: str | None,
                         repo_type: str = "dataset") -> int:
     """Total size in bytes of ``paths``, **without downloading them**.
@@ -418,17 +678,89 @@ def _default_paths_size(hf_repo: str, paths: list[str], revision: str | None,
     except ModuleNotFoundError as exc:
         raise VerificationUnavailable(f"huggingface_hub is not installed: {exc}") from exc
 
-    try:
-        infos = HfApi().get_paths_info(hf_repo, paths, repo_type=repo_type, revision=revision)
-    except Exception as exc:  # noqa: BLE001 — a size estimate is never worth failing over
-        raise VerificationUnavailable(f"{type(exc).__name__}: {exc}") from exc
-    return sum(getattr(i, "size", 0) or 0 for i in infos)
+    api = HfApi()
+    total = 0
+    # Batched, because the endpoint rejects a large path list outright:
+    # `koenigsfelden-charters-post-1500` selects 1,189 shards and the API answered
+    # 413 Payload Too Large. That failure used to become `needed_gb = 0.0`, which
+    # is a guard switched off precisely when the selection is biggest (#85).
+    for start in range(0, len(paths), PATHS_INFO_BATCH):
+        batch = paths[start:start + PATHS_INFO_BATCH]
+        try:
+            infos = api.get_paths_info(hf_repo, batch, repo_type=repo_type,
+                                       revision=revision)
+        except Exception as exc:  # noqa: BLE001 — reported, never silently zeroed
+            raise VerificationUnavailable(
+                f"{type(exc).__name__} sizing {len(batch)} of {len(paths)} paths "
+                f"in {hf_repo}: {exc}"
+            ) from exc
+        total += sum(getattr(i, "size", 0) or 0 for i in infos)
+    return total
+
+
+def _oversize_error(needed_gb: float, shard_count: int, settings,
+                    *, has_eval_projects: bool,
+                    chunk_capable: bool = True) -> str | None:
+    """Refuse an oversized selection — or allow it, when the pipeline streams it (#85).
+
+    This guard used to size the parquet selection and refuse on it unconditionally.
+    With ``cache_datasets=False`` — the default — those shards are never all
+    resident, so it measured a quantity the configured pipeline does not
+    materialize and rejected corpus-scale runs for a download that would not
+    happen. The remedy it named ("lower max_pages or free space") was the one pair
+    that does not address it; the two settings that do went unmentioned. The
+    selection that motivated this was refused at ~1023 GB while streaming.
+
+    What actually bounds disk depends on how the trainer is configured:
+
+    * **caching** — the shards do land, so the selection has to fit.
+    * **streaming, unchunked** — the shards do not land, but the pages they
+      materialize do, and nothing bounds them: 461 K pages accumulated ~526 GB over
+      23 h before that run died in ``compile``.
+    * **streaming, chunked** — peak page-disk is one chunk, whatever the selection
+      weighs. This is the path #39 built, and the one this guard made unreachable.
+    """
+    head = (f"the selection is ~{needed_gb:.1f} GB across {shard_count} parquet "
+            f"shards, over the {settings.min_free_disk_gb} GB the trainer keeps free")
+
+    if getattr(settings, "cache_datasets", False):
+        return (f"{head}, and ATR_TRAIN_CACHE_DATASETS is on, so all of it would be "
+                "downloaded. Stream it instead (ATR_TRAIN_CACHE_DATASETS=false), "
+                "lower max_pages, or free space.")
+
+    # Streaming from here down. Chunking is what bounds the materialized pages, and
+    # it requires explicit eval_projects: the validation set cannot come from
+    # splitting a stream that is discarded as it is read (runner_base._should_chunk).
+    #
+    # It also requires a backend that implements it. Only kraken sets
+    # supports_chunked_prepare; the VLM and TrOCR backends compile by cropping and
+    # ignore the setting. Judging the size by ATR_TRAIN_CHUNK_PAGES alone therefore
+    # cleared a 293 GB vllm corpus that would have materialized every page at once.
+    if getattr(settings, "chunk_pages", 0) > 0 and not chunk_capable:
+        return (f"{head}. ATR_TRAIN_CHUNK_PAGES is set, but this engine does not "
+                "chunk — only the kraken backend implements it, so every page "
+                "would be materialized before compile runs. Lower max_pages, "
+                "select fewer projects, or train this corpus with kraken.")
+
+    if getattr(settings, "chunk_pages", 0) > 0:
+        if has_eval_projects:
+            return None
+        return (f"{head}. ATR_TRAIN_CHUNK_PAGES is set, but chunking needs explicit "
+                "eval_projects — the validation set cannot come from splitting a "
+                "stream that is discarded as it is read. Add eval_projects, or "
+                "lower max_pages.")
+
+    return (f"{head}. Streaming keeps the shards off disk, but the pages they "
+            "materialize are unbounded while ATR_TRAIN_CHUNK_PAGES=0. Set it "
+            "(e.g. 5000) so each chunk is compiled and discarded as it goes, or "
+            "lower max_pages.")
 
 
 def verify_dataset_spec(
     spec: DatasetSpec,
     settings: TrainerSettings,
     *,
+    chunk_capable: bool = True,
     list_repo_files_fn=None,
     paths_size_fn=None,
 ) -> list[str]:
@@ -528,16 +860,19 @@ def verify_dataset_spec(
             selected = [f for f in all_files if f.endswith(".parquet")]
 
         if selected:
-            try:
-                needed_gb = paths_size_fn(spec.hf_repo, selected, spec.revision,
-                                          "dataset") / 1024 ** 3
-            except VerificationUnavailable:
-                needed_gb = 0.0
+            # Not swallowed to 0.0: an unknown size is not a small one, and the
+            # caller has a distinct outcome for it — `{valid: true, checked: false}`
+            # — which says the question could not be answered rather than
+            # answering it wrongly (#85).
+            needed_gb = paths_size_fn(spec.hf_repo, selected, spec.revision,
+                                      "dataset") / 1024 ** 3
             if needed_gb > settings.min_free_disk_gb:
-                errors.append(
-                    f"the selection is ~{needed_gb:.1f} GB across {len(selected)} "
-                    f"parquet shards, over the {settings.min_free_disk_gb} GB the "
-                    "trainer keeps free. Lower max_pages or free space."
+                oversize = _oversize_error(
+                    needed_gb, len(selected), settings,
+                    has_eval_projects=bool(spec.eval_projects),
+                    chunk_capable=chunk_capable,
                 )
+                if oversize:
+                    errors.append(oversize)
 
     return errors

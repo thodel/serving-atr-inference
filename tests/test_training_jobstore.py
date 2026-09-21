@@ -190,3 +190,99 @@ def test_delete_can_keep_the_record(store: JobStore):
     store.delete(job.id, keep=["job.json"])
     assert store.load(job.id).id == job.id
     assert not store.paths(job.id).data.exists()
+
+
+# ── a zombie is dead (#118) ─────────────────────────────────────────────────
+#
+# On 2026-09-10 `20260909T190659Z-qwen3vl-german-pages-v2` sat at `status:
+# training` for over an hour after its trainer had died in a network outage. The
+# pid was a zombie, and `os.kill(pid, 0)` succeeds on a zombie — measured on the
+# box:
+#
+#     os.kill(2786095, 0)   -> no error
+#     /proc/2786095/stat    -> state Z
+#
+# With `max_concurrent: 1` that one stale record meant no job could start again,
+# on two idle GPUs.
+
+from atr_serving.training.jobstore import _pid_alive, _pid_state, reap_children  # noqa: E402
+
+
+def _fake_proc(tmp_path, pid: int, state: str, comm: str = "python"):
+    """A /proc/<pid>/stat shaped like the kernel writes it."""
+    entry = tmp_path / str(pid)
+    entry.mkdir()
+    (entry / "stat").write_text(
+        f"{pid} ({comm}) {state} 1 1 0 0 -1 4194560 0 0 0 0 1 2 0 0 20 0 1 0\n",
+        encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.parametrize("state,alive", [
+    ("R", True),    # running
+    ("S", True),    # sleeping — the normal state of a training process
+    ("D", True),    # uninterruptible IO, which is what a hung CIFS write looks like
+    ("T", True),    # stopped: not working, but not gone either
+    ("Z", False),   # defunct. The case this exists for.
+])
+def test_a_state_letter_decides(tmp_path, state, alive):
+    _fake_proc(tmp_path, 4242, state)
+    assert _pid_alive(4242, tmp_path) is alive
+
+
+def test_a_missing_entry_is_dead(tmp_path):
+    assert _pid_alive(4242, tmp_path) is False
+
+
+def test_the_comm_field_may_contain_parentheses_and_spaces(tmp_path):
+    """A defunct child of ours reads `(python) <defunct>`. Splitting the stat line
+    on whitespace from the left puts `<defunct>` where the state belongs — the bug
+    the fix would otherwise introduce."""
+    _fake_proc(tmp_path, 2786095, "Z", comm="python) <defunct")
+    assert _pid_state(2786095, tmp_path) == "Z"
+    assert _pid_alive(2786095, tmp_path) is False
+
+
+def test_an_unreadable_stat_is_dead_not_an_exception(tmp_path):
+    (tmp_path / "4242").mkdir()        # a directory with no stat file
+    assert _pid_alive(4242, tmp_path) is False
+
+
+def test_a_garbage_stat_is_dead_not_an_exception(tmp_path):
+    entry = tmp_path / "4242"
+    entry.mkdir()
+    (entry / "stat").write_text("not a stat line at all", encoding="utf-8")
+    assert _pid_alive(4242, tmp_path) is False
+
+
+def test_without_proc_it_falls_back_to_the_signal_probe(tmp_path):
+    """macOS, where this suite runs. No zombie distinction is available there, so
+    the old behaviour is kept rather than guessed at."""
+    import os
+
+    missing = tmp_path / "no-proc-here"
+    assert _pid_alive(os.getpid(), missing) is True
+    assert _pid_alive(2 ** 22, missing) is False
+
+
+def test_reconcile_fails_a_job_whose_runner_went_defunct(tmp_path):
+    """The end-to-end shape of #118: the record must move, and say why."""
+    store = JobStore(tmp_path / "jobs")
+    job = store.create(make_request())
+    job.pid = 2786095
+    for status in ("preparing", "compiling", "training"):
+        job = store.advance(job, status)
+
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    _fake_proc(proc, 2786095, "Z", comm="python) <defunct")
+
+    out = store.reconcile(store.load(job.id),
+                          is_alive=lambda pid: _pid_alive(pid, proc))
+    assert out.status == "failed"
+    assert "2786095 is gone" in out.error
+
+
+def test_reaping_nothing_is_not_an_error():
+    """ECHILD is the normal case — the service has no children most of the time."""
+    assert reap_children() >= 0

@@ -33,7 +33,17 @@ from typing import Protocol
 
 from atr_serving.training.manifests import read_manifest
 
-__all__ = ["PromotionResult", "Recognizer", "held_out_page", "promote", "http_recognizer"]
+__all__ = ["PROMOTION_GATE_HEADER", "PromotionResult", "Recognizer", "held_out_page", "promote",
+           "http_recognizer"]
+
+#: Sent with the gate's request, value ``1``. The model under test is registered
+#: ``enabled: false``, and the gateway refuses a disabled id to every caller
+#: (#21, #30) — so without a way to ask for exactly this one the gate could not
+#: pass at all: every kraken job's gate got ``404 unknown model`` (#138 review).
+#: The gateway honours it only with the shared registry on, and only for a
+#: trained registration without a ``disabled_reason``. training-atr-models'
+#: copy of this module must send it too.
+PROMOTION_GATE_HEADER = "X-ATR-Promotion-Gate"
 
 
 @dataclass(frozen=True)
@@ -99,7 +109,7 @@ def http_recognizer(gateway_url: str, api_key: str, timeout: float = 120.0) -> R
         with image.open("rb") as fh:
             response = httpx.post(
                 f"{gateway_url.rstrip('/')}/ocr",
-                headers={"X-API-Key": api_key},
+                headers={"X-API-Key": api_key, PROMOTION_GATE_HEADER: "1"},
                 files={"image": (image.name, fh, "image/jpeg")},
                 data={"model": model_id},
                 timeout=timeout,

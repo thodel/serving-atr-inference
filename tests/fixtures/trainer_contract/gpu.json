@@ -1,0 +1,46 @@
+{
+  "host": "dhserver03",
+  "cards": [
+    {
+      "index": 0,
+      "name": "NVIDIA A40",
+      "memory_total_mib": 46068,
+      "memory_used_mib": 24591,
+      "memory_free_mib": 20986,
+      "utilisation_pct": 97,
+      "memory_utilisation_pct": 61,
+      "processes": [
+        {
+          "pid": 1843,
+          "used_mib": 24570,
+          "orphaned": false,
+          "registered": true,
+          "job_id": "20260916T061502Z-qwen3vl-german-pages-v5",
+          "service": "atr-train.service",
+          "own_service": true,
+          "user": "tobias",
+          "age_s": 30512.4,
+          "command": "/home/tobias/Repo/training-atr-models/.venvs/vlm-train/bin/python -m vlm_train_svc.runner train"
+        }
+      ],
+      "unaccounted_mib": 0,
+      "service_mib": 24570,
+      "orphaned_mib": 0
+    },
+    {
+      "index": 1,
+      "name": "NVIDIA A40",
+      "memory_total_mib": 46068,
+      "memory_used_mib": 0,
+      "memory_free_mib": 45589,
+      "utilisation_pct": 0,
+      "memory_utilisation_pct": 0,
+      "processes": [],
+      "unaccounted_mib": 0,
+      "service_mib": 0,
+      "orphaned_mib": 0
+    }
+  ],
+  "job_attribution_available": true,
+  "known_job_pids": 1
+}

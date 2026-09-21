@@ -29,6 +29,7 @@ __all__ = [
     "train_cmd",
     "evaluate_cmd",
     "find_adapter",
+    "describe_survivors",
     "parse_eval_report",
 ]
 
@@ -82,6 +83,11 @@ def train_cmd(
            "--output-dir", str(output_dir),
            *_common(params, base_model, data_root),
            "--epochs", str(params.epochs),
+        # Training only: `_common` also feeds evaluate_qlora, whose parser has no
+        # epoch knobs and exits 2 on an unknown flag (caught by the argv roundtrip).
+        "--max-epochs", str(params.max_epochs or params.epochs),
+        "--patience", str(params.patience),
+        "--min-delta", str(params.min_delta),
            "--batch-size", str(params.batch_size),
            "--accumulate-grad-batches", str(params.accumulate_grad_batches),
            "--lrate", str(params.lrate),
@@ -90,6 +96,7 @@ def train_cmd(
            "--weight-decay", str(params.weight_decay),
            "--max-grad-norm", str(params.max_grad_norm),
            "--optim", params.optim,
+           "--save-steps", str(params.save_steps),
            "--lora-r", str(params.lora_r),
            "--lora-alpha", str(params.lora_alpha),
            "--lora-dropout", str(params.lora_dropout),
@@ -128,7 +135,7 @@ def evaluate_cmd(
             "--report", str(report),
             *_common(params, base_model, data_root),
             "--max-samples", str(params.eval_samples),
-            "--max-new-tokens", str(params.max_new_tokens),
+            "--max-new-tokens", str(params.generation_budget()),
             "--load-in-4bit" if params.load_in_4bit else "--no-load-in-4bit"]
 
 
@@ -152,6 +159,49 @@ def find_adapter(output_dir: str | Path) -> Path | None:
         return int(tail) if tail.isdigit() else -1
 
     return max(candidates, key=step)
+
+
+def describe_survivors(output_dir: str | Path) -> str:
+    """What a train stage that died left on disk, in one line an operator can act on.
+
+    ``20260909T190659Z-qwen3vl-german-pages-v2`` died 8 h 50 m in and the job
+    record said only that the stage had failed. Whether anything of those hours
+    was recoverable took a walk through the checkpoint directory to answer — and
+    the answer was no, which is the thing #119 changed. Now that something
+    usually *does* survive, the failure has to say so, or the state is thrown
+    away by the operator instead of by the code.
+    """
+    root = Path(output_dir)
+    if not root.is_dir():
+        return f"Nothing survived: {root} does not exist."
+
+    found: list[str] = []
+    checkpoints = [d for d in root.glob("checkpoint-*")
+                   if (d / "trainer_state.json").is_file()]
+    if checkpoints:
+        newest = max(checkpoints, key=lambda d: int(d.name.rsplit("-", 1)[-1])
+                     if d.name.rsplit("-", 1)[-1].isdigit() else -1)
+        found.append(f"a resumable checkpoint at {newest} (optimizer state included)")
+
+    def _step(path: Path, marker: str) -> str | None:
+        try:
+            meta = json.loads((path / marker).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return f"step {meta.get('global_step')}"
+
+    at = _step(root / "recovery", "recovery.json")
+    if at:
+        found.append(f"a recovery snapshot at {root / 'recovery'} ({at}, adapter only — "
+                     "usable as weights, not as a resume)")
+    at = _step(root / "best", "best.json")
+    if at:
+        found.append(f"the best adapter so far at {root / 'best'} ({at})")
+
+    if not found:
+        return (f"Nothing survived in {root}: no checkpoint, no recovery snapshot. "
+                "The whole run has to start again.")
+    return "What survived: " + "; ".join(found) + "."
 
 
 def parse_eval_report(text: str) -> Metrics:

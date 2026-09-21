@@ -34,7 +34,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 __all__ = ["EpochPoint", "TrainingCurve", "parse_checkpoint", "curve_from_checkpoints",
-           "write_training_json", "CURVE_FILENAME"]
+           "curve_payload", "empty_curve", "write_training_json", "CURVE_FILENAME"]
 
 CURVE_FILENAME = "training.json"
 
@@ -116,12 +116,24 @@ def curve_from_checkpoints(checkpoint_dir: str | Path) -> TrainingCurve:
     )
 
 
-def write_training_json(path: str | Path, curve: TrainingCurve,
-                        job_id: str | None = None) -> Path:
-    """Write the curve where the job record can point at it."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+def empty_curve(reason: str) -> TrainingCurve:
+    """A curve with no points yet, carrying why.
+
+    A job that has not reached the train stage has no checkpoints, which is not an
+    error — it is a stage. Callers poll this endpoint *while a run is going*, so
+    the answer has to keep its shape from the first call to the last: ``points``
+    is always a list, and ``note`` says what is going on.
+    """
+    return TrainingCurve(points=[], complete=False, source="none yet", note=reason)
+
+
+def curve_payload(curve: TrainingCurve, job_id: str | None = None) -> dict:
+    """The JSON shape, in one place.
+
+    Shared by the file the train stage writes and the live reading the API serves
+    mid-run, so the two cannot drift into different shapes for the same question.
+    """
+    return {
         "job_id": job_id,
         "source": curve.source,
         "complete": curve.complete,
@@ -131,5 +143,12 @@ def write_training_json(path: str | Path, curve: TrainingCurve,
         "still_improving": curve.still_improving,
         "points": [{**asdict(p), "val_error": round(p.val_error, 6)} for p in curve.points],
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def write_training_json(path: str | Path, curve: TrainingCurve,
+                        job_id: str | None = None) -> Path:
+    """Write the curve where the job record can point at it."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(curve_payload(curve, job_id), indent=2), encoding="utf-8")
     return path

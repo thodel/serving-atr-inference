@@ -9,7 +9,7 @@
 # gpu_affinity: fixed GPU index, or null = ModelManager decides.
 # NOTE: vram_mb values are rough estimates — refine after Phase 3 measurements.
 #
-# asterAIx placement (see docs/asteraix-environment.md): GPU 0 is SHARED with a
+# asterAIx placement (see docs/idhefix-environment.md): GPU 0 is SHARED with a
 # live RAG service (~10 GB), GPU 1 is free. Default everything to GPU 1; the
 # ModelManager uses GPU 0 only as overflow when nvidia-smi shows room.
 
@@ -56,6 +56,164 @@ models:
     residency: lazy
     gpu_affinity: 1
 
+  # ── dh-unibe German XIX fine-tunes (our own, trained by the training service) ──
+  # Three adapters over three different bases, trained on the SAME material and the
+  # SAME instruction, so a run over one corpus compares the bases rather than the
+  # data. `prompt` is the instruction they were trained with, verbatim: serving
+  # them with different wording is a silent distribution shift, and their own model
+  # cards say so.
+  #
+  # `level: page` is a deployment decision, not a property of the weights: they
+  # were trained on line crops (`granularity: line`), and page-level serving asks
+  # them to read a whole page in one call. It is the cheaper and simpler shape —
+  # one request per page instead of one per line, and no dependency on the kraken
+  # segmenter being right about this material — and it is a distribution shift the
+  # readings have to be judged on. Switching back is one word per entry.
+  #
+  # It has one sharp edge: a page is many times more output than a line, and vLLM
+  # stops at `ATR_VLLM_MAX_NEW_TOKENS` (512) without saying so. Raise it well above
+  # a page's worth of text before serving these — see docs/GERMAN_XIX_MODELS.md.
+  #
+  # All three are LoRA adapters on PRIVATE hub repos. Two consequences for the box:
+  # `HF_TOKEN` must be set before the weights can be pulled at all, and vLLM 0.11
+  # refuses LoRA on the vision tower — so each one must be baked into its base with
+  # `scripts/merge_loras.py` before it is servable. See docs/GERMAN_XIX_MODELS.md.
+  #
+  # vram_mb covers the merged bf16 weights plus KV cache; all three are `lazy`, so
+  # GPU 1 holds one at a time. A caller that wants to compare them should therefore
+  # run model-major (all pages of one model, then the next) — page-major evicts and
+  # reloads on every page.
+  - id: qwen3vl-german-xix-v1
+    engine: vllm
+    hf_repo: dh-unibe/qwen3vl-german-xix-v1
+    base_model: Qwen/Qwen3-VL-4B-Instruct
+    task: htr
+    level: page          # trained on line crops; served whole-page on purpose
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 12000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
+  # v2 replaces v1, and the reason is worth keeping: v1 was trained on a corpus
+  # whose PageXML converter had truncated lines to their first word — 6.35x the
+  # characters of nr-sr-vereinigte-bundesversammlung-xix and 4.54x of
+  # parlamentsdienste-protokolle — so it learned to write the first word and
+  # stop. On the published federal-minutes benchmark it wrote little more than
+  # that on 507 of 2751 lines (18.4%) and scored CER 0.2551. v2 is the same four
+  # repositories, the same seed and the same split after the converter fix, and
+  # collapses on none of them: **CER 0.0765 on 2751 held-out lines**, no document
+  # shared with training (Hodel & Schoch 2021, doi:10.5281/zenodo.4746342).
+  #
+  # Served `level: page`, like the v1-era entries, and for the same reasons: one
+  # call per page instead of one per line, and no dependency on the kraken
+  # segmenter being right about this material. It is a deployment decision, not a
+  # property of the weights.
+  #
+  # What that decision costs is knowing the accuracy. 0.0765 is a LINE-level
+  # number, measured on line crops at 262144 pixels; page-level serving asks this
+  # model for something its training never showed it, at eight times the pixel
+  # budget, and nothing here measures that. Do not quote 0.0765 for page-level
+  # readings of a new corpus — it is the reason to expect them to be good, not
+  # evidence that they are. `level: line` is one word away if a comparison on the
+  # same pages says the page shape is worse.
+  #
+  # `max_pixels` is left at the default so page-level serving gets
+  # VLM_PIXEL_BUDGET["page"] (2048*32*32), not the 262144 it trained at: a whole
+  # page squeezed into one line's budget is unreadable, and the budget that suits
+  # the input is the one the page has to be legible at. That is a second
+  # unmeasured knob on top of the first — if the smoke run comes back short, this
+  # is the thing to raise.
+  - id: qwen3vl-german-xix-v2
+    engine: vllm
+    hf_repo: dh-unibe/qwen3vl-german-xix-v2
+    base_model: Qwen/Qwen3-VL-4B-Instruct
+    task: htr
+    level: page          # one call per page; its CER was measured per line
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 12000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
+  - id: qwen3.5-4b-german-xix-v1
+    engine: vllm
+    # Not servable on asterAIx (verified 2026-09-14): transformers 4.57.6 has no
+    # implementation of model type `qwen3_5` (so the LoRA cannot even be merged),
+    # and vLLM 0.11.0 does not list Qwen3_5ForConditionalGeneration among its
+    # supported architectures. A vLLM that does needs CUDA 13 / driver >=580; the
+    # box has 565. Trained on UBELIX, not here. `enabled: false` records that —
+    # see ModelSpec.enabled: registered, not yet proven servable.
+    enabled: false
+    disabled_reason: >-
+      transformers 4.57.6 (both venvs on this box) does not recognise model type
+      `qwen3_5`, so the LoRA cannot be merged; and vLLM 0.11.0 does not list
+      Qwen3_5ForConditionalGeneration, while a vLLM that does needs driver >= 580
+      against this box's 565.57.01. Re-checked 2026-09-16, unchanged. Details and
+      the conditions for re-enabling: issue #132.
+    hf_repo: dh-unibe/qwen3.5-4b-german-xix-v1
+    base_model: Qwen/Qwen3.5-4B
+    task: htr
+    level: page          # trained on line crops; served whole-page on purpose
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 12000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
+  - id: qwen3.5-2b-german-xix-v1
+    engine: vllm
+    # Not servable on asterAIx (verified 2026-09-14): transformers 4.57.6 has no
+    # implementation of model type `qwen3_5` (so the LoRA cannot even be merged),
+    # and vLLM 0.11.0 does not list Qwen3_5ForConditionalGeneration among its
+    # supported architectures. A vLLM that does needs CUDA 13 / driver >=580; the
+    # box has 565. Trained on UBELIX, not here. `enabled: false` records that —
+    # see ModelSpec.enabled: registered, not yet proven servable.
+    enabled: false
+    disabled_reason: >-
+      transformers 4.57.6 (both venvs on this box) does not recognise model type
+      `qwen3_5`, so the LoRA cannot be merged; and vLLM 0.11.0 does not list
+      Qwen3_5ForConditionalGeneration, while a vLLM that does needs driver >= 580
+      against this box's 565.57.01. Re-checked 2026-09-16, unchanged. Details and
+      the conditions for re-enabling: issue #132.
+    hf_repo: dh-unibe/qwen3.5-2b-german-xix-v1
+    base_model: Qwen/Qwen3.5-2B
+    task: htr
+    level: page          # trained on line crops; served whole-page on purpose
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 7000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
   # ── Party HTR — its own always-on service (runs for every image) ──────────
   - id: party
     engine: party
@@ -78,6 +236,23 @@ models:
     languages: [de, fr, la, nl]
     scripts: [Medieval]
     centuries: [13, 14, 15, 16]
+    vram_mb: 1500
+    residency: pinned
+    gpu_affinity: 1
+
+  # The 19th-century Kurrent line model. Its sibling above stops at the 18th
+  # century, and a century out of domain is not a detail on this material: the
+  # Lassberg comparison had two models read the same ten pages with the wrong
+  # centuries registered and return text nobody can quote.
+  - id: trocr-kurrent
+    engine: trocr
+    hf_repo: dh-unibe/trocr-kurrent
+    base_model: microsoft/trocr-base-handwritten
+    task: htr
+    level: line
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
     vram_mb: 1500
     residency: pinned
     gpu_affinity: 1
@@ -371,6 +546,48 @@ models:
     vram_mb: 500
     residency: lazy
     gpu_affinity: 1
+  # FoNDUE-GD — Simon Gabay, Universite de Geneve. A large multilingual model
+  # aggregating 28 published corpora; the widest coverage in this registry, and
+  # the reason training_datasets is recorded: two of those corpora are test sets
+  # this project measures on, which is not visible from the model's name.
+  - id: kraken-fondue_gd_v2
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.21536798"
+    task: htr
+    level: page
+    languages: [fr, de, es, la, nl]
+    scripts: [Latn]
+    centuries: [16, 17, 18, 19, 20, 21]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - "https://doi.org/10.5281/zenodo.4746342"   # Swiss Federal Council minutes 1848-1903
+      - "https://github.com/PonteIneptique/valais-recensement"  # Valais census 1870/80
+      - "https://doi.org/10.5281/zenodo.5153262"   # StABS Basel, Urfehdenbuch
+      - "https://doi.org/10.5281/zenodo.3517776"
+      - "https://doi.org/10.5281/zenodo.7695130"
+      - "https://doi.org/10.5281/zenodo.3945087"
+      - "https://github.com/FoNDUE-HTR/FONDUE-DE-MSS-18"
+      - "https://github.com/FoNDUE-HTR/FONDUE-DE-AAEB-17"
+      - "https://github.com/FoNDUE-HTR/FONDUE-FR-MSS-19"
+      - "https://github.com/FoNDUE-HTR/FONDUE-FR-MSS-18"
+      - "https://github.com/HTR-United/CREMMA-MSS-18"
+      - "https://github.com/HTR-United/CREMMA-MSS-20"
+      - "https://github.com/HTR-United/cremma-wikipedia"
+      - "https://github.com/HTR-United/lectaurep-repertoires"
+      - "https://github.com/HTR-United/lectaurep-bronod"
+      - "https://github.com/HTR-United/CREMMA-AN-TestamentsDePoilus"
+      - "https://github.com/HTRomance-Project/modern-roman-languages"
+      - "https://github.com/Proyecto-Ocupacion-Araucania-UChile/HTR_Araucania_XIX"
+      - "https://github.com/16thExegesisDH/HTR-Corpus-A"
+      - "https://github.com/16thExegesisDH/HTR-Corpus-C"
+      - "https://github.com/ARCHEO-POL/OCR_corpus_principal"
+      - "https://github.com/Masculinites-Esclavagistes/MEGV-FR-MSS-18"
+      - "https://github.com/PaulineJac/GasparoSardiToponomasia"
+      - "https://github.com/alix-tz/moonshines"
+      - "https://github.com/alix-tz/peraire-ground-truth"
+      - "https://github.com/FoNDUE-HTR/FoNDUE_Wolfflin_Fotosammlung"
   # OpenITI Arabic — Kraken
   - id: kraken-openiti_arabic
     engine: kraken

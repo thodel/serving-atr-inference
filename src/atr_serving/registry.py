@@ -29,6 +29,12 @@ class ModelSpec(BaseModel):
     # flips it after one successful recognition, so /models never advertises a
     # model the host cannot actually run (cf. #30/#31).
     enabled: bool = True
+    # Why this host cannot run it, when the answer is known and specific. Absent
+    # means the ordinary case — registered, not yet proven — which is what a
+    # freshly trained model looks like before the promotion gate flips it.
+    # Present, it is what a caller gets in the 404 instead of "see the registry
+    # entry for why", which is a YAML file on a box they may not have (#132).
+    disabled_reason: str | None = None
     base_model: str | None = None
     task: Literal["ocr", "htr"] = "ocr"
     level: Literal["page", "line"] = "page"
@@ -36,9 +42,25 @@ class ModelSpec(BaseModel):
     scripts: list[str] = Field(default_factory=list)
     centuries: list[int] = Field(default_factory=list)
     vram_mb: int = 0
+    #: Tokens this model may generate per call. None = the level's default from
+    #: settings. Declared per model because a page of Hebrew and a page of Kurrent
+    #: are not the same length, and because a global that suits one of them
+    #: silently truncates the other (#131).
+    max_new_tokens: int | None = None
+    #: Pixels one image may carry into this model. None = the level's training
+    #: budget (``VLM_PIXEL_BUDGET``). Declared per model for the same reason
+    #: ``max_new_tokens`` is: the budget belongs to the fine-tune, and serving at
+    #: a different one is a silent distribution shift, not an error.
+    max_pixels: int | None = None
     residency: Literal["pinned", "lazy"] = "lazy"
     gpu_affinity: int | None = None
     prompt: str | None = None  # optional VLM instruction; None = image-only (e.g. LightOnOCR)
+    # Corpora this model was trained on, as DOIs or repository URLs. A model that
+    # aggregates dozens of datasets cannot be checked for overlap with a test set
+    # from its name or its score — only from this list. Optional, and empty for
+    # every model registered before it existed, so absence means "not recorded",
+    # never "trained on nothing".
+    training_datasets: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_source(self) -> "ModelSpec":

@@ -1,19 +1,26 @@
 """Public API routes.
 
-- /health, /models (meta)
+- /health, /models, /gpu (meta)
 - /segment, /recognize, /ocr (recognition; kraken + vLLM wired)
 - /v1/chat/completions (OpenAI-compatible passthrough to a resident vLLM model)
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import re
+import socket
+import time
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from loguru import logger
 from starlette.concurrency import run_in_threadpool
 
 from atr_serving import __version__
+from atr_serving import gpu as gpu_probe
 from atr_serving.api.auth import require_api_key
 from atr_serving.api.schemas import (
     EngineStatus,
@@ -23,18 +30,28 @@ from atr_serving.api.schemas import (
     ModelsResponse,
     OcrResponse,
     RecognitionResult,
+    SecondOpinion,
     SegmentResponse,
 )
 from atr_serving.clients import EngineError, get_engine_client, get_kraken_client, get_vllm_client
 from atr_serving.config import Settings
-from atr_serving.manager import ManagerError
-from atr_serving.pipeline import recognize_lines, recognize_page_vllm
+from atr_serving.manager import GpuBusyError, ManagerError, vllm_pids, vram_budget
+from atr_serving.pipeline import (
+    generation_budget, recognize_lines, recognize_page_vllm, visual_budget,
+)
 from atr_serving.registry import ModelSpec, Registry
+from atr_serving.training.promote import PROMOTION_GATE_HEADER
 
 router = APIRouter()
 
 
 def _registry(request: Request) -> Registry:
+    # With a shared registry (#138) this is where a new registration is noticed:
+    # every route that resolves a model comes through here. The poll is a clock
+    # read unless a look is due, and the look runs off the request.
+    watch = getattr(request.app.state, "registry_watch", None)
+    if watch is not None:
+        watch.poll(request.app.state)
     return request.app.state.registry
 
 
@@ -88,7 +105,8 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
         return res.text
 
     return await recognize_lines(
-        raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line
+        raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line,
+        concurrency=_settings(request).line_concurrency,
     )
 
 
@@ -96,14 +114,35 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
 async def health(request: Request) -> HealthResponse:
     registry = _registry(request)
     settings = _settings(request)
-    # service_urls() = recognition engines + the trainer (:8204, #35)
-    engines = [EngineStatus(name=n, url=u) for n, u in settings.service_urls().items()]
+    # Probe each engine's /health in parallel; mark unreachable engines so
+    # downstream consumers can plan around them instead of burning round-trips
+    # on engines that are down (#30). vLLM instances are transient (one per
+    # resident model) and are not probed here — they are tracked via
+    # ``resident_model_ids()`` instead.
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        async def _probe(name: str, url: str) -> EngineStatus:
+            try:
+                r = await client.get(f"{url}/health")
+                return EngineStatus(name=name, url=url, reachable=r.status_code < 500)
+            except Exception:
+                return EngineStatus(name=name, url=url, reachable=False)
+
+        # service_urls(), not engine_urls(): the trainer (:8204) is a service the
+        # gateway fronts and #35 put it in /health on purpose. Training is
+        # fire-and-forget, so "is atr-train up" is exactly the question /health
+        # should answer — and it has a /health of its own to answer it. vLLM
+        # instances are transient (one per resident model) and are tracked
+        # through resident_model_ids() rather than probed.
+        engine_urls = settings.service_urls()
+        probe_tasks = [_probe(n, u) for n, u in engine_urls.items()]
+        results = await asyncio.gather(*probe_tasks)
+
     return HealthResponse(
         status="ok",
         version=__version__,
         model_count=len(registry),
         resident_models=_manager(request).resident_model_ids(),
-        engines=engines,
+        engines=list(results),
     )
 
 
@@ -116,12 +155,84 @@ async def health(request: Request) -> HealthResponse:
 async def list_models(request: Request) -> ModelsResponse:
     registry = _registry(request)
     resident = set(_manager(request).resident_model_ids())
+    # `enabled: false` means "registered, not servable on this host" (#30/#36), and
+    # until now only the overlay honoured it — the tracked registry's entries were
+    # listed regardless. tests/test_api.py has asserted the absence of disabled
+    # entries in this response since #30, but it was asserting a property of
+    # config/models.yaml rather than of this code: nothing filtered, and no tracked
+    # entry happened to be disabled. The first one that is (the qwen3.5 pair, which
+    # this host's vLLM cannot load at all) would have been advertised to every
+    # consumer, each of whom would have spent a request discovering it cannot run.
     return ModelsResponse(
         models=[
             ModelInfo(**spec.model_dump(), resident=spec.id in resident)
-            for spec in registry.all()
+            for spec in registry.all() if spec.enabled
         ]
     )
+
+
+@router.get("/gpu", tags=["meta"], dependencies=[Depends(require_api_key)])
+async def gpu(request: Request) -> dict:
+    """This box's cards, and what holds memory on them.
+
+    /train/gpu answers for the trainer's cards since #137 — right for its
+    question (why is a job waiting?), and since 16.09.2026 those are asteraix's.
+    Whoever read this box's load there (the vLLM budget, the neighbours' RAG
+    service on card 0) lost it; this is where it is now (#139).
+
+    The rows have the shape of the trainer's ``GET /gpu``, so the bot's
+    ``/atr_gpu`` formats both boxes alike, with three differences:
+
+    - no job attribution: nothing trains here, so ``registered`` is always
+      false, and ``job_attribution_available``/``known_job_pids`` are absent
+      rather than false — a reader takes false to mean "trainer unreachable".
+    - ``unaccounted_mib`` is therefore what is not ``own_service``. That
+      includes the neighbours' gunicorn workers (10392 MiB on card 0,
+      16.09.): memory we cannot have. It is not an alarm — their rows carry
+      ``service: gunicorn.service``, which a reader classifies as foreign; only
+      an orphan or a row without a unit is unexplained.
+    - ``vllm`` says which of our rows are the gateway's own vLLM children and
+      which are engines: both run in ``atr-*`` units, and on 16.09. the child
+      serving qwen3vl-german-xix-v1 (12000 MiB in the registry) held 16584 MiB
+      beside 15830 MiB of engines. ``pids`` are the rows descending from this
+      gateway, ``residents`` what they serve, ``budget_mb`` the resident budget
+      as it would be computed for the next launch.
+    """
+    settings = _settings(request)
+    registry = _registry(request)
+    residents = []
+    for model_id in _manager(request).resident_model_ids():
+        spec = registry.get(model_id)       # None: reloaded out of the registry
+        residents.append({"id": model_id,
+                          "vram_mb": spec.vram_mb if spec else None,
+                          "residency": spec.residency if spec else None})
+
+    def read() -> dict:
+        # nvidia-smi plus /proc for every row: seconds on a wedged driver, so
+        # never on the event loop.
+        cards = gpu_probe.inspect()
+        budget = vram_budget(settings, cards)
+        return {
+            "host": socket.gethostname(),
+            "cards": gpu_probe.as_rows(cards),
+            "vllm": {
+                "gpu": settings.vllm_gpu,
+                "service": gpu_probe.service_of(os.getpid()),
+                "pids": vllm_pids(cards),
+                "residents": residents,
+                "budget_mb": budget.mb,
+                "budget": budget.reason,
+            },
+        }
+
+    try:
+        return await run_in_threadpool(read)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — a wedged driver, a timeout
+        raise HTTPException(
+            status_code=502,
+            detail=f"nvidia-smi failed: {type(exc).__name__}: {exc}") from exc
 
 
 # ── recognition endpoints ───────────────────────────────────────────────────
@@ -149,6 +260,25 @@ def _resolve_spec_strict(request: Request, model: str) -> tuple[str, ModelSpec |
     as a real (empty) transcription.
     """
     spec = _registry(request).get(model)
+    if spec is None:
+        candidate = _awaiting_the_gate(request, model)
+        if candidate is not None:
+            return candidate.engine, candidate
+    if spec is not None and not spec.enabled:
+        # Registered, and known not to run here. Refusing now — with the reason —
+        # beats launching an engine that will fail: the caller gets a 404 it can
+        # act on instead of a 502 it has to interpret, and a batch runner can
+        # abandon the model on its first page rather than on its five hundredth.
+        why = spec.disabled_reason or (
+            "no reason is recorded, which means the ordinary one: it is registered "
+            "and has not yet been proven to run here"
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=(f"model {model!r} is registered but not servable on this host "
+                    f"(enabled: false in the registry): {why} "
+                    f"GET /models lists what this host can run."),
+        )
     if spec is not None:
         return spec.engine, spec
     if model and _RAW_KRAKEN_REF.match(model):
@@ -161,10 +291,33 @@ def _resolve_spec_strict(request: Request, model: str) -> tuple[str, ModelSpec |
     )
 
 
+def _awaiting_the_gate(request: Request, model: str) -> ModelSpec | None:
+    """The trained registration the promotion gate is testing, or None.
+
+    The gate proves a model can be served by serving one page through this
+    route, while the model is still ``enabled: false`` — so a disabled trained
+    registration has to be resolvable for that one request, and only for it.
+    Everyone else keeps getting the 404 below, and GET /models is unchanged.
+    Only with the shared registry on (#138): off, nothing here changes.
+    """
+    if request.headers.get(PROMOTION_GATE_HEADER) != "1":
+        return None
+    watch = getattr(request.app.state, "registry_watch", None)
+    candidate = watch.candidate(model) if watch is not None else None
+    if candidate is not None:
+        logger.info("Promotion gate: serving {} before it is enabled", model)
+    return candidate
+
+
 async def _ensure_vllm_port(request: Request, model: str) -> int:
     """Make a vLLM model resident (may launch/evict) and return its port."""
     try:
         return await run_in_threadpool(_manager(request).ensure_resident, model)
+    except GpuBusyError as exc:
+        # 503, not 502: nothing is broken. The card is full of things this
+        # gateway cannot evict, and the same request can work once it is not.
+        raise HTTPException(status_code=503, detail=str(exc),
+                            headers={"Retry-After": "300"}) from exc
     except ManagerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -189,6 +342,33 @@ async def segment(
         )
     except EngineError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def _party_second_opinion(request: Request, engine: str, raw: bytes,
+                                filename: str, ctype: str) -> SecondOpinion | None:
+    """Party's reading of the same image, for attaching to another engine's result.
+
+    Returns None — not an error — in the two cases where a second opinion is
+    meaningless: the switch is off, or party *is* the engine that was asked for.
+
+    **Never raises.** Party is an addition to the answer; if it fails, the caller
+    still gets the transcription it requested and the reason the extra one is
+    missing. Raising here would turn a working recognition into a 502.
+    """
+    if engine == "party" or not _settings(request).party_second_opinion:
+        return None
+    started = time.perf_counter()
+    try:
+        res = await _engine_client(request, "party").recognize(
+            raw, filename, ctype, model="party"
+        )
+    except Exception as exc:  # noqa: BLE001 - a second opinion may not fail the request
+        logger.warning("party second opinion failed: {}", exc)
+        return SecondOpinion(engine="party", model="party", error=str(exc),
+                             timing_ms=int((time.perf_counter() - started) * 1000))
+    return SecondOpinion(engine="party", model=res.model, text=res.text,
+                         lines=res.lines, confidence=res.confidence,
+                         timing_ms=res.timing_ms or int((time.perf_counter() - started) * 1000))
 
 
 @router.post(
@@ -221,6 +401,18 @@ async def recognize(
     kraken_ref = (spec.local_path or spec.zenodo_id or spec.id) if spec else model
     trocr_ref = (spec.local_path or spec.hf_repo or spec.id) if spec else model
 
+    # Party reads every image alongside the requested engine. Started here and
+    # awaited at the end, so the two run concurrently: the cost of the second
+    # opinion is the slower of the two, not the sum. It is a task rather than an
+    # awaited call for exactly that reason.
+    party_task = asyncio.ensure_future(
+        _party_second_opinion(request, engine, raw, filename, ctype)
+    )
+
+    async def _with_second_opinion(result: RecognitionResult) -> RecognitionResult:
+        result.second_opinion = await party_task
+        return result
+
     try:
         # kraken & party segment internally → one engine call.
         if engine == "kraken":
@@ -228,35 +420,52 @@ async def recognize(
                 raw, filename, ctype, model=kraken_ref, lines=_parse_lines(lines)
             )
             res.model = model  # echo the id the caller requested
-            return res
+            return await _with_second_opinion(res)
         if engine == "party":
+            party_task.cancel()  # party IS the engine here; no second opinion
             return await _engine_client(request, "party").recognize(
                 raw, filename, ctype, model=model
             )
 
         # trocr is line-level (engine handles one line) → gateway segments + crops.
         if engine == "trocr":
-            return await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref)
+            return await _with_second_opinion(
+                await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref)
+            )
 
         # vLLM: page = one call; line = segment + per-line chat.
         if engine == "vllm":
             assert spec is not None
             port = await _ensure_vllm_port(request, model)
             vclient = _vllm_client(request, port)
-            max_tokens = _settings(request).vllm_max_new_tokens
+            max_tokens = generation_budget(spec, _settings(request))
             if spec.level == "page":
-                return await recognize_page_vllm(raw, ctype, spec, vclient, max_tokens)
+                return await _with_second_opinion(
+                    await recognize_page_vllm(
+                        raw, ctype, spec, vclient, max_tokens,
+                        visual_budget(spec, _settings(request)),
+                    )
+                )
 
             async def _vllm_line(line_img: bytes, line_ct: str) -> str:
                 return await vclient.transcribe_image(
                     spec.id, line_img, line_ct, spec.prompt, max_tokens
                 )
 
-            return await recognize_lines(
-                raw, filename, ctype, model, "vllm", _kraken_client(request), _vllm_line
+            return await _with_second_opinion(
+                await recognize_lines(
+                    raw, filename, ctype, model, "vllm", _kraken_client(request), _vllm_line,
+                    concurrency=_settings(request).line_concurrency,
+                )
             )
     except EngineError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        # A request that failed, or an engine that never reached the attach step,
+        # must not leave the party call running: the task would outlive the
+        # response and asyncio would report it as destroyed-while-pending.
+        if not party_task.done():
+            party_task.cancel()
 
     raise HTTPException(status_code=501, detail=f"engine '{engine}' not wired yet")
 
@@ -264,6 +473,11 @@ async def recognize(
 @router.post(
     "/ocr",
     response_model=OcrResponse,
+    # exclude_none keeps the legacy projection byte-identical when there is no
+    # second opinion: this shape is what agentic_historian's KrakenResult reads,
+    # and a key that is always null would be noise in every response. It appears
+    # only when it carries something — a reading, or the reason there is none.
+    response_model_exclude_none=True,
     tags=["recognition"],
     dependencies=[Depends(require_api_key)],
 )
@@ -291,6 +505,10 @@ async def ocr(
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
+    # Concurrent with the engine below — see /recognize for why it is a task.
+    party_task = asyncio.ensure_future(
+        _party_second_opinion(request, engine, raw, filename, ctype)
+    )
     try:
         if engine == "kraken":
             # local_path first: a trained model has no DOI (#36).
@@ -306,11 +524,16 @@ async def ocr(
                 status_code=400,
                 detail=f"/ocr supports kraken + trocr (auto-segment); use /recognize for '{engine}'",
             )
+        second = await party_task
     except EngineError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        if not party_task.done():
+            party_task.cancel()
     return OcrResponse(
         text=result.text, confidence=result.confidence or 0.0,
         model=model, version=result.version, lines=len(result.lines),
+        second_opinion=second,
     )
 
 

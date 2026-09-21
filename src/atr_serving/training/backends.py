@@ -43,6 +43,16 @@ class Backend:
     venv: str
     #: Requirements file, for the error message when the venv is missing.
     requirements: str
+    #: Whether this backend implements chunked materialize -> compile -> discard.
+    #: **Mirrors the runner class's ``supports_chunked_prepare``**, which cannot be
+    #: read from here: each runner lives in its own venv and this service imports
+    #: neither. Declared rather than introspected, and pinned by
+    #: ``tests/test_training_backends.py`` so the two cannot drift.
+    #:
+    #: The size guard reads this. Without it, ``ATR_TRAIN_CHUNK_PAGES`` alone
+    #: cleared a 293 GB vllm corpus on the strength of a setting that backend
+    #: ignores, and every page would have been materialized before compile (#85).
+    supports_chunked_prepare: bool = False
 
 
 BACKENDS: dict[str, Backend] = {
@@ -51,12 +61,19 @@ BACKENDS: dict[str, Backend] = {
         runner_module="kraken_train_svc.runner",
         venv="kraken-train",
         requirements="engines/kraken_train_svc/requirements.txt",
+        supports_chunked_prepare=True,
     ),
     "vllm": Backend(
         engine="vllm",
         runner_module="vlm_train_svc.runner",
         venv="vlm-train",
         requirements="engines/vlm_train_svc/requirements.txt",
+    ),
+    "trocr": Backend(
+        engine="trocr",
+        runner_module="trocr_train_svc.runner",
+        venv="trocr-train",
+        requirements="engines/trocr_train_svc/requirements.txt",
     ),
 }
 

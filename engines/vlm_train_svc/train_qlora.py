@@ -18,9 +18,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
-from atr_serving.training.vlm_dataset import chat_example, read_jsonl
+from atr_serving.training.continuation import ContinuationPolicy, should_stop
+from atr_serving.training.vlm_dataset import (
+    CHAT_TEMPLATE_KWARGS,
+    apply_visual_budget,
+    chat_example,
+    read_jsonl,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -38,7 +47,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda:0")
 
-    p.add_argument("--epochs", type=int, default=3)
+    p.add_argument("--epochs", type=int, default=3,
+                   help="minimum epochs; a floor when --max-epochs exceeds it")
+    p.add_argument("--max-epochs", type=int, default=None,
+                   help="ceiling; keep training while validation loss improves")
+    p.add_argument("--patience", type=int, default=2)
+    p.add_argument("--min-delta", type=float, default=1e-4)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--accumulate-grad-batches", type=int, default=16)
     p.add_argument("--lrate", type=float, default=2e-4)
@@ -47,6 +61,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
     p.add_argument("--optim", default="paged_adamw_8bit")
+    p.add_argument("--save-steps", type=int, default=0,
+                   help="checkpoint every N optimizer steps; 0 = once per epoch")
     p.add_argument("--lora-r", type=int, default=64)
     p.add_argument("--lora-alpha", type=int, default=128)
     p.add_argument("--lora-dropout", type=float, default=0.05)
@@ -100,6 +116,8 @@ class HTRCollator:
         self.prompt = prompt
         self.max_seq_len = max_seq_len
         self.ignore_index = -100
+        #: Samples that tokenized past ``max_seq_len``. Counted, never truncated.
+        self.over_budget = 0
         # The visual-token budget is set once on the processor, not per sample:
         # a job has a single granularity, so every sample in it is the same kind.
         # (Samples still carry ``source_type``, which is what a mixed set would
@@ -109,9 +127,11 @@ class HTRCollator:
         # template rather than hardcoded, by diffing the same conversation with and
         # without a generation prompt. Everything up to and including it is prompt.
         without = processor.apply_chat_template(
-            chat_example(prompt), tokenize=False, add_generation_prompt=False)
+            chat_example(prompt), tokenize=False, add_generation_prompt=False,
+            **CHAT_TEMPLATE_KWARGS)
         with_gen = processor.apply_chat_template(
-            chat_example(prompt), tokenize=False, add_generation_prompt=True)
+            chat_example(prompt), tokenize=False, add_generation_prompt=True,
+            **CHAT_TEMPLATE_KWARGS)
         header = with_gen[len(without):] if with_gen.startswith(without) else with_gen
         self.header_ids = processor.tokenizer(header, add_special_tokens=False).input_ids
         if not self.header_ids:
@@ -137,15 +157,29 @@ class HTRCollator:
             images.append(Image.open(sample["image"]).convert("RGB"))
             texts.append(self.processor.apply_chat_template(
                 chat_example(self.prompt, sample["text"]), tokenize=False,
-                add_generation_prompt=False,
+                add_generation_prompt=False, **CHAT_TEMPLATE_KWARGS,
             ))
 
+        # No ``truncation``/``max_length``. On a text-only sequence truncation
+        # loses the tail; here it severs image tokens from the placeholders that
+        # index them, and the result is not a shorter sample but an invalid one —
+        # which is what killed 20260814T192904Z at step 2 of 774 (#86). With the
+        # visual budget actually applied these fit; when one does not, say so and
+        # let the processor see the whole thing.
         inputs = self.processor(
             text=texts, images=images, return_tensors="pt", padding=True,
-            truncation=True, max_length=self.max_seq_len,
         )
         for image in images:
             image.close()
+
+        length = int(inputs["input_ids"].shape[1])
+        if length > self.max_seq_len:
+            self.over_budget += 1
+            if self.over_budget <= 3 or self.over_budget % 100 == 0:
+                print(f"warning: a sample tokenized to {length} tokens, over "
+                      f"max_seq_len={self.max_seq_len} ({self.over_budget} so far). "
+                      "Not truncated — truncating a multimodal sequence produces an "
+                      "invalid sample rather than a shorter one.", flush=True)
 
         labels = inputs["input_ids"].clone()
         labels[labels == self.processor.tokenizer.pad_token_id] = self.ignore_index
@@ -165,6 +199,257 @@ class HTRCollator:
             labels[row, :cut] = self.ignore_index
         inputs["labels"] = labels
         return inputs
+
+
+#: One recovery snapshot per this fraction of an epoch. 1/20 puts a resumable
+#: adapter on disk roughly every 2 hours of a 33-hour corpus run, at ~350 MB
+#: written each time and overwritten in place.
+RECOVERY_FRACTION = 20
+RECOVERY_MIN_STEPS = 50
+RECOVERY_MAX_STEPS = 500
+
+
+def recovery_interval(steps_per_epoch: int) -> int:
+    """How often to write a recovery snapshot, in optimizer steps.
+
+    Derived rather than configured: the right interval depends on how long an
+    epoch is, and a constant that suits a 52-step smoke run is worthless on a
+    2,352-step corpus run — which is exactly how
+    `20260909T190659Z-qwen3vl-german-pages-v2` came to lose 8 h 50 m and 628 steps
+    to a network outage with an empty checkpoint directory (#119).
+
+    Returns 0 for a short epoch: a snapshot at step 50 of 52 is written work that
+    saves nothing, because the Trainer's own epoch-end save is a few steps away.
+    """
+    if steps_per_epoch < 2 * RECOVERY_MIN_STEPS:
+        return 0
+    return max(RECOVERY_MIN_STEPS,
+               min(RECOVERY_MAX_STEPS, steps_per_epoch // RECOVERY_FRACTION))
+
+
+@dataclass
+class CheckpointPlan:
+    """How often the Trainer writes a checkpoint, and what that costs.
+
+    ``TrainingArguments`` kwargs plus the reasoning, so the decision can be
+    unit-tested and printed instead of being read out of a conditional
+    expression in the middle of a 40-line constructor.
+    """
+
+    kwargs: dict
+    save_steps: int
+    #: Does the Trainer restore the best epoch at the end? It cannot when saving
+    #: on steps — transformers requires ``save_strategy`` and ``eval_strategy``
+    #: to match, and eval has to stay on epochs (see `make_recovery_callback`).
+    keeps_best: bool
+    reason: str
+
+
+def checkpoint_plan(steps_per_epoch: int, ceiling_epochs: int,
+                    requested_save_steps: int = 0) -> CheckpointPlan:
+    """Decide between epoch-end and step checkpoints (#119).
+
+    ``save_strategy="epoch"`` is one write per epoch, which for the corpus runs
+    is one write every several hours and — at ``epochs: 1`` — one write at the
+    very end. ``20260909T190659Z-qwen3vl-german-pages-v2`` trained 8 h 50 m,
+    reached step 628, and left an empty directory when the network went away.
+
+    So a long epoch saves on **steps**, at the same ~5 % interval the recovery
+    snapshot used, and the price is ``load_best_model_at_end``: transformers
+    refuses to restore the best model unless the two strategies match, and eval
+    cannot move to steps because the continuation callback (#88) counts one
+    evaluation as one epoch. That price is paid back in
+    :func:`make_best_adapter_callback`, which keeps the best *adapter* — which is
+    the only part of a checkpoint that is ever served — beside the checkpoints
+    itself. What is genuinely given up is restoring the best optimizer state, and
+    nothing here has ever resumed from a best model.
+
+    A short epoch keeps epoch-end saves: a checkpoint at step 50 of 52 buys
+    nothing the epoch-end write is not about to provide, and it would take
+    best-model selection away from the smoke runs for free.
+    """
+    if requested_save_steps > 0:
+        every = requested_save_steps
+        reason = f"--save-steps {every}, as requested"
+    elif steps_per_epoch < 2 * RECOVERY_MIN_STEPS:
+        return CheckpointPlan(
+            kwargs=dict(save_strategy="epoch", load_best_model_at_end=True),
+            save_steps=0, keeps_best=True,
+            reason=f"an epoch is only {steps_per_epoch} steps; saving at its end "
+                   "keeps best-model selection and loses at most that",
+        )
+    else:
+        every = recovery_interval(steps_per_epoch)
+        reason = (f"every {every} of {steps_per_epoch} steps per epoch "
+                  f"({ceiling_epochs} at most), so a crash costs at most that many")
+    return CheckpointPlan(
+        kwargs=dict(save_strategy="steps", save_steps=every, load_best_model_at_end=False),
+        save_steps=every, keeps_best=False, reason=reason,
+    )
+
+
+def make_best_adapter_callback(out_dir, greater_is_better: bool = False):
+    """Keep the best-scoring adapter at ``<out_dir>/best``.
+
+    This is what ``load_best_model_at_end`` would have done, restricted to the
+    part that is ever used: the LoRA weights. It has to be done by hand because
+    saving on steps rules that flag out (:func:`checkpoint_plan`), and without it
+    a continuation run (#88) would end on the epoch *after* the best one — the
+    run stops when the loss stopped improving, so the last epoch is by
+    construction not the one to ship.
+
+    Written to a staging directory and renamed, for the same reason as the
+    recovery snapshot: a crash during the write must not leave a directory that
+    is neither the old adapter nor the new one.
+    """
+    import shutil
+
+    from transformers import TrainerCallback
+
+    dest = Path(out_dir) / "best"
+    staging = Path(out_dir) / ".best-writing"
+
+    class KeepBestAdapter(TrainerCallback):
+        def __init__(self) -> None:
+            self.best: float | None = None
+
+        def on_evaluate(self, args, state, control, metrics=None, model=None, **kwargs):
+            value = (metrics or {}).get("eval_loss")
+            if value is None or model is None:
+                return control
+            value = float(value)
+            improved = (self.best is None
+                        or (value > self.best if greater_is_better else value < self.best))
+            if not improved:
+                return control
+            try:
+                shutil.rmtree(staging, ignore_errors=True)
+                model.save_pretrained(staging)
+                (staging / "best.json").write_text(json.dumps({
+                    "eval_loss": value,
+                    "global_step": state.global_step,
+                    "epoch": state.epoch,
+                }, indent=2), encoding="utf-8")
+                shutil.rmtree(dest, ignore_errors=True)
+                staging.rename(dest)
+                self.best = value
+                print(f"best adapter so far: eval_loss {value:.4f} at step "
+                      f"{state.global_step} -> {dest}", flush=True)
+            except OSError as exc:
+                # As with the recovery snapshot: never fail a run over its net.
+                print(f"best-adapter snapshot failed at step {state.global_step}: {exc}",
+                      flush=True)
+            return control
+
+    return KeepBestAdapter()
+
+
+def promote_best_adapter(out_dir: Path) -> str | None:
+    """Copy ``<out_dir>/best`` over the final adapter, and say so.
+
+    The last state of a continuation run is not the state to serve. Returns a
+    line for the log, or None when there is nothing to promote — a single-epoch
+    run has one evaluation, so its best and its last are the same weights.
+    """
+    import shutil
+
+    best = Path(out_dir) / "best"
+    marker = best / "best.json"
+    if not marker.is_file():
+        return None
+    try:
+        meta = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    copied = 0
+    for item in sorted(best.iterdir()):
+        if item.is_dir() or item.name == "best.json":
+            continue
+        shutil.copyfile(item, Path(out_dir) / item.name)
+        copied += 1
+    if not copied:
+        return None
+    return (f"promoted the best adapter (eval_loss {meta.get('eval_loss')} at step "
+            f"{meta.get('global_step')}) over the final one")
+
+
+def make_recovery_callback(out_dir, every: int):
+    """Keep one resumable adapter on disk, refreshed every ``every`` steps.
+
+    **Deliberately separate from the Trainer's own checkpointing**, which stays on
+    ``save_strategy="epoch"``. Moving that to steps looks like the obvious fix and
+    is a trap: ``load_best_model_at_end`` requires ``eval_strategy`` to match, the
+    epoch eval over the full validation set costs ~26 minutes here, and — worse —
+    the continuation callback (#88) counts one eval as one epoch, so a steps-based
+    eval would make a `max_epochs: 3` run stop after three evaluations, a few
+    hundred steps in. Recovery and best-model selection are different needs; this
+    serves the first without touching the second.
+
+    Written to a temporary directory and renamed over the old one, so a crash
+    during the write cannot leave a snapshot that is neither the old nor the new.
+    """
+    import shutil
+
+    from transformers import TrainerCallback
+
+    dest = Path(out_dir) / "recovery"
+    staging = Path(out_dir) / ".recovery-writing"
+
+    class SaveRecoverySnapshot(TrainerCallback):
+        def on_step_end(self, args, state, control, model=None, **kwargs):
+            if every <= 0 or not state.global_step or state.global_step % every:
+                return control
+            if model is None:
+                return control
+            try:
+                shutil.rmtree(staging, ignore_errors=True)
+                model.save_pretrained(staging)
+                (staging / "recovery.json").write_text(json.dumps({
+                    "global_step": state.global_step,
+                    "epoch": state.epoch,
+                    "written_at": time.time(),
+                }, indent=2), encoding="utf-8")
+                shutil.rmtree(dest, ignore_errors=True)
+                staging.rename(dest)
+                print(f"recovery snapshot at step {state.global_step} -> {dest}",
+                      flush=True)
+            except OSError as exc:
+                # Never fail a run over its safety net — that would be worse than
+                # the loss it exists to prevent.
+                print(f"recovery snapshot failed at step {state.global_step}: {exc}",
+                      flush=True)
+            return control
+
+    return SaveRecoverySnapshot()
+
+
+def make_continuation_callback(policy: ContinuationPolicy):
+    """Stop when ``should_stop`` says so — the arithmetic lives in `continuation`.
+
+    ``transformers`` ships ``EarlyStoppingCallback``, which has patience but no
+    floor: it will stop during the first epochs of a QLoRA run, where the loss is
+    still noisy enough to look like a plateau. kraken has had ``--min-epochs``
+    since the beginning and this keeps the two backends' idiom the same (#88).
+    """
+    from transformers import TrainerCallback
+
+    class ContinueWhileImproving(TrainerCallback):
+        def __init__(self):
+            self.history: list[float] = []
+
+        def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+            value = (metrics or {}).get("eval_loss")
+            if value is None:
+                print("continuation: no eval_loss in metrics, not deciding", flush=True)
+                return control
+            self.history.append(float(value))
+            verdict = should_stop(self.history, policy)
+            print(f"continuation @ epoch {len(self.history)}: {verdict}", flush=True)
+            if verdict.stop:
+                control.should_training_stop = True
+            return control
+
+    return ContinueWhileImproving()
 
 
 def build_model(args, processor):
@@ -212,6 +497,78 @@ def build_model(args, processor):
     return model
 
 
+def last_complete_checkpoint(out_dir: Path) -> str | None:
+    """The newest checkpoint that is actually **finished being written**.
+
+    ``transformers.trainer_utils.get_last_checkpoint`` returns the
+    highest-numbered ``checkpoint-N`` directory that exists. On a preemptable
+    queue that is not the same as one that can be resumed from: a checkpoint
+    directory is populated progressively, so a job killed mid-save leaves a
+    partial one, ``get_last_checkpoint`` hands it back, and the resume dies with
+
+        FileNotFoundError: …/checkpoint-680/trainer_state.json
+
+    which the runner records as a **failed** stage. `failed` is terminal, so a
+    kill that happened to land during a save turns a resumable multi-day run into
+    a dead one. Seen for real on job 14701151, on the third attempt of a
+    walltime-chunked run.
+
+    ``trainer_state.json`` is the right marker because the Trainer writes it last
+    — if it is there, the rest of the directory already is. Falling back to the
+    previous checkpoint costs at most ``save_steps`` of extra work, which is what
+    that setting exists to bound. ``save_total_limit`` keeps more than one, so
+    there is normally something to fall back to.
+    """
+    if not out_dir.is_dir():
+        return None
+
+    def step(path: Path) -> int:
+        try:
+            return int(path.name.split("-")[-1])
+        except ValueError:
+            return -1
+
+    candidates = sorted((d for d in out_dir.glob("checkpoint-*") if d.is_dir()),
+                        key=step, reverse=True)
+    for candidate in candidates:
+        if (candidate / "trainer_state.json").is_file():
+            if candidate is not (candidates[0] if candidates else None):
+                print(f"skipped {candidates[0].name}: incomplete, resuming from "
+                      f"{candidate.name} instead", flush=True)
+            return str(candidate)
+    if candidates:
+        print(f"found {len(candidates)} checkpoint(s), none complete; "
+              "starting from scratch", flush=True)
+    return None
+
+
+def warmup_kwarg(warmup_ratio: float, total_steps: int,
+                 supports_ratio: bool | None = None) -> dict:
+    """``warmup_ratio`` on transformers 4.x, ``warmup_steps`` on 5.x.
+
+    5.x dropped ``warmup_ratio`` from ``TrainingArguments`` and kept only
+    ``warmup_steps``. It is the *only* one of the 27 arguments this trainer
+    passes that 5.x removed — checked against the signature rather than
+    discovered one exception at a time — so converting it here is the whole
+    port, and the schedule stays identical either way.
+
+    The conversion needs the total step count, which is why this takes it: a
+    ratio of the run is only a number of steps once you know how long the run is.
+    """
+    if warmup_ratio <= 0:
+        return {}
+    if supports_ratio is None:
+        import inspect
+
+        from transformers import TrainingArguments
+
+        supports_ratio = "warmup_ratio" in inspect.signature(
+            TrainingArguments.__init__).parameters
+    if supports_ratio:
+        return {"warmup_ratio": warmup_ratio}
+    return {"warmup_steps": max(1, round(warmup_ratio * total_steps))}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     from transformers import AutoProcessor, Trainer, TrainingArguments, set_seed
@@ -220,40 +577,60 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    processor = AutoProcessor.from_pretrained(
-        args.base_model, trust_remote_code=True, max_pixels=args.max_pixels,
-    )
+    # NOT ``max_pixels=`` here: Qwen3-VL accepts the kwarg and ignores it (#86).
+    processor = AutoProcessor.from_pretrained(args.base_model, trust_remote_code=True)
+    budget = apply_visual_budget(processor, args.max_pixels)
     if processor.tokenizer.pad_token_id is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
     train_ds = JsonlSamples(args.train_jsonl, args.data_root)
     val_ds = JsonlSamples(args.val_jsonl, args.data_root)
     print(f"train={len(train_ds)} val={len(val_ds)} "
-          f"granularity={args.granularity} max_pixels={args.max_pixels}", flush=True)
+          f"granularity={args.granularity} budget: {budget}", flush=True)
 
     model = build_model(args, processor)
     collator = HTRCollator(processor, args.prompt, args.max_seq_len)
+
+    ceiling_epochs = max(args.epochs, args.max_epochs or args.epochs)
+    steps_per_epoch = max(1, math.ceil(
+        len(train_ds) / (args.batch_size * args.accumulate_grad_batches)))
+    warmup = warmup_kwarg(args.warmup_ratio, steps_per_epoch * ceiling_epochs)
+    plan = checkpoint_plan(steps_per_epoch, ceiling_epochs, args.save_steps)
+    print(f"checkpoints: {plan.kwargs['save_strategy']} — {plan.reason}", flush=True)
 
     trainer = Trainer(
         model=model,
         args=TrainingArguments(
             output_dir=str(out_dir),
-            num_train_epochs=args.epochs,
+            # The ceiling. The callback decides when to stop below it; without a
+            # ceiling this is just `epochs` and the callback never fires.
+            num_train_epochs=max(args.epochs, args.max_epochs or args.epochs),
             per_device_train_batch_size=args.batch_size,
             per_device_eval_batch_size=args.batch_size,
             gradient_accumulation_steps=args.accumulate_grad_batches,
             learning_rate=args.lrate,
             lr_scheduler_type=args.lr_scheduler,
-            warmup_ratio=args.warmup_ratio,
+            **warmup,
             weight_decay=args.weight_decay,
             max_grad_norm=args.max_grad_norm,
             optim=args.optim,
             bf16=True,
             logging_steps=25,
+            # `eval_strategy` stays on EPOCHS in both modes, and that is the
+            # point. `make_recovery_callback` above documents why moving eval to
+            # steps is a trap: the continuation callback (#88) counts one
+            # evaluation as one epoch, so a steps-based eval would end a
+            # `max_epochs: 3` run after three evaluations, a few hundred steps
+            # in. Only *saving* moves.
+            #
+            # `load_best_model_at_end` then has to go, because it requires the
+            # two strategies to match. That is a trade, not a loss: this mode
+            # exists for corpus-scale single-epoch runs on a preemptable queue,
+            # where there is exactly one evaluation and so no best model to
+            # select — and where being unable to resume costs days.
             eval_strategy="epoch",
-            save_strategy="epoch",
+            **plan.kwargs,
             save_total_limit=2,
-            load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             gradient_checkpointing=args.gradient_checkpointing,
@@ -268,12 +645,62 @@ def main(argv: list[str] | None = None) -> int:
         eval_dataset=val_ds,
         data_collator=collator,
     )
-    trainer.train()
+
+    ceiling = max(args.epochs, args.max_epochs or args.epochs)
+    if ceiling > args.epochs:
+        policy = ContinuationPolicy(
+            min_epochs=args.epochs, max_epochs=ceiling,
+            patience=args.patience, min_delta=args.min_delta,
+            greater_is_better=False,
+        )
+        trainer.add_callback(make_continuation_callback(policy))
+        print(f"continuation: {args.epochs}-{ceiling} epochs, patience "
+              f"{args.patience}, min_delta {args.min_delta}", flush=True)
+    else:
+        print(f"continuation: off, training exactly {args.epochs} epoch(s)", flush=True)
+
+    if plan.keeps_best:
+        # Epoch-end saves: the gap between them is the exposure, and an adapter-only
+        # snapshot in between is cheap enough to close most of it (#119).
+        every = recovery_interval(steps_per_epoch)
+        if every:
+            trainer.add_callback(make_recovery_callback(out_dir, every))
+            print(f"recovery: a snapshot every {every} of {steps_per_epoch} steps "
+                  f"per epoch -> {out_dir / 'recovery'}", flush=True)
+        else:
+            print(f"recovery: off, an epoch is only {steps_per_epoch} steps", flush=True)
+    else:
+        # A full checkpoint every `plan.save_steps` already contains the adapter, so
+        # a second copy of the same weights on the same schedule is only I/O. What
+        # the Trainer will not do in this mode is keep the best one.
+        print(f"recovery: off, the Trainer itself saves every {plan.save_steps} steps",
+              flush=True)
+        if ceiling_epochs > 1:
+            trainer.add_callback(make_best_adapter_callback(out_dir))
+            print(f"best-adapter: kept at {out_dir / 'best'} on every improvement",
+                  flush=True)
+
+    # Resume if this output directory already holds a *usable* checkpoint.
+    # ``resume_from_checkpoint=True`` would raise when there is none, and "no
+    # checkpoint yet" is the normal state of a first attempt — the same run has
+    # to work both ways for a requeue to be transparent.
+    resume_from = last_complete_checkpoint(out_dir)
+    if resume_from:
+        print(f"resuming from {resume_from}", flush=True)
+    else:
+        print("no checkpoint found; starting from scratch", flush=True)
+    trainer.train(resume_from_checkpoint=resume_from)
 
     # Save the adapter at the top of output_dir: find_adapter() looks there first,
     # and falls back to checkpoint-* only when a run did not get this far.
     trainer.model.save_pretrained(out_dir)
     processor.save_pretrained(out_dir)
+    # ...and then, if we kept the best epoch ourselves, put it back on top. A
+    # continuation run stops *because* the loss stopped improving, so its last
+    # weights are not the ones to serve.
+    promoted = promote_best_adapter(out_dir)
+    if promoted:
+        print(promoted, flush=True)
     (out_dir / "training_summary.json").write_text(
         json.dumps({"base_model": args.base_model,
                     "prompt": args.prompt,

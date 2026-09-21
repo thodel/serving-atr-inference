@@ -15,7 +15,12 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from atr_serving.training.contracts import DatasetSpec, TrainRequest, VlmTrainParams
+from atr_serving.training.contracts import (
+    VLM_MAX_SAMPLE_CHARS,
+    DatasetSpec,
+    TrainRequest,
+    VlmTrainParams,
+)
 from atr_serving.training.jobstore import JobStore
 from atr_serving.training.overlay import load_overlay
 from atr_serving.training.settings import TrainerSettings
@@ -60,9 +65,17 @@ REPORT = {
 class FakeSource:
     """Yields dataset rows shaped like the real ``Image(decode=False)`` column."""
 
-    def __init__(self, per_role: dict[str, int], empty_every: int | None = None) -> None:
+    def __init__(self, per_role: dict[str, int], empty_every: int | None = None,
+                 long_page_chars: int | None = None,
+                 short_page_chars: int | None = None) -> None:
         self.per_role = per_role
         self.empty_every = empty_every
+        #: Make the first page of each role carry a transcription this long, to
+        #: stand in for the 32,477-character page that killed the German run.
+        self.long_page_chars = long_page_chars
+        #: Make the *second* page of each role carry a transcription this short,
+        #: to stand in for the medieval corpus's folio numbers and marginalia.
+        self.short_page_chars = short_page_chars
         self.calls: list[tuple[str, list[str]]] = []
 
     def stream(self, hf_repo, data_files, revision=None):
@@ -70,9 +83,18 @@ class FakeSource:
         role = "eval" if any(THUN_TEST in f for f in data_files) else "train"
         for i in range(self.per_role.get(role, 0)):
             empty = self.empty_every is not None and i % self.empty_every == 0
+            xml = EMPTY_XML if empty else PAGE_XML
+            if self.long_page_chars and i == 0 and not empty:
+                xml = PAGE_XML.replace("Item ontfaen van Janne",
+                                       "w" * self.long_page_chars)
+            if self.short_page_chars and i == 1 and not empty:
+                # Both lines, so the *page* sample is short too — the real short
+                # samples are folio numbers on an otherwise empty leaf.
+                xml = (PAGE_XML.replace("Item ontfaen van Janne", "w" * self.short_page_chars)
+                               .replace("van der Straten", "w" * self.short_page_chars))
             yield {
                 "image": {"bytes": _jpeg_bytes(), "path": f"{i}.jpg"},
-                "xml_content": EMPTY_XML if empty else PAGE_XML,
+                "xml_content": xml,
                 "filename": f"{role}_{i}.jpg",
                 "project_name": THUN_TRAIN if role == "train" else THUN_TEST,
             }
@@ -143,10 +165,18 @@ def store(settings: TrainerSettings) -> JobStore:
 
 
 def request_with(**kw) -> TrainRequest:
+    """A request for the pipeline tests.
+
+    ``force=True`` by default: these fixtures run two or three fake pages through
+    the whole lifecycle, which is far below what the step-count guard (#72) will
+    let through — and rightly so. The guard has its own suite
+    (tests/test_training_convergence.py) and its own pipeline tests below; these
+    are about the stages, so they opt out rather than pretending to be real runs.
+    """
     dataset = kw.pop("dataset", DatasetSpec(
         hf_repo=REPO, train_projects=[THUN_TRAIN], eval_projects=[THUN_TEST]))
     return TrainRequest(engine="vllm", model_id=kw.pop("model_id", "qwen3vl-thun-v1"),
-                        dataset=dataset, **kw)
+                        dataset=dataset, force=kw.pop("force", True), **kw)
 
 
 def run_pipeline(store, settings, source, runner, request=None):
@@ -252,10 +282,18 @@ def test_commands_use_the_vlm_venv_and_the_compiled_jsonl(store, settings):
 
     train = runner.command("train")
     assert train[0] == expected_python
-    assert train[train.index("--train-jsonl") + 1] == str(data / "train.jsonl")
-    assert train[train.index("--val-jsonl") + 1] == str(data / "val.jsonl")
     assert train[train.index("--base-model") + 1] == "Qwen/Qwen3-VL-8B-Instruct"
-    assert train[train.index("--data-root") + 1] == str(store.paths(job.id).root)
+
+    # The corpus is stored in the artefact cache as compile finishes, and the run
+    # that filled it trains against it there — one path, exercised on the run
+    # that builds an entry as well as on the runs that hit it (#109). What has to
+    # hold either way is that --data-root is the directory the manifests resolve
+    # against, not the job.
+    train_jsonl = Path(train[train.index("--train-jsonl") + 1])
+    val_jsonl = Path(train[train.index("--val-jsonl") + 1])
+    assert train_jsonl.name == "train.jsonl" and val_jsonl.parent == train_jsonl.parent
+    assert train[train.index("--data-root") + 1] == str(train_jsonl.parent.parent)
+    assert (train_jsonl.parent.parent / "data" / "pages").is_dir()
 
     test = runner.command("test")
     assert test[0] == expected_python
@@ -279,7 +317,10 @@ def test_checkpoints_go_to_local_scratch_not_the_job_dir(store, settings):
 def test_child_env_pins_the_training_gpu(store, settings):
     runner = FakeRunner()
     run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), runner)
-    assert runner.env == {"CUDA_VISIBLE_DEVICES": "1"}  # GPU 0 (RAG) untouched
+    assert runner.env["CUDA_VISIBLE_DEVICES"] == "1"  # GPU 0 (RAG) untouched
+    # Fragmentation, not the fix for it: 5.72 GiB were reserved-but-unallocated at
+    # the OOM in #110, and the hand-run sweep on the box already set this.
+    assert runner.env["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
 
 
 # ── failure modes: nothing may report success it did not earn ───────────────
@@ -384,3 +425,290 @@ def test_a_failed_job_registers_nothing(store, settings):
                  FakeRunner(fail_on="train"))
     assert load_overlay(settings.overlay_path) == []
     assert not settings.trained_root.joinpath("qwen3vl-thun-v1").exists()
+
+
+# ── samples too long to afford (#110) ───────────────────────────────────────
+def test_an_unaffordable_page_is_dropped_at_compile(store, settings):
+    # One page of 32,477 characters tokenized to 14,411 tokens and asked
+    # cross-entropy for 8.16 GiB in a single allocation, killing
+    # 20260908T101611Z-qwen3vl-german-pages-v1 at step 785 of 2355, 11h24m in.
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, long_page_chars=32477),
+                       FakeRunner(), request)
+
+    assert job.status == "completed", job.error
+    samples = list(read_jsonl(store.paths(job.id).data / "train.jsonl"))
+    assert len(samples) == 3  # the fourth was the long one
+    assert all(len(s.text) <= VLM_MAX_SAMPLE_CHARS["page"] for s in samples)
+
+
+def test_the_validation_side_is_filtered_too(store, settings):
+    # The page that killed the German run was in val, not train — it died in the
+    # eval loop at 927/1396.
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, long_page_chars=32477),
+                       FakeRunner(), request)
+    val = list(read_jsonl(store.paths(job.id).data / "val.jsonl"))
+    assert all(len(s.text) <= VLM_MAX_SAMPLE_CHARS["page"] for s in val)
+
+
+def test_the_drop_and_the_outlier_land_on_the_job_record(store, settings):
+    # Measured before the drop: the record has to show what the corpus contained,
+    # not what survived. The outlier is the finding.
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, long_page_chars=32477),
+                       FakeRunner(), request)
+
+    assert job.progress.long_samples == 2  # one per role
+    assert job.progress.max_sample_chars >= 32477
+
+
+def test_an_ordinary_corpus_loses_nothing(store, settings):
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}),
+                       FakeRunner(), request)
+    assert job.progress.long_samples == 0
+    assert job.progress.max_sample_chars == len("Item ontfaen van Janne\nvan der Straten")
+
+
+# ── recovery snapshots (#119) ───────────────────────────────────────────────
+#
+# `20260909T190659Z-qwen3vl-german-pages-v2` trained 8 h 50 m, reached step 628 of
+# 2352, died in a network outage, and left an empty checkpoint directory:
+# `save_strategy="epoch"` with `epochs: 1` is one write, after the last step.
+
+from vlm_train_svc.train_qlora import recovery_interval  # noqa: E402
+
+
+def test_the_german_corpus_run_lands_on_the_floor():
+    """The real numbers, measured on `…-german-pages-v3`: 12,538 train samples at
+    batch 1 x accumulate 16 is **784 steps per epoch** — not the 2,352 on the
+    progress bar, which is the three-epoch ceiling from `max_epochs`. 784 // 20 is
+    39, below the floor, so for this corpus the floor decides and a snapshot lands
+    every 50 steps, about every 45 minutes.
+
+    The fraction earns its keep on a longer epoch, not this one."""
+    assert recovery_interval(784) == 50
+    assert 784 // 20 < 50          # the fraction is not what is binding here
+
+
+def test_the_fraction_binds_once_an_epoch_is_long_enough():
+    assert recovery_interval(2352) == 117
+    assert recovery_interval(4000) == 200
+
+
+def test_a_short_epoch_gets_none():
+    """A snapshot at step 50 of 52 is written work that saves nothing — the
+    Trainer's own epoch-end save is a few steps away."""
+    assert recovery_interval(52) == 0
+    assert recovery_interval(99) == 0
+
+
+def test_the_interval_is_bounded_at_both_ends():
+    assert recovery_interval(100) == 50           # floor, not 100//20 == 5
+    assert recovery_interval(1_000_000) == 500    # ceiling
+
+
+def test_it_scales_with_the_epoch_rather_than_being_a_constant():
+    """The whole defect: a constant that suits a 52-step smoke run is worthless on
+    a 2,352-step corpus run."""
+    assert recovery_interval(4000) > recovery_interval(2000) > recovery_interval(1000)
+
+
+# ── samples too short to teach anything but stopping ────────────────────────
+def test_a_short_training_sample_is_dropped_when_a_floor_is_set(store, settings):
+    request = request_with(params=VlmTrainParams(granularity="page", min_train_chars=8))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, short_page_chars=3),
+                       FakeRunner(), request)
+
+    assert job.status == "completed", job.error
+    train = list(read_jsonl(store.paths(job.id).data / "train.jsonl"))
+    assert all(len(s.text) >= 8 for s in train)
+    assert job.progress.short_samples == 1
+
+
+def test_the_validation_side_keeps_its_short_samples(store, settings):
+    # The opposite of the long filter, and deliberately so. Dropping the short
+    # tail from validation would remove the samples the model finds easiest and
+    # flatter the CER, and would make it incomparable with every earlier run.
+    request = request_with(params=VlmTrainParams(granularity="page", min_train_chars=8))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, short_page_chars=3),
+                       FakeRunner(), request)
+
+    val = list(read_jsonl(store.paths(job.id).data / "val.jsonl"))
+    assert any(len(s.text) < 8 for s in val), "validation must not be filtered"
+
+
+def test_no_floor_by_default_keeps_every_short_sample(store, settings):
+    request = request_with(params=VlmTrainParams(granularity="page"))
+    job = run_pipeline(store, settings,
+                       FakeSource({"train": 4, "eval": 2}, short_page_chars=3),
+                       FakeRunner(), request)
+
+    train = list(read_jsonl(store.paths(job.id).data / "train.jsonl"))
+    assert any(len(s.text) < 8 for s in train)
+    assert job.progress.short_samples in (0, None)
+
+
+def test_a_floor_that_empties_the_training_set_fails_the_job(store, settings):
+    # Better a failed compile than a run that trains on nothing and reports a
+    # CER against a validation set it never saw a comparable sample of.
+    request = request_with(params=VlmTrainParams(granularity="page",
+                                                 min_train_chars=100_000))
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}),
+                       FakeRunner(), request)
+    assert job.status == "failed"
+    assert "min_train_chars" in (job.error or "")
+
+
+# ── reusing a compiled corpus (#109) ─────────────────────────────────────────
+
+def _corpus_of(runner) -> Path:
+    """Where the train command says the corpus is."""
+    train = runner.command("train")
+    return Path(train[train.index("--train-jsonl") + 1]).parent
+
+
+def test_the_compiled_corpus_is_stored_in_the_cache(store, settings):
+    """The backend was held out of the cache on a reason that expired.
+
+    "The VLM backend's JSONL samples name image paths inside the job directory"
+    stopped being true when #117 gave the trainer an explicit --data-root: the
+    samples have named data/pages/<file>.jpg relative to that root ever since.
+    The docstring outlived the reason, and every page-level run re-materialized
+    36 GB — v4 paid 80 minutes for it three times on 15.09.2026.
+    """
+    runner = FakeRunner()
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), runner)
+    corpus = _corpus_of(runner)
+
+    assert corpus != store.paths(job.id).data          # it trained out of the cache
+    assert corpus.name == "data"                       # …and the layout survived
+    assert (corpus / "pages").is_dir()
+    assert job.progress.artefact and "built by this job" in job.progress.artefact
+
+
+def test_a_second_job_skips_prepare_and_compile(store, settings):
+    """The point of the whole thing: the same selection is materialized once."""
+    first = FakeRunner()
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), first)
+
+    second = FakeRunner()
+    source = FakeSource({"train": 4, "eval": 2})
+    job = run_pipeline(store, settings, source, second)
+
+    assert job.status == "completed", job.error
+    logs = {s.name: (s.log or "") for s in job.stages}
+    assert logs["prepare"].startswith("skipped:") and logs["compile"].startswith("skipped:")
+    assert _corpus_of(second) == _corpus_of(first)
+    assert "reused" in (job.progress.artefact or "")
+
+
+def test_a_reused_corpus_is_what_data_root_points_at(store, settings):
+    """A hit that trained against the cache but resolved images against the job
+    would read every sample from a directory that was never written."""
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+
+    runner = FakeRunner()
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), runner)
+    for stage in ("train", "test"):
+        cmd = runner.command(stage)
+        root = Path(cmd[cmd.index("--data-root") + 1])
+        assert root == _corpus_of(runner).parent
+        assert (root / "data" / "pages").is_dir()
+    # …and the job that reused it never materialized pages of its own. The
+    # directory may exist — the job lays out its own data/ regardless — but
+    # nothing was written into it, which is the 36 GB and the 80 minutes.
+    own_pages = store.paths(job.id).data / "pages"
+    assert not own_pages.exists() or not any(own_pages.iterdir())
+
+
+def test_a_different_granularity_does_not_share_a_corpus(store, settings):
+    """compile reads ``params.granularity``, so the key has to carry it.
+
+    Serving a page corpus to a line run would train on whole scans labelled as
+    lines, and nothing downstream would notice.
+    """
+    from atr_serving.training.contracts import VlmTrainParams
+
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+
+    other = FakeRunner()
+    job = run_pipeline(
+        store, settings, FakeSource({"train": 4, "eval": 2}), other,
+        request=request_with(params=VlmTrainParams(granularity="page")))
+    logs = {s.name: (s.log or "") for s in job.stages}
+    assert not logs["compile"].startswith("skipped:")
+    assert any((store.paths(job.id).data / "pages").iterdir())
+
+
+def test_the_sample_length_cap_is_part_of_the_key(store, settings):
+    """drop_long_samples runs inside compile, so a corpus is cut to a cap.
+
+    Reusing one built under a different cap would train on a selection nobody
+    asked for — and #110 is what that cap is for.
+    """
+    from atr_serving.training.contracts import VLM_MAX_SAMPLE_CHARS, VlmTrainParams
+    from vlm_train_svc.runner import Pipeline
+
+    pipeline = Pipeline(store, settings, runner=FakeRunner(),
+                        source=FakeSource({"train": 4, "eval": 2}))
+    job = store.create(request_with())
+    line = pipeline._cache_key(job)
+    assert line.describes["extra"]["granularity"] == "line"      # the params default
+    assert line.describes["extra"]["max_sample_chars"] == VLM_MAX_SAMPLE_CHARS["line"]
+    assert "min_train_chars" in line.describes["extra"]
+
+    page = store.create(request_with(params=VlmTrainParams(granularity="page")))
+    assert pipeline._cache_key(page).digest != line.digest
+
+
+# ── which code ran (#147) ───────────────────────────────────────────────────
+def _pin_code(monkeypatch, created: str, running: str) -> None:
+    from atr_serving.training import codeversion, runner_base
+    from atr_serving.training.contracts import CodeVersion
+    monkeypatch.setattr(codeversion, "current_code", lambda: CodeVersion(commit=created, dirty=False))
+    monkeypatch.setattr(runner_base, "current_code", lambda: CodeVersion(commit=running, dirty=False))
+
+
+def test_the_job_and_every_stage_record_their_code(store, settings, monkeypatch):
+    _pin_code(monkeypatch, "c" * 40, "c" * 40)
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+
+    assert job.status == "completed", job.error
+    assert job.code.commit == "c" * 40
+    assert [s.code.commit for s in job.stages] == ["c" * 40] * len(job.stages)
+    # and it survives the round trip through job.json
+    assert store.load(job.id).stages[-1].code.commit == "c" * 40
+
+
+def test_a_stage_on_newer_code_is_recorded_and_warned_about(store, settings, monkeypatch):
+    from loguru import logger
+    _pin_code(monkeypatch, "a" * 40, "b" * 40)
+    seen: list[str] = []
+    sink = logger.add(lambda m: seen.append(str(m)), level="WARNING")
+    try:
+        job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    finally:
+        logger.remove(sink)
+
+    assert job.status == "completed", job.error  # drift is information, not failure
+    assert job.code.commit == "a" * 40
+    assert {s.code.commit for s in job.stages} == {"b" * 40}
+    assert any("stage test" in m and "aaaaaaaaaaaa" in m and "bbbbbbbbbbbb" in m for m in seen)
+
+
+def test_the_published_metadata_names_the_evaluator_commit(store, settings, monkeypatch):
+    _pin_code(monkeypatch, "a" * 40, "b" * 40)
+    job = run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+
+    meta = json.loads((settings.trained_root / job.request.model_id / "metadata.json").read_text())
+    assert meta["code"]["created"]["commit"] == "a" * 40
+    assert meta["code"]["test"]["commit"] == "b" * 40
+    # register writes metadata.json while its own stage is still running
+    assert "register" in meta["code"]

@@ -1,0 +1,1119 @@
+# Training kraken models on asterAIx
+
+> **Retired on this box (16.09.2026).** Training runs on asteraix (130.92.59.242) in
+> [training-atr-models](https://github.com/thodel/training-atr-models); this repo's
+> in-repo trainer and its `atr-train` unit are no longer installed or started here
+> (#137, #139). What follows describes the retired setup and is kept as history.
+
+Operator runbook for the training subsystem. Full context — architecture,
+design decisions, measured numbers, open issues — lives in
+[`TRAINING_PLAN.md`](TRAINING_PLAN.md). Read that first; this document is the
+step-by-step for the person sitting at the box.
+
+Everything here assumes the serving stack is already running (`docs/DEPLOY.md`
+§1–§7). The training service (`atr-train`) binds `127.0.0.1:8204` and the
+gateway proxies `/train/*` to it, so nothing opens a new port.
+
+---
+
+## 1. Build the training venv
+
+`atr-train` needs **its own venv** because kraken's dependencies (torch, pyarrow,
+`datasets`) cannot share a tree with the serving engines. Build it once:
+
+```bash
+# Free space check first — the venv itself is ~6 GB
+df -h /
+
+# TMPDIR must be local disk (the CIFS share breaks shutil.rmtree mid-compile)
+export TMPDIR=/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/tmp
+mkdir -p "$TMPDIR"
+
+# pip cache is on / and has been cleared before; never let pip stage to the share
+PIP_NO_CACHE_DIR=1 bash scripts/make_venvs.sh kraken-train
+```
+
+> **If `make_venvs.sh` reports a MISMATCH for `kraken`:** the downgrade failed with
+> `EPERM` because `TMPDIR` was on the CIFS share, and the venv kept the wrong
+> version. Move `TMPDIR` to local disk and re-run, or:
+> ```bash
+> rm -rf .venvs/kraken-train
+> PIP_NO_CACHE_DIR=1 bash scripts/make_venvs.sh kraken-train
+> ```
+
+Verify it built:
+
+```bash
+bash scripts/check_venvs.sh
+```
+
+### 1b. VLM backend (optional, not needed for kraken-only training)
+
+Only needed if you want to fine-tune Qwen3-VL models (the `vllm` engine).
+Skipping it is fine — kraken jobs answer 503 from the health endpoint's
+`backends.vllm.available: false` and proceed normally.
+
+```bash
+PIP_NO_CACHE_DIR=1 bash scripts/make_venvs.sh vlm-train
+systemctl --user restart atr-train
+curl -s localhost:8204/health | jq .backends
+```
+
+---
+
+## 2. Install the training service unit
+
+```bash
+bash scripts/install_user_units.sh        # installs atr-train alongside the engines
+systemctl --user enable --now atr-train
+```
+
+Confirm it is up:
+
+```bash
+curl -s localhost:8204/health | python -m json.tool
+# expected: {"status":"up","backends":{"kraken":{"available":true,"version":"7.0.2"},...}}
+```
+
+Logs:
+
+```bash
+journalctl --user -u atr-train -f
+```
+
+---
+
+## 3. Submit a training job
+
+The API is the same `X-API-Key` and gateway port as recognition, routed to
+`/train/*` on `:8204`. The minimal request — kraken+, Thun demo dataset, all
+defaults:
+
+```bash
+curl -s -X POST http://localhost:8200/train/jobs \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "kraken-thun-missiven-v1",
+    "dataset": {
+      "hf_repo": "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",
+      "train_projects": ["GT_Thun-Training_(TEST-DEMO)"],
+      "eval_projects": ["GT_Thun-Test_(DEMO_TEST)"]
+    }
+  }' | python -m json.tool
+```
+
+The response is `202` with the job id:
+
+```json
+{
+  "id": "20260810T143000Z-kraken-thun-missiven-v1",
+  "model_id": "kraken-thun-missiven-v1",
+  "status": "queued",
+  "created_at": "2026-08-10T14:30:00Z"
+}
+```
+
+### 3a. Job with non-default params (full options)
+
+```json
+{
+  "model_id": "kraken-thun-missiven-v2",
+  "engine": "kraken",
+  "dataset": {
+    "hf_repo": "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",
+    "train_projects": ["GT_Thun-Training_(TEST-DEMO)"],
+    "eval_projects": ["GT_Thun-Test_(DEMO_TEST)"],
+    "max_pages": 200,
+    "granularity": "page"
+  },
+  "base_model": "10.5281/zenodo.7051645",
+  "params": {
+    "batch_size": 16,
+    "resize": "union",
+    "schedule": "cosine",
+    "lrate": 0.0001,
+    "epochs": 50,
+    "augment": true,
+    "normalization": "NFD",
+    "weights_format": "coreml",
+    "seed": 42
+  }
+}
+```
+
+> **Do not copy the defaults onto a small corpus.** The `spec`/`batch_size: 256`
+> recipe in `docs/TRAINING_PLAN.md` §3a was written for the ~18 M-line corpus and is
+> wrong by three orders of magnitude for a few thousand lines. The Thun set above is
+> **1,898 training lines** (2,087 transcribed, 189 held out for eval): at
+> `batch_size: 256` that is **8 batches per epoch, 400 optimizer steps over the whole
+> run**, for a 15.2 M-parameter network from random weights. (This run was
+> configured `1cycle`, and the sentence here used to add "and `1cycle` spends all 400
+> ramping up and annealing back down". It did not: kraken sizes the cycle in samples,
+> so the rate sat frozen at `lrate/25` — `docs/TRAINING_PLAN.md` §9c, #96. The step
+> count is what killed it either way.) The result was
+> `kraken-thun-missiven-v1` at **CER 0.98** with a nearly empty output — CTC blank
+> collapse. (`insertions` here are characters *missing* from the hypothesis, inverted
+> from standard ASR usage; see `docs/TRAINING_PLAN.md` §9a.)
+>
+> **The trainer now enforces this.** A configuration whose line count and batch
+> size yield too few optimizer steps is refused between `prepare` and `compile`,
+> before any GPU time is spent, with the arithmetic and the remedies in
+> `job.error` (#72). A deliberate smoke test can pass `"force": true`; the
+> override is recorded on the job so its CER is never read as an ordinary one.
+>
+> Two rules follow, and this example applies both: **fine-tune rather than train from
+> scratch below ~100 K lines** (`base_model` + `resize: "union"`), and **scale
+> `batch_size` to the corpus**. Before believing any CER, run
+> `scripts/audit_eval_material.py` on the job — it needs no GPU and tells you whether
+> the *material* is sound, which for the Thun split it is (median 12.15 px per
+> reference character, 98.4 % in band). See README §"the first three runs were
+> under-configured" and `docs/TRAINING_PLAN.md` §9a.
+
+### 3a-bis. TrOCR (`"engine": "trocr"`)
+
+A third backend, added in #44. It fine-tunes a TrOCR base on line crops — the
+same `prepare` stage, the same job envelope, its own venv (`.venvs/trocr-train`)
+because the serving TrOCR engine and this one pin `transformers` differently.
+
+```bash
+bash scripts/make_venvs.sh trocr-train
+```
+
+The package is `trocr_train_svc`, not `trocraft_train_svc`: the naming is
+recorded in that package's docstring, and the argv builders that spawn it live
+in `src/atr_serving/training/trocr_cmd.py` (#43).
+
+### 3b. Fine-tuning from a Zenodo base model
+
+```json
+{
+  "model_id": "kraken-thun-missiven-v3",
+  "dataset": {
+    "hf_repo": "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",
+    "train_projects": ["GT_Thun-Training_(TEST-DEMO)"],
+    "eval_projects": ["GT_Thun-Test_(DEMO_TEST)"]
+  },
+  "base_model": "10.5281/zenodo.1234567",
+  "params": {
+    "resize": "union",
+    "epochs": 20
+  }
+}
+```
+
+`base_model` accepts a registry id (a model already served by this box) or a
+bare Zenodo record id (`10.xxxx/zenodo.NNNNN`).
+
+---
+
+## 4. Monitor a running job
+
+### 4a. Job record
+
+```bash
+JOB_ID="20260810T143000Z-kraken-thun-missiven-v1"
+curl -s "http://localhost:8200/train/jobs/${JOB_ID}" \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)" | python -m json.tool
+```
+
+The `status` field is one of:
+
+| status | meaning |
+|---|---|
+| `queued` | waiting for the GPU (one job at a time) |
+| `preparing` | downloading + materializing pages |
+| `compiling` | `ketos compile` building `.arrow` datasets |
+| `training` | `ketos train` running epochs |
+| `testing` | `ketos test` scoring the model |
+| `registering` | promoting weights + writing overlay |
+| `completed` | done, model is registered |
+| `failed` | something went wrong; see `error` |
+| `cancelled` | cancelled by request |
+
+The `stage` field names the current stage; `progress` has per-stage numbers:
+
+```json
+{
+  "status": "training",
+  "stage": "train",
+  "progress": {
+    "epoch": 7,
+    "epochs": 50,
+    "val_accuracy": 0.932
+  }
+}
+```
+
+### 4b. Per-epoch validation curve
+
+Scraped from checkpoint filenames (kraken's rich progress bar loses its values
+when piped to a log file; #38/#51):
+
+```bash
+curl -s "http://localhost:8200/train/jobs/${JOB_ID}/curve" \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)"
+# → {"epochs":[1,2,3,...],"val_accuracy":[0.881,0.912,0.924,...]}
+```
+
+### 4c. Live stage log
+
+```bash
+# all lines
+curl -s "http://localhost:8200/train/jobs/${JOB_ID}/log?stage=train" \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)"
+
+# last 50 lines
+curl -s "http://localhost:8200/train/jobs/${JOB_ID}/log?stage=train&lines=50" \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)"
+```
+
+Or on the box directly:
+
+```bash
+journalctl --user -u atr-train --since "5 minutes ago" | grep -i 'train\|error\|warn'
+tail -f ~/atr-cache/training/jobs/${JOB_ID}/logs/train.log
+```
+
+---
+
+## 5. The job directory layout
+
+All job state lives under **`~/atr-cache/training/jobs/<job_id>/`** (set by
+`ATR_TRAIN_JOBS_ROOT` in `.env`):
+
+```
+<job_id>/
+  job.json              TrainJob record (single source of truth)
+  data/
+    pages/              materialized JPG + PageXML files
+    pages_train.lst     ketos manifest (path per line)
+    pages_val.lst
+    train.arrow         compiled training set   ┐ absent when the artefact cache
+    val.arrow           compiled validation set ┘ is on — see §8b-bis
+    train_bin.lst       single-line manifest → train.arrow, or → the cache
+    val_bin.lst
+  checkpoints/
+    best_0.9321.mlmodel  ← promoted to trained/ by the register stage
+    checkpoint_07-0.9245.ckpt   (top 10 kept)
+    ...
+  model/                 created by register stage if promoted
+    metadata.json
+  logs/
+    prepare.log
+    compile.log
+    train.log
+    test.log
+    register.log
+```
+
+### What to keep vs. delete
+
+| artifact | keep? | reason |
+|---|---|---|
+| `job.json` | yes | record of what ran; needed for reconciliation on restart |
+| `data/pages/` | no | can be re-materialized from the hub; delete after register |
+| `data/*.arrow` | no | re-compilable from pages; delete after register. With the artefact cache on (§8b-bis) they are not here at all — they were moved to `~/atr-cache/artefacts/`, which this cleanup must **not** touch |
+| `checkpoints/` | no (only best.mlmodel) | large; re-trainable |
+| `model/` (promoted) | yes | the trained weights |
+| `logs/` | yes | needed for post-mortem on failures |
+
+After a completed run, clean up the bulk:
+
+```bash
+rm -rf ~/atr-cache/training/jobs/<job_id>/data
+# keep checkpoints/ until the best.mlmodel is promoted
+rm -rf ~/atr-cache/training/jobs/<job_id>/checkpoints
+```
+
+Or delete the whole job:
+
+```bash
+curl -s -X DELETE "http://localhost:8200/train/jobs/${JOB_ID}" \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)"
+# → {"deleted": true}
+```
+
+This leaves the **registered model** in `~/atr-cache/training/trained/<model_id>/`
+intact. To also remove that:
+
+```bash
+rm -rf ~/atr-cache/training/trained/<model_id>
+```
+
+---
+
+## 6. Registering and promoting a model
+
+The **register stage** copies `checkpoints/best_*.mlmodel` to
+`~/atr-cache/training/trained/<model_id>/`, writes `metadata.json`, and appends
+a `ModelSpec` to `config/models.local.yaml` (the gitignored overlay).
+
+A registered model is **not immediately advertised**. The promotion gate (#36)
+keeps it disabled until it has successfully transcribed a page through the
+gateway — proving it can actually serve. To trigger promotion manually:
+
+```bash
+# Point a known image at the model
+curl -s -X POST http://localhost:8200/recognize \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)" \
+  -F image=@data/test/some_page.jpg \
+  -F model=kraken-thun-missiven-v1 | python -m json.tool
+
+# Check its promoted flag
+curl -s "http://localhost:8200/models/kraken-thun-missiven-v1" \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)"
+```
+
+If it transcribed correctly, `promoted: true` flips to `true` and the model
+appears in `GET /models`.
+
+### Un-registering a model
+
+Edit `config/models.local.yaml` directly. To disable without removing:
+
+```yaml
+models:
+  - id: kraken-thun-missiven-v1
+    enabled: false
+    # ...
+```
+
+Or delete the overlay entry entirely and `rm -rf ~/atr-cache/training/trained/<model_id>/`.
+
+---
+
+## 7. The disk story — understanding what a job will materialize
+
+The GT dataset (`dh-unibe/image-text_medieval-scripts_xiv-xv-xvi`) is **~6.6 TB**
+across 694 per-project parquet directories. Jobs always select by `data_files`
+glob — `train_projects` names the directories, and only those are downloaded.
+
+To estimate what a job will pull before starting it:
+
+```bash
+# Dry-run — resolves the spec against the hub, prints the data_files globs,
+# and reports the projected page + byte counts WITHOUT downloading anything
+curl -s -X POST http://localhost:8200/train/jobs/dry-run \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "kraken-thun-missiven-v1",
+    "dataset": {
+      "hf_repo": "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",
+      "train_projects": ["GT_Thun-Training_(TEST-DEMO)"],
+      "eval_projects": ["GT_Thun-Test_(DEMO_TEST)"]
+    }
+  }' | python -m json.tool
+```
+
+Output:
+
+```json
+{
+  "valid": true,
+  "data_files": [
+    "data/train/GT_Thun-Training_(TEST-DEMO)/*.parquet",
+    "data/train/GT_Thun-Test_(DEMO_TEST)/*.parquet"
+  ],
+  "projected_train_pages": 116,
+  "projected_eval_pages": 7,
+  "projected_size_mb": 123
+}
+```
+
+The trainer also enforces a **50 GB free-space guard** after projecting the job's
+output (pages: ~2 MB each, plus compiled `.arrow` datasets). If the box is tight:
+
+```bash
+df -h /
+```
+
+A job that exceeds the guard rejects at submit time with a clear error, not an
+OOM 11 hours in.
+
+---
+
+## 8. Cancel a running job
+
+```bash
+curl -s -X POST "http://localhost:8200/train/jobs/${JOB_ID}/cancel" \
+  -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)" | python -m json.tool
+# → {"id": "...", "status": "cancelled", ...}
+```
+
+This sends `SIGTERM` to the process group. The job record is moved to
+`cancelled` and the job directory is left on disk for inspection.
+
+---
+
+## 8b. Corpus-scale runs: chunking (#39)
+
+`prepare` normally materializes every selected page before `compile` runs, so
+peak disk is the whole selection. That is fine for the 238-page test case and
+impossible for the full corpus — 548,322 pages is **~6.96 TB** of pages on top of
+a ~6.6 TB hub cache, on a share with ~6.2 TB free.
+
+Set `ATR_TRAIN_CHUNK_PAGES` (default `0` = off) and the kraken backend
+materializes, compiles and **discards** the train side a chunk at a time, so peak
+page-disk is one chunk instead of the selection:
+
+```bash
+systemctl --user set-environment ATR_TRAIN_CHUNK_PAGES=5000
+systemctl --user restart atr-train
+```
+
+Each chunk becomes its own `train_<k>.arrow`, and `train_bin.lst` lists them all —
+`ketos train -t` reads a manifest of binary datasets as one training set, so the
+chunks never have to be merged. A chunk's pages are deleted only *after* its
+arrow exists and is non-empty, so a failure leaves the pages that caused it.
+
+**The disk guard used to make this unreachable (#85).** `verify_dataset_spec`
+sized the whole parquet selection and refused anything over `min_free_disk_gb`
+*regardless of how the trainer was configured* — but `ATR_TRAIN_CACHE_DATASETS`
+defaults to `false`, so those shards are never all resident. It measured a
+download that does not happen, and named the two remedies that do not help
+("lower max_pages or free space"). The refusal now depends on what actually
+bounds disk:
+
+| configuration | what lands on disk | verdict |
+|---|---|---|
+| caching (`ATR_TRAIN_CACHE_DATASETS=true`) | the shards | must fit |
+| streaming, **unchunked** | the materialized pages, unbounded | refused — 461 K pages reached ~526 GB over 23 h |
+| streaming, **chunked**, kraken | one chunk | allowed at any selection size |
+| streaming, chunked, **vllm/trocr** | every page — they do not chunk | refused |
+
+So a corpus-scale run needs *both* streaming (the default) and
+`ATR_TRAIN_CHUNK_PAGES` set. Without the second, the guard refuses and tells you
+which variable to set.
+
+**Dataset cards overstate their size, so measure the selection (#85).** The card
+for `rats-und-richtebuecher_xv-xvi` reports `num_bytes: 70729250850` — 65.9 GB —
+while `get_paths_info` over its 37 selected parquet shards returns **10.4 GB**.
+Same for `bullinger-autoren` (101.7 GB claimed, 7.9 GB measured) and `aaeb-xiv-xvii`
+(51.8 claimed, 6.8 measured). Plan disk from the shard sizes, never from the card,
+and treat any figure derived from `dataset_info` as an upper bound of unknown
+tightness.
+
+**The size lookup is batched, and an unknown size is not a small one (#85).**
+`get_paths_info` answers 413 Payload Too Large for a large path list —
+`koenigsfelden-charters-post-1500` selects 1,189 shards — and that failure used to
+become `needed_gb = 0.0`, which passes every comparison. The guard was switched
+off exactly where the selection was biggest. Paths are now sized 200 at a time,
+and a lookup that still fails propagates: the route reports
+`{valid: true, checked: false}`, so a submission is queued with
+`dataset_verified: false` rather than being told it is fine.
+
+**`--workers` scales with the manifest (#85).** Each `ketos compile` worker
+decodes pages independently, so peak RSS grows with `workers × page size`. It was
+a fixed 8, and `20260808T183111Z` compiled a single 461,586-page manifest with 8
+of them before being SIGKILLed after 1 h 51 m. Above 20 K pages the count now
+tapers inverse-linearly, floor 1, unchanged below — `compile_workers(8, 461_586)`
+is 1. The OOM killer is the leading explanation for that kill but was never
+confirmed: `journalctl -k` implies `-b`, and the system journal needs privileges.
+
+Two limits worth knowing before you rely on it:
+
+- **It needs explicit `eval_projects`.** The validation pages cannot come from
+  splitting a stream that is being consumed and discarded. A spec without them
+  falls back to materializing everything and logs why.
+- **Only the kraken backend does this.** The VLM and TrOCR backends compile by
+  cropping, and `supports_chunked_prepare` is False for them, so the setting is
+  ignored rather than half-applied. **The size guard knows this** (#85): a
+  corpus-scale `vllm` or `trocr` job is refused even with `ATR_TRAIN_CHUNK_PAGES`
+  set, because that setting buys it nothing. The capability is declared on
+  `Backend` — the supervising service cannot read the runner's ClassVar, since
+  each runner lives in its own venv — and `tests/test_training_backends.py` pins
+  the two together.
+
+Also relevant at this scale: ~548 K pages is ~8 M lines, and at the throughput
+measured on the box one epoch is roughly **15 hours**. A full-corpus run is a
+multi-day job, and the step-count guard (#72) will hold you to a configuration
+that can actually converge at that size.
+
+## 8b-bis. Reusing a compiled corpus across jobs (#109)
+
+Between 24 August and 5 September the same four-dataset German corpus was
+compiled **eight times** — 12,301 pages, 325,768 lines, ~41 GB of arrow, about
+2½ hours each. Five of those runs differed from their predecessor only in a
+hyperparameter the *train* stage reads. The pair on 5 September is the plainest
+case: two jobs twelve minutes apart, identical page and line counts, the second
+rebuilding all 41 GB before failing in the same place as the first.
+
+The trainer now keys the compiled corpus on **what was selected**, and a job
+whose selection has been compiled before skips `prepare` and `compile` entirely.
+
+### What is in the key
+
+| in the key | not in the key |
+|---|---|
+| `hf_repo`, `revision`, `split` | `epochs`, `batch_size`, `lr`, `spec` |
+| `train_projects`, `eval_projects` (as **sets**) | `base_model`, `resize` |
+| `partition`, `seed`, `max_pages`, `granularity` | `model_id`, `device`, `force` |
+| the engine, and `chunk_pages` | everything else the train stage reads |
+
+Project order inside one dataset does not matter — a selection is a set. The
+**order of the datasets does**: a multi-dataset run pools pages with a
+per-dataset index offset, so reordering the list changes which page gets which
+index and therefore how the seeded split falls.
+
+Only **kraken** reuses artefacts. A ketos binary dataset embeds the line images it
+was compiled from, so an `.arrow` can be read from anywhere. The VLM backend's
+JSONL samples name image paths inside the job directory and do not survive being
+moved; it compiles every time until that is addressed.
+
+### Where it lives, and what it costs
+
+`~/atr-cache/artefacts/<key>/`, deliberately **not** under `jobs_root` — the job
+directory is the wrong home for something meant to outlive the job, and cleaning
+up finished jobs (which is how 221 GB of dead arrows were removed on 2026-09-08)
+must not take the cache with it.
+
+The arrows **end up there, not in the job**: after `compile`, even the run that
+built them reads them from the cache, and `jobs/<id>/data/` keeps only the two
+`*_bin.lst` manifests pointing at it. They are copied across and the originals
+deleted afterwards, rather than moved — a move that failed partway would leave a
+job holding manifests for arrows that are no longer anywhere.
+
+This is a cross-filesystem copy on asterAIx: `jobs_root` is on the CIFS share and
+the cache is on the system disk. The files are handed to the cache individually
+for exactly that reason — gathering them into a staging directory beside the job
+first would send 41 GB over SMB twice.
+
+`job.progress.artefact` records which artefact a run used and whether it built or
+reused it, so "which corpus did this run actually train on" stays answerable from
+the job record alone.
+
+### Staleness, and why `revision` matters
+
+`revision: null` means "whatever the dataset is today". An artefact built from
+such a spec is reusable for **7 days**; after that the job compiles again. A spec
+that names a revision is reusable indefinitely, because it cannot have moved.
+Pin the revision on anything you intend to compare runs against — a cache that
+ignored this would serve last month's pages while reporting a fresh compile,
+which is worse than the waste it replaces.
+
+### Eviction
+
+Automatic after every store, against `artefact_cache_max_gb` (default 100 — the cache sits on the box's
+system disk, not on the 12 TB share), least
+recently used first. **An entry used in the last 72 hours is never evicted**,
+whatever the budget says: nothing tracks which job holds which artefact, and a
+kraken run reads its arrow for the whole of training — going over budget beats
+deleting the corpus out from under a run that is three days into it. When that
+happens the log says so, and the cache sits over budget until the run ends.
+
+To look at it or prune by hand:
+
+```bash
+python scripts/artefact_cache.py                    # what is in there
+python scripts/artefact_cache.py --evict            # apply the budget now
+python scripts/artefact_cache.py --evict --max-gb 80
+python scripts/artefact_cache.py --drop 95b7c717    # remove one, by key prefix
+```
+
+### Turning it off
+
+```bash
+systemctl --user set-environment ATR_TRAIN_ARTEFACT_CACHE=false
+systemctl --user restart atr-train
+```
+
+Every failure path — an unreadable manifest, a missing arrow, a filesystem that
+refuses the move — logs a warning and compiles instead. A run that fails because
+of the cache would be strictly worse than one that was slow.
+
+## 8c. Choosing what to train on: `scripts/plan_corpus.py` (#87)
+
+dh-unibe publishes **32 datasets**. Picking among them by eye made two mistakes
+that only surface after a run has spent its time, and both are recorded here
+because they are easy to repeat.
+
+**The German material was in the wrong repo.** The hand-picked selection behind
+`20260814T192904Z` took 21 project directories out of
+`image-text_medieval-scripts_xiv-xv-xvi` and got **291 pages / 4,124 lines**. That
+dataset's card says: *"Geographical scope: Belgium, Languages: Flemish,
+Provenance: State Archives in Leuven."* Its German content is a rounding error.
+`image-text_rats-und-richtebuecher_xv-xvi` — 9,885 pages of Zurich council and
+court books, 1400–1550 — was never considered.
+
+**Datasets republish each other's projects.** `koenigsfelden-charters-post-1500`
+and `koenigsfelden-adhr-colmar` both publish the same `FRAD068_03G_SAINT_PIERRE_…`
+directories; `hgb-kf_mixture` republishes the `u-17_*` and `HGB_FT_M4_*` projects
+that `medieval-scripts` already carries; `aaeb-xiv-xvii-part-2` overlaps
+`aaeb-xiv-xvii` in 5 of its 8. Combined naively, a corpus trains twice on the same
+pages and reports itself larger than it is.
+
+```bash
+# Needs huggingface_hub and a login — the datasets are gated.
+.venvs/kraken-train/bin/python scripts/plan_corpus.py \
+    --org dh-unibe --period 1300 1600 --max-share 0.45 \
+    --cache /tmp/catalogue.json \
+    --eval-repo dh-unibe/image-text_rats-und-richtebuecher_xv-xvi \
+    --eval-project "Rats-undRichtebücher_MF_1_3574" \
+    --exclude-project "Rats-undRichtebücher_MF_1_3574" \
+    --json /tmp/corpus.json --engine vllm --model-id qwen3vl-medieval-german-v1
+```
+
+It scores each dataset on **period**, **language** and **script class** (document
+type as the proxy), deduplicates projects, caps any dataset that would dominate,
+and writes a submittable request. The scoring is a weighted **geometric mean**, so
+a disqualifying dimension vetoes rather than being outvoted — with a sum, the
+Flemish corpus scored 0.69 on `language 0.00` and took 40 % of the planned corpus.
+Script class outweighs period, which is what §9c measured.
+
+Held-out projects must be passed to **both** `--eval-project` and
+`--exclude-project`; `job_request` refuses a plan whose evaluation projects are
+also selected for training, and refuses an eval repo outside the corpus (an
+eval-only spec has no `train_projects`, which `hf_source` rejects).
+
+**Limitation: scoring is per dataset**, so a heterogeneous one is judged by its
+majority. `medieval-scripts` is rejected as Flemish even though it holds the Thun
+and Königsfelden German projects — which means `GT_Thun-Test` is not reachable as
+an eval set from a planned corpus, and comparability with the Thun chain in §9–9d
+breaks. Evaluation comes from held-out volumes of the corpus instead: in-domain,
+but a different yardstick.
+
+**Known gap:** `DatasetSpec.chunk_size` is documented in the contract and read by
+nothing. Chunking is driven solely by `ATR_TRAIN_CHUNK_PAGES` (§8b). Setting it in
+a request does nothing and says nothing.
+
+## 8c-bis. VLM: training as long as it improves (#88)
+
+kraken has had `--quit early --min-epochs --lag` all along, and it matters:
+`kraken-medieval-shard00-std` ran to **epoch 66** under a `--epochs 30` schedule
+and peaked at 21. The VLM backend used to take a fixed `epochs` count, so a run
+either stopped mid-improvement or burned hours after the plateau.
+
+```json
+"params": {
+  "epochs": 1,          // floor: never stop before this
+  "max_epochs": 8,      // ceiling: never run past it
+  "patience": 2,        // evaluations without improvement before stopping
+  "min_delta": 0.0001   // how much better counts as better
+}
+```
+
+`max_epochs` absent (the default) means the old behaviour: train exactly `epochs`
+and stop. `min_delta` defaults to `1e-4` rather than `0` on purpose — a loss that
+improves in the fifth decimal would otherwise read as improvement and the run
+would never stop on its own.
+
+Each epoch prints its verdict:
+
+```
+continuation @ epoch 4: continue: still improving (best epoch 4 at 0.51203, 0 since)
+continuation @ epoch 7: stop: no improvement over 0.0001 in 2 evaluation(s), patience=2 (best epoch 5 at 0.50811, 2 since)
+```
+
+**The decision uses validation loss, not CER.** Loss is already computed each
+epoch; a CER evaluation generates a transcription per sample at roughly a second
+each. The two can diverge — a model can keep reducing loss while its CER
+plateaus — so read the final CER from the `test` stage as always, and treat the
+continuation curve as a stopping heuristic rather than a quality measurement.
+
+## 8d. Publishing a trained model to the Hub
+
+The `register` stage leaves one directory per model under
+`~/atr-cache/trained/<model_id>/` — the best validation checkpoint plus a
+`metadata.json` with the job id, the request and the measured CER. That is
+everything a hub repo needs.
+
+```bash
+.venvs/kraken-train/bin/hf auth login          # or: export HF_TOKEN=...
+.venvs/kraken-train/bin/python scripts/publish_to_hub.py --list
+.venvs/kraken-train/bin/python scripts/publish_to_hub.py --dry-run
+.venvs/kraken-train/bin/python scripts/publish_to_hub.py --only kraken-thun-kurrent-v2
+```
+
+Three rules the script will not let you past:
+
+- **Repos are private unless `--public`**, and no licence is invented. Making a
+  trained model public, and under which terms, stays a human decision.
+- **A model without `metadata.json` is never published** — it is reported as
+  skipped. A card that guesses what a model was trained on is worse than no card.
+- **One upload's failure does not stop the others**, and the resulting URL is
+  written back into `metadata.json`, so a second run is a no-op rather than a
+  duplicate push.
+
+`huggingface_hub` is deliberately absent from the gateway venv, so this must run
+from a trainer venv. Triggering it from Discord is the subject of epic #84.
+
+### Automatic publishing above a score (#88)
+
+```bash
+systemctl --user set-environment ATR_TRAIN_AUTO_PUBLISH_MIN_ACCURACY=80
+systemctl --user set-environment ATR_TRAIN_AUTO_PUBLISH_ORG=dh-unibe
+systemctl --user restart atr-train
+```
+
+**0 is the default and means off.** Above the threshold, a finished model is
+pushed after `register`, to a **private** repo — automation never passes
+`--public` and never invents a licence, because the hub keeps history and an
+unpublish is a deletion that does not undo the copy someone already pulled.
+
+It runs beside the promotion gate, outside the stage, and cannot fail the job: a
+model that was trained and scored is not a failed run because an upload did not
+happen. What it did lands on the job record as a sentence, including when it did
+nothing:
+
+```bash
+curl -s localhost:8204/jobs/<id> | python3 -c 'import json,sys; print(json.load(sys.stdin)["published"])'
+# skip: char_accuracy 76.76% is below the 80.00% threshold
+# skip: ... reaches the threshold, but no token is set (HF_TOKEN or HUGGINGFACE_HUB_TOKEN)
+# published: https://huggingface.co/dh-unibe/kraken-medieval-german-v1
+```
+
+The token is **not** read from `.env` by the trainer — set `HF_TOKEN` in the unit
+environment the same way, or authenticate once with
+`.venvs/kraken-train/bin/hf auth login`, whose credentials `huggingface_hub`
+picks up. A missing token is reported before the upload rather than discovered
+inside it.
+
+## 8e. Scoring a model the pipeline never scored
+
+A run that is cancelled leaves a trained model and no metrics: `test` never ran,
+so `job.metrics` is null and nothing was registered. The model is still there —
+kraken writes `best_<val_metric>.mlmodel` on abort — and it can be scored directly.
+
+**Score it against an existing job's `val.arrow`, not a fresh one.** Comparability
+is the whole point of the exercise, and an arrow compiled today from the same
+projects is not bit-identical to one compiled three weeks ago:
+
+```bash
+M=~/atr-cache/checkpoints/<job-id>/best_0.7741.mlmodel
+V=<jobs>/20260813T144649Z-kraken-thun-kurrent-v2/data/val_bin.lst
+.venvs/kraken-train/bin/ketos --device cuda:0 --workers 4 test \
+    --model "$M" --test-data "$V" --format-type binary --normalization NFD \
+    > /tmp/eval.log 2>&1
+```
+
+`ketos test` prints a confusion matrix after the summary, so read the head:
+
+```bash
+.venvs/kraken-train/bin/python -c 'import sys; sys.path.insert(0,"src")
+from atr_serving.training.ketos_cmd import parse_test_report
+print(parse_test_report(open("/tmp/eval.log", errors="replace").read().replace(chr(13), chr(10))))'
+```
+
+This registers nothing and touches no overlay — deliberately. A model scored for
+comparison is not thereby a model this box should serve, and conflating the two
+is how an unvalidated model ends up in the registry.
+
+## 9. Troubleshooting
+
+### OOM during training at batch 256
+
+kraken pads each batch to its widest line, so a batch of very wide lines can
+exceed VRAM. Keep the effective batch at 256 via gradient accumulation:
+
+```json
+{
+  "params": {
+    "batch_size": 64,
+    "accumulate_grad_batches": 4
+  }
+}
+```
+
+The effective batch is still 256; training speed drops slightly but it fits.
+
+### `1cycle` is refused (#96)
+
+```
+--schedule 1cycle is broken on kraken 7.0.2: OneCycleLR is given steps_per_epoch
+in samples rather than optimizer steps …
+```
+
+kraken builds the scheduler with `steps_per_epoch=len(datamodule.train_set)` — a
+count of **samples**, where `OneCycleLR` wants optimizer steps. The cycle comes out
+`batch_size` times too long: a 30-epoch run at batch 256 reported `total_steps`
+24,951,540 against 97,470 real steps, *and the same figure at batch 64*, which is the
+fingerprint. `OneCycleLR` starts at `max_lr/25` and warms up over the first 30 % of
+the cycle, so the warmup would end after ~2,304 epochs. Every kraken run this project
+did before 2026-09-15 trained at a near-constant **`lrate/25`**.
+
+Use `cosine` (the default) or `constant`. Both are stepped the same way and encode no
+total length that has to match reality. If you want the frozen warmup rate that older
+runs actually saw, ask for `constant` at that rate and say so — do not reproduce it by
+accident.
+
+Job records written before the change still load: the value stays in the type, it
+just cannot start a new run.
+
+### Job stuck in `training` with a dead PID
+
+The scheduler reconciles every job against the process table on **every tick**
+(`poll_interval_s`, 10 s by default) — not only on restart, as this section used
+to say. A job whose runner is gone is marked `failed` within seconds.
+
+"Gone" includes **defunct**. A detached runner stays a zombie until something
+waits on it, keeping its pid and its `/proc` entry, so `os.kill(pid, 0)` succeeds
+and the old check read it as alive. That is how
+`20260909T190659Z-qwen3vl-german-pages-v2` sat at `training` for over an hour
+after dying in a network outage — and with `max_concurrent: 1`, no other job
+could start on two idle GPUs. Liveness is now read from `/proc/<pid>/stat` and a
+`Z` counts as dead (#118). If it was
+actually still running (killed by OOM or a hardware fault), the record shows:
+
+```
+status: "failed"
+error: "runner process 12345 is gone while the job was training; see logs/ in the job directory"
+```
+
+Check the train log to confirm:
+
+```bash
+cat ~/atr-cache/training/jobs/<job_id>/logs/train.log | tail -50
+```
+
+If the job genuinely finished (ketos wrote the best model but the process was
+killed before the record could be updated), the trainer promotes the best weights
+on reconciliation — `job.json` shows `status: completed` and the model is in
+`trained/<model_id>/`.
+
+### Job fails in `prepare` with `DatasetGenerationError`
+
+This is the streaming-vs-caching issue from TRAINING_PLAN.md §10. In cached mode
+(`cache_datasets=True`), `load_dataset` downloads and caches the *entire* selection
+before yielding the first row. If `TMPDIR` or `HF_DATASETS_CACHE` is on the CIFS
+share, this fails with `ValueError: I/O operation on closed file` after hours and
+zero pages written.
+
+Always use the default `cache_datasets=False` (streaming). If you explicitly need
+caching, set `HF_DATASETS_CACHE` to local disk, not the share.
+
+### `ketos compile` fails with `OSError: [Errno 39] Directory not empty`
+
+`TMPDIR` is on the CIFS share. SMB does not release directory entries fast enough
+for the create/delete churn of temporary compilation dirs. Move `TMPDIR` to local
+disk and re-submit.
+
+### A long run died and left nothing behind (#119)
+
+The Trainer saves at epoch boundaries, so a corpus run configured `epochs: 1` has
+exactly one save — after the last step, 33 hours in. `…-german-pages-v2` died at
+step 628 of 2352 and left an empty checkpoint directory: 8 h 50 m of A40 time for
+nothing.
+
+A **recovery snapshot** is now written alongside, every ~5 % of an epoch:
+
+```
+recovery: a snapshot every 50 of 784 steps per epoch -> …/checkpoints/<job>/recovery
+recovery snapshot at step 50 -> …/recovery
+```
+
+Note **784**, not the 2,352 on the progress bar: that is the three-epoch ceiling
+from `max_epochs`, while the interval is derived per epoch. 784 // 20 is below the
+50-step floor, so for this corpus the floor is what binds — a snapshot every ~45
+minutes rather than every two hours.
+
+It is one directory, overwritten in place, holding the adapter and a
+`recovery.json` with `global_step` and `epoch`. Worst case is now the interval,
+about two hours, rather than the whole run.
+
+It is deliberately **not** `save_strategy="steps"`, which looks like the obvious
+fix and is a trap on three counts: `load_best_model_at_end` requires
+`eval_strategy` to match, the epoch eval over the full validation set costs ~26
+minutes here, and the continuation callback (#88) counts one evaluation as one
+epoch — so a steps-based eval would make a `max_epochs: 3` run stop after three
+evaluations, a few hundred steps in. Recovery and best-model selection are
+different needs and now have different mechanisms.
+
+Note that nothing yet *resumes* from a snapshot: `--resume-from-checkpoint` is not
+wired, and a resumed job would also need its compiled JSONL still on disk. What
+this buys today is a trained adapter to evaluate or publish by hand instead of a
+total loss.
+
+### VLM job OOMs hours in, on one allocation of several GiB (#110)
+
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 8.16 GiB.
+ 33%|███▎      | 785/2355 [11:24:48<22:49:37, 52.34s/it]
+```
+
+**Look for this line in `logs/train.log` before assuming contention:**
+
+```
+warning: a sample tokenized to 14411 tokens, over max_seq_len=4096
+```
+
+Cross-entropy upcasts the logits to fp32, so **one** sample costs
+`tokens × 151,936 × 4` bytes in a single allocation: 8.16 GiB at 14,411 tokens.
+That is what killed `20260908T101611Z-qwen3vl-german-pages-v1` — a single
+validation page of **32,477 characters**, 88× that corpus's median of 383. Batch
+size was already 1; there was nothing to lower.
+
+Same lesson as the kraken OOMs, and it took two goes to learn: **the median is
+fine and the tail is fatal.** Look at the distribution before touching
+`batch_size`.
+
+Compile now drops samples over `VLM_MAX_SAMPLE_CHARS` (8,000 at page
+granularity, 1,000 at line) and the job record carries what it cost:
+
+```bash
+curl -s localhost:8204/jobs/$JOB_ID | python3 -c 'import sys,json
+p=json.load(sys.stdin)["progress"]
+print(p["long_samples"], "dropped; longest was", p["max_sample_chars"], "chars")'
+```
+
+On the German corpus that is 24 of 13,953 pages — **0.17 %** — and it caps the
+loss allocation at ~3.4 GiB. If a run drops more than a per cent or two, the cap
+is wrong for that material rather than the material being wrong; raise it and
+watch the token warnings.
+
+Note that `max_seq_len` is **not** this cap and is not meant to be. It is the
+budget the visual sizing targets; a sample over it is reported and trained
+anyway, and samples at 4–8 k tokens trained fine. Conflating the two is what made
+this look like a contention problem.
+
+### A training run and the serving engines are on the same GPU
+
+All five units pin `CUDA_VISIBLE_DEVICES=1`, and `vllm_gpu` defaults to 1 too, so
+`atr-kraken`, `atr-trocr`, `atr-party`, the gateway's resident vLLM and the
+trainer all target the same card. GPU 0 carries only the `change`-user RAG
+service (~10 GB of 46).
+
+This did not cause the OOM above, but it removed the margin that would have
+absorbed it: `atr-party` started **4 h 50 m into that run** and took 4.49 GiB,
+leaving 7.78 GiB free against an 8.16 GiB request. The VRAM preflight cannot see
+this coming — it runs at job start, which for a corpus-scale run is over two
+hours before `train` touches the GPU.
+
+Check before starting a long run, and consider moving the serving engines to
+GPU 0:
+
+```bash
+nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv
+```
+
+### VLM job dies at step 2 with `Mismatch in image token count` (#86)
+
+```
+ValueError: Mismatch in `image` token count between text and `input_ids`.
+Got ids=[84, 72, 87, 508] and text=[84, 72, 87, 600].
+```
+
+Fixed in `03aed5c`; if you see it, the box is behind. Three defects compounded,
+and **batch size is not one of them** — `batch_size: 1` fails on the same crop:
+
+1. `max_pixels=` passed to `AutoProcessor.from_pretrained` is a **Qwen2-VL**
+   idiom. Qwen3-VL's image processor is configured through
+   `size={"longest_edge", "shortest_edge"}` (areas in pixels) and accepts the
+   kwarg without applying it, so the run trained at the model default of **16,384
+   visual tokens per image** instead of 256.
+2. `VLM_PIXEL_BUDGET` multiplied by 28² — patch 14 × merge 2, again Qwen2-VL.
+   Qwen3-VL is patch 16 × merge 2 = **32²**.
+3. The collator truncated to `max_seq_len`. On text that loses the tail; on a
+   multimodal sequence it severs image tokens from the placeholders that index
+   them, producing an *invalid* sample rather than a shorter one.
+
+`apply_visual_budget()` now writes the knob onto the image processor and reads it
+back, derives the token cap from the processor's own `patch_size`/`merge_size`,
+and prints it at startup:
+
+```
+size.longest_edge=262144 -> ~256 visual tokens (32px cell)
+```
+
+Samples over `max_seq_len` are counted and reported, never truncated. Note the
+line is written at *start*, so `?lines=200` on the log endpoint (which returns the
+tail) will not show it on a long run.
+
+### Submit refused with "the selection is ~N GB … over the 50 GB the trainer keeps free"
+
+See §8b. If you are streaming (the default), this is asking you to set
+`ATR_TRAIN_CHUNK_PAGES`, and the message now says so. If chunking is set and it
+still refuses, the spec has no `eval_projects` — chunking cannot apply without
+them, and the guard says that rather than silently materializing everything.
+
+### A job stays `queued` for VRAM that nothing is using
+
+```
+queued — GPU 1 has 11185 MB free, need 24000 MB
+```
+
+with `nvidia-smi` reporting 0 % utilisation on both cards. The memory is held by a
+process that no longer exists:
+
+```bash
+nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader
+# 2743851, 27530 MiB, [Not Found]        ← the giveaway
+ls -d /proc/2743851                       # gone
+ps -p 2743851                             # no such process
+```
+
+`[Not Found]` means the driver still accounts 27.5 GB to a dead PID. It is **not**
+a driver leak, and it does not need a GPU reset. Look for who still has the device
+open:
+
+```bash
+fuser -v /dev/nvidia1
+#   tobias  2748335  F...m  pt_data_worker      ← ppid 1, orphaned
+```
+
+A PyTorch **data-loader worker** outlived the training process that spawned it.
+Orphaned to `init`, it sleeps in `do_poll` on a pipe whose other end is gone, does
+no work at all — and because it still has `/dev/nvidia1` mapped, the dead parent's
+CUDA context is never torn down. Confirm before killing anything:
+
+```bash
+ps -o pid,ppid,etime,stat,wchan:18,comm -p <worker>    # ppid 1, state S, do_poll
+cut -d' ' -f14,15 /proc/<worker>/stat; sleep 4; cut -d' ' -f14,15 /proc/<worker>/stat
+```
+
+Unchanged CPU ticks over several seconds, no children, no parent: the run it
+belonged to is already over. A plain `kill` releases the memory — 34.3 GB used
+became 1.6 GB in one step. The driver frees the context when the *last* mapper
+goes, so the figure may not move until other processes finish reloading; check
+again after a few seconds rather than concluding it failed.
+
+Reach for `sudo nvidia-smi --gpu-reset -i 1` (with every engine stopped) or a
+reboot only when no such worker exists. On this box the answer has so far always
+been the worker.
+
+**Why it happens here.** The GPU is shared with hand-started runs that the
+scheduler does not know about — `ketos` invoked directly rather than through the
+API. When one of those dies, nothing cleans up after it, and the trainer's VRAM
+guard then queues a legitimate job indefinitely against memory nobody is using.
+
+### Permissions error on `pip install` during venv rebuild
+
+`TMPDIR` is on the CIFS share — pip stages packages there before installing them,
+but SMB's `chmod` refusal makes the final `rename` fail. `EPERM` on a pip install
+keeps the old version silently. Fix: move `TMPDIR` to local disk, `rm -rf
+.venvs/kraken-train`, rebuild.
+
+---
+
+## 10. Scoring a trained model against served models
+
+After a job completes, score the trained model on the held-out Thun pages using
+the eval harness — the same way served kraken models are scored:
+
+```bash
+# List available models (the trained model appears once promoted)
+curl -s -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)" \
+  http://localhost:8200/models | jq '.[] | select(.id | startswith("kraken-thun"))'
+
+# Run eval on the Thun test pages, comparing all kraken-thun models
+python eval/run_eval.py \
+  --images-dir ~/atr-cache/training/trained/kraken-thun-missiven-v1/eval_pages \
+  --models kraken-thun-missiven-v1 \
+  --gateway http://localhost:8200 \
+  --api-key "$(grep ^ATR_API_KEY .env | cut -d= -f2)" \
+  --gt-dir ~/atr-cache/training/trained/kraken-thun-missiven-v1/eval_pages
+```
+
+The eval harness measures **CER through the full-page pipeline** (gateway
+auto-segmentation → per-line transcription → reassembly). This is **not the same
+measurement as `ketos test`**, which scores line crops from ground-truth
+segmentation. Report both, labelled:
+
+| measurement | how obtained | what it tests |
+|---|---|---|
+| `ketos test CER` | `ketos test` on `.arrow` validation set | line-crop recognition only |
+| eval harness CER | `eval/run_eval.py` over pages via gateway | full pipeline: segmentation + recognition |
+
+The two numbers are not interchangeable. See TRAINING_PLAN.md §9 for the
+interpretation caveats.

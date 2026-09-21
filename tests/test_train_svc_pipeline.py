@@ -119,6 +119,12 @@ def settings(tmp_path: Path) -> TrainerSettings:
         ketos=tmp_path / "ketos",
         min_free_disk_gb=0.0,
         gpu=1,
+        # Off by default: these tests are about what each stage does, and a cache
+        # hit means two of them do not run. The reuse tests below turn it on
+        # deliberately. The root is redirected regardless, so nothing here can
+        # reach the real ~/atr-cache even if the flag is flipped by accident.
+        artefact_cache=False,
+        artefact_cache_root=tmp_path / "artefacts",
     )
 
 
@@ -128,10 +134,18 @@ def store(settings: TrainerSettings) -> JobStore:
 
 
 def request_with(**kw) -> TrainRequest:
+    """A request for the pipeline tests.
+
+    ``force=True`` by default: these fixtures run two or three fake pages through
+    the whole lifecycle, which is far below what the step-count guard (#72) will
+    let through — and rightly so. The guard has its own suite
+    (tests/test_training_convergence.py) and its own pipeline tests below; these
+    are about the stages, so they opt out rather than pretending to be real runs.
+    """
     dataset = kw.pop("dataset", DatasetSpec(
         hf_repo=REPO, train_projects=[THUN_TRAIN], eval_projects=[THUN_TEST]))
     return TrainRequest(model_id=kw.pop("model_id", "kraken-thun-missiven-v1"),
-                        dataset=dataset, **kw)
+                        dataset=dataset, force=kw.pop("force", True), **kw)
 
 
 def run_pipeline(store, settings, source, runner, request=None):
@@ -224,7 +238,7 @@ def test_commands_are_the_expected_ketos_calls(store, settings):
     assert train[train.index("--training-data") + 1] == str(data / "train_bin.lst")
     assert train[train.index("--evaluation-data") + 1] == str(data / "val_bin.lst")
     assert train[train.index("--batch-size") + 1] == "256"
-    assert train[train.index("--schedule") + 1] == "1cycle"
+    assert train[train.index("--schedule") + 1] == "cosine"   # not 1cycle (#96)
     assert "--load" not in train and "--spec" in train
 
     test = runner.commands_named("test")[0]
@@ -257,7 +271,10 @@ def test_checkpoints_go_to_local_scratch_not_the_job_dir(store, settings):
 def test_child_env_pins_the_training_gpu(store, settings):
     runner = FakeRunner()
     run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), runner)
-    assert runner.env == {"CUDA_VISIBLE_DEVICES": "1"}  # GPU 0 (RAG) untouched
+    assert runner.env["CUDA_VISIBLE_DEVICES"] == "1"  # GPU 0 (RAG) untouched
+    # Fragmentation, not the fix for it: 5.72 GiB were reserved-but-unallocated at
+    # the OOM in #110, and the hand-run sweep on the box already set this.
+    assert runner.env["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
 
 
 def test_finetuning_passes_a_local_base_model(store, settings, tmp_path):
@@ -407,3 +424,256 @@ def test_a_subprocess_stage_still_prefers_its_own_log(store, settings):
     assert done.status == "failed"
     assert any("boom in train" in line for line in done.log_tail)
     assert not any("runner noise" in line for line in done.log_tail)
+
+
+# ── the step-count guard (#72) ──────────────────────────────────────────────
+class TestConvergenceGuard:
+    """The guard that would have stopped kraken-thun-missiven-v1 before it spent
+    three GPU-hours producing CER 0.98."""
+
+    def test_a_doomed_configuration_never_reaches_compile(self, store, settings):
+        """Refused after prepare: compile costs real time and produces nothing
+        worth having if the run cannot converge."""
+        source = FakeSource({"train": 6, "eval": 2})
+        runner = FakeRunner()
+        job = run_pipeline(store, settings, source, runner,
+                           request=request_with(force=False))
+
+        assert job.status == "failed"
+        assert runner.commands_named("compile") == []
+        assert runner.commands_named("train") == []
+
+    def test_the_refusal_carries_the_arithmetic(self, store, settings):
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=False))
+
+        assert "step(s) per epoch" in job.error
+        assert "optimizer steps" in job.error
+        assert "base_model" in job.error          # and how to fix it
+
+    def test_force_runs_it_anyway_and_says_so_on_the_record(self, store, settings):
+        """A deliberate smoke test must stay possible — but a CER from a run known
+        not to converge should never be read as an ordinary one."""
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=True))
+
+        assert job.status == "completed"
+        assert job.convergence_override is not None
+        assert "optimizer steps" in job.convergence_override
+
+    def test_a_configuration_that_converges_is_left_alone(self, store, settings):
+        """Same pages, batch 1, 500 epochs — enough steps to clear even the
+        from-scratch floor, so the guard has nothing to say."""
+        source = FakeSource({"train": 6, "eval": 2})
+        request = request_with(
+            force=False,
+            params=KrakenTrainParams(batch_size=1, epochs=500),
+        )
+        job = run_pipeline(store, settings, source, FakeRunner(), request=request)
+
+        assert job.status == "completed"
+        assert job.convergence_override is None
+        assert job.progress.total_steps and job.progress.total_steps >= 500
+
+    def test_the_planned_cost_is_recorded_either_way(self, store, settings):
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=True))
+        assert job.progress.steps_per_epoch == 1
+        assert job.progress.total_steps == job.request.params.epochs
+
+    def test_training_lines_exclude_the_held_out_side(self, store, settings):
+        """The guard divides by what is trained on; counting the eval lines too
+        would flatter every configuration."""
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=True))
+        assert job.progress.train_lines < job.progress.lines_written
+
+
+# ── chunked prepare → compile → discard (#39) ───────────────────────────────
+class TestChunkedCompile:
+    """Peak page-disk is the whole point. Materializing everything and deleting
+    afterwards saves nothing — the peak has already happened."""
+
+    @staticmethod
+    def chunking_settings(settings, chunk_pages=2):
+        settings.chunk_pages = chunk_pages
+        return settings
+
+    class WatchingRunner(FakeRunner):
+        """Records how many page files exist at each compile call."""
+
+        def __init__(self, pages_root, **kw):
+            super().__init__(**kw)
+            self.pages_root = pages_root
+            self.pages_on_disk: list[int] = []
+
+        def run(self, cmd, log_path, env=None):
+            if "compile" in cmd:
+                self.pages_on_disk.append(len(list(Path(self.pages_root).rglob("*.jpg"))))
+            return super().run(cmd, log_path, env)
+
+    def test_peak_page_disk_never_exceeds_one_chunk(self, store, settings):
+        """The assertion #39 asks for. Six train pages at chunk 2: no compile call
+        ever sees more than one chunk's pages plus the held-out set."""
+        settings = self.chunking_settings(settings, chunk_pages=2)
+        source = FakeSource({"train": 6, "eval": 2})
+        job = store.create(request_with(force=True))
+        runner = self.WatchingRunner(store.paths(job.id).pages)
+        Pipeline(store, settings, runner=runner, source=source).execute(job.id)
+
+        train_peaks = runner.pages_on_disk[:-1]          # the last call is val
+        assert train_peaks, "no chunk was compiled"
+        assert max(train_peaks) <= 2 + 2                 # one chunk + the eval pages
+
+    def test_every_chunk_is_compiled_and_listed_as_one_training_set(self, store, settings):
+        """kraken reads a manifest of several binary datasets as one set, so the
+        chunks never have to be merged."""
+        settings = self.chunking_settings(settings, chunk_pages=2)
+        source = FakeSource({"train": 6, "eval": 2})
+        job = store.create(request_with(force=True))
+        runner = FakeRunner()
+        job = Pipeline(store, settings, runner=runner, source=source).execute(job.id)
+
+        assert job.status == "completed"
+        arrows = (store.paths(job.id).data / "train_bin.lst").read_text().split()
+        assert len(arrows) == 3                          # 6 pages / chunk 2
+        assert all(a.endswith(".arrow") for a in arrows)
+
+    def test_the_pages_are_gone_afterwards(self, store, settings):
+        settings = self.chunking_settings(settings, chunk_pages=2)
+        source = FakeSource({"train": 6, "eval": 2})
+        job = store.create(request_with(force=True))
+        Pipeline(store, settings, runner=FakeRunner(), source=source).execute(job.id)
+
+        chunk_dirs = list((store.paths(job.id).pages).glob("chunk_*"))
+        assert chunk_dirs == []
+
+    def test_without_eval_projects_it_falls_back_and_says_so(self, store, settings):
+        """The validation set cannot come from splitting a stream that is being
+        consumed and discarded, so a spec without eval_projects materializes
+        everything rather than silently ignoring the setting."""
+        settings = self.chunking_settings(settings, chunk_pages=2)
+        source = FakeSource({"train": 4})
+        request = request_with(
+            force=True,
+            dataset=DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
+        )
+        job = run_pipeline(store, settings, source, FakeRunner(), request=request)
+
+        assert job.status == "completed"
+        assert not (store.paths(job.id).data / "train_plan.json").exists()
+
+    def test_chunking_off_is_the_old_single_compile(self, store, settings):
+        source = FakeSource({"train": 6, "eval": 2})
+        job = run_pipeline(store, settings, source, FakeRunner(),
+                           request=request_with(force=True))
+        arrows = (store.paths(job.id).data / "train_bin.lst").read_text().split()
+        assert len(arrows) == 1
+
+
+# ── reusing a compiled corpus (#109) ────────────────────────────────────────
+@pytest.fixture
+def caching(settings: TrainerSettings) -> TrainerSettings:
+    """The same settings, with the artefact cache on."""
+    return settings.model_copy(update={"artefact_cache": True})
+
+
+def _compiles(runner: FakeRunner) -> int:
+    return sum(1 for cmd in runner.commands if "compile" in cmd)
+
+
+def test_an_identical_selection_is_not_compiled_twice(store, caching):
+    # The case this exists for: between 24 August and 5 September the same
+    # four-dataset German corpus was compiled eight times, five of those runs
+    # differing only in a parameter the train stage reads.
+    first = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    second_runner = FakeRunner()
+    second = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}),
+                          second_runner, request_with(model_id="kraken-second-v1"))
+
+    assert first.status == "completed" and second.status == "completed", second.error
+    assert _compiles(second_runner) == 0
+    assert second.progress.artefact.endswith(first.id)
+    assert "reused artefact" in _stage_named(second, "compile").log
+    assert "reused artefact" in _stage_named(second, "prepare").log
+
+
+def test_a_reused_run_trains_on_the_cached_arrows(store, caching):
+    # Not copied back into the job: ketos only reads them, and a 41 GB copy per
+    # job would give back most of what the cache saves.
+    run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    second = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}),
+                          FakeRunner(), request_with(model_id="kraken-second-v1"))
+
+    listed = store.paths(second.id).data.joinpath("train_bin.lst").read_text().strip()
+    assert Path(listed).exists()
+    assert Path(listed).is_relative_to(caching.artefact_cache_root)
+
+
+def test_prepare_still_runs_when_the_selection_differs(store, caching):
+    run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    other = request_with(model_id="kraken-other-v1")
+    other.datasets[0].seed = 4242  # a different split of the same pages
+    runner = FakeRunner()
+    job = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), runner, other)
+
+    assert job.status == "completed", job.error
+    assert _compiles(runner) > 0
+    assert "built by this job" in job.progress.artefact
+
+
+def test_the_guards_still_run_against_a_reused_artefact(store, caching):
+    # Skipping prepare deletes what both guards measure. The counts and the
+    # geometry measurement travel with the artefact so they keep working — a VGSL
+    # spec is a *train* parameter and is not part of the key, so a reused corpus
+    # can arrive under a spec the guard has something to say about.
+    first = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    second = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}),
+                          FakeRunner(), request_with(model_id="kraken-second-v1"))
+
+    assert second.progress.train_lines == first.progress.train_lines
+    assert second.progress.aspect_per_char == pytest.approx(first.progress.aspect_per_char)
+
+
+def test_a_cache_that_cannot_be_read_only_costs_time(store, caching):
+    # Every way this can go wrong has to end in "compile it then". A run that
+    # fails because of the cache is strictly worse than one that was slow.
+    run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    for entry in caching.artefact_cache_root.iterdir():
+        (entry / "artefact.json").write_text("{ not json", encoding="utf-8")
+
+    runner = FakeRunner()
+    job = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}),
+                       runner, request_with(model_id="kraken-second-v1"))
+    assert job.status == "completed", job.error
+    assert _compiles(runner) > 0
+
+
+def test_caching_off_compiles_every_time(store, settings):
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    runner = FakeRunner()
+    run_pipeline(store, settings, FakeSource({"train": 4, "eval": 2}),
+                 runner, request_with(model_id="kraken-second-v1"))
+    assert _compiles(runner) > 0
+    assert not settings.artefact_cache_root.exists()
+
+
+def _stage_named(job, name):
+    return next(s for s in job.stages if s.name == name)
+
+
+def test_the_run_that_fills_the_cache_moves_its_arrows_there(store, caching):
+    # The store moves rather than copies — duplicating 41 GB to cache 41 GB is
+    # not an optimisation — so the job that built the artefact reads it from the
+    # cache too, through the same path a later job will.
+    job = run_pipeline(store, caching, FakeSource({"train": 4, "eval": 2}), FakeRunner())
+    data = store.paths(job.id).data
+
+    assert list(data.glob("*.arrow")) == []
+    listed = data.joinpath("train_bin.lst").read_text().strip()
+    assert Path(listed).is_relative_to(caching.artefact_cache_root)
+    assert "built by this job" in job.progress.artefact

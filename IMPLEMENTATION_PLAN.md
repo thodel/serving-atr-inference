@@ -336,7 +336,7 @@ serving-atr-inference/
 - **Target host** — **asterAIx** (`srv`), probed 2026-06-26: Ubuntu 24.04, **Python
   3.12 only**, 2× A40 (~45 GB), driver 565.57.01 / CUDA 12.7, **GPU 0 shared** with a
   RAG service / GPU 1 free, **no passwordless sudo**, ports `:8000/8080/9000/11434/80`
-  taken. Full details + derived decisions in `docs/asteraix-environment.md`; each venv
+  taken. Full details + derived decisions in `docs/idhefix-environment.md`; each venv
   brings its own cu12x `torch`, no system CUDA toolkit.
 
 **Still open:**
@@ -356,4 +356,3 @@ serving-atr-inference/
   become selectable alongside kraken models.
 - Net effect: `agentic_historian` stops carrying model weights/CUDA and just calls one
   API for every recognition pathway.
-```

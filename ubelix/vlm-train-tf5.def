@@ -1,0 +1,59 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+# The transformers 5.x variant, for the Qwen3.5 / Qwen3.8 line.
+#
+# Qwen3.5 folded vision into the base models — there is no separate -VL variant —
+# and every checkpoint reports `model_type: qwen3_5`. transformers 4.x does not
+# know that architecture and never will: the 4.x line ended at 4.57.6 on
+# 2026-01-16, before Qwen3.5 shipped. So this image lifts the `<5` cap that
+# engines/vlm_train_svc/requirements.txt sets.
+#
+# It is a SEPARATE image, not a replacement. 5.16.1 still resolves `qwen3_vl`,
+# so the same corpus can be trained on the old and the new base under two
+# containers that differ in exactly one pin — which is what makes an honest
+# old-vs-new comparison possible instead of a leap. The repo's cap stays where it
+# is until a run has actually trained on 5.x (requirements.txt says so).
+
+%files
+    # Relative to the build CWD, which must be the repo root — see ubelix/README.md.
+    engines/vlm_train_svc/requirements.txt /opt/requirements.txt
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3.12-dev \
+        git ca-certificates libgl1 libglib2.0-0 libgomp1
+    rm -rf /var/lib/apt/lists/*
+
+    python3.12 -m venv /opt/vlm-train
+    /opt/vlm-train/bin/pip install -U pip wheel
+
+    # torch first, from the cu128 index — same order as scripts/make_venvs.sh,
+    # so the requirements resolve against the pinned torch instead of pulling
+    # a CUDA 12.9 wheel.
+    /opt/vlm-train/bin/pip install --no-cache-dir \
+        torch==2.8.0 torchvision==0.23.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+    # Everything except transformers, from the repo's pins.
+    grep -v '^transformers' /opt/requirements.txt > /opt/requirements-no-tf.txt
+    /opt/vlm-train/bin/pip install --no-cache-dir -r /opt/requirements-no-tf.txt
+    # …then 5.x, which is the whole point of this image.
+    /opt/vlm-train/bin/pip install --no-cache-dir 'transformers>=5.16,<6'
+
+    /opt/vlm-train/bin/python -c "import torch, transformers, peft, bitsandbytes, datasets; \
+        print(\"torch\", torch.__version__, \"transformers\", transformers.__version__, \
+              \"peft\", peft.__version__, \"datasets\", datasets.__version__)"
+
+%environment
+    export PATH=/opt/vlm-train/bin:$PATH
+    export PYTHONNOUSERSITE=1
+
+%runscript
+    exec /opt/vlm-train/bin/python "$@"
+
+%labels
+    Purpose  Qwen3.5 / Qwen3.8 QLoRA HTR training on UBELIX (transformers 5.x)
+    Mirrors  asterAIx vlm-train venv

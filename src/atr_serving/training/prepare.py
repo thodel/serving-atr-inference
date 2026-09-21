@@ -17,6 +17,8 @@ would degrade every training line for no reason.
 from __future__ import annotations
 
 import json
+import re
+import time
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,7 +33,7 @@ from atr_serving.training.hf_source import (
     row_to_page,
 )
 from atr_serving.training.manifests import split_pages
-from atr_serving.training.pagexml import page_stats, rewrite_image_filename
+from atr_serving.training.pagexml import drop_wide_lines, page_stats, rewrite_image_filename
 
 from atr_serving.training.preflight import PreflightError, free_disk_gb
 
@@ -52,6 +54,94 @@ class PageSource(Protocol):
     def stream(
         self, hf_repo: str, data_files: list[str], revision: str | None = None
     ) -> Iterator[dict]: ...
+
+
+#: How often to retry a hub call that answers 429, and the cap on the wait.
+#:
+#: The cap used to be 60 s, sized for the hub's own "Retry after 9 sec". The
+#: hub has a second 429 that states no backoff at all and names a **window**
+#: instead — "quota of 1000 api requests per 5 minutes period" — and against
+#: that a 60-second cap is a guarantee of failure: the wait expires while the
+#: window is still running. It now has to fit a window with slack.
+HUB_RETRIES = 5
+HUB_RETRY_CAP_S = 420.0
+
+_RETRY_AFTER = re.compile(r"retry\s+after\s+(\d+)\s*sec", re.IGNORECASE)
+#: "you hit the quota of 1000 api requests per 5 minutes period"
+_QUOTA_WINDOW = re.compile(
+    r"quota of\s+[\d,]+\s+api requests per\s+(\d+)\s*(second|minute|hour)",
+    re.IGNORECASE,
+)
+_WINDOW_S = {"second": 1, "minute": 60, "hour": 3600}
+
+
+def _retry_after(exc: BaseException) -> float | None:
+    """Seconds to wait before trying again, or None when this is not a 429.
+
+    Matched on the message rather than the exception type: `datasets` wraps hub
+    errors on the way out, and the message survives the wrapping while the class
+    does not.
+
+    Two shapes, and they want different waits. When the hub states a backoff it
+    is answered literally. When it names a quota window instead, the wait is the
+    **window**: coming back in five seconds to a five-minute quota is not a
+    retry, it is a second failure.
+    """
+    text = str(exc)
+    if "429" not in text and "rate limit" not in text.lower():
+        return None
+    stated = _RETRY_AFTER.search(text)
+    if stated:
+        return float(stated.group(1))
+    window = _QUOTA_WINDOW.search(text)
+    if window:
+        return float(int(window.group(1)) * _WINDOW_S[window.group(2).lower()])
+    return 5.0
+
+
+def with_hub_retry(call, *, attempts: int = HUB_RETRIES, sleep=None):
+    """Run ``call``, retrying while the hub answers 429 (#89).
+
+    Job 20260822T143612Z died in `prepare` on::
+
+        429 Too Many Requests: you have reached your 'api' rate limit.
+        Retry after 9 sec
+
+    Nine seconds, against a stage that had already been running for minutes and
+    would have run for hours. A rate limit is the hub telling us when to come
+    back, not a reason to discard the run — and the limit is easy to reach
+    honestly, since verifying a four-dataset corpus lists every repo and sizes
+    1,800 shards before a single page is read.
+
+    **What retrying cannot do.** ``call`` is re-run whole, so a call that spends
+    more requests than the quota allows spends them again on every attempt and
+    can never get through. The first v4 attempt is the case: resolving 1,185
+    Königsfelden project directories costs 1,185 tree requests against a quota of
+    1,000 per five minutes, and five retries turned a failure into a slower
+    failure. That is a cost problem and belongs to the caller — here, to
+    ``collapse_complete_selection`` — not to a backoff. The log says which shape
+    of 429 was seen, so the difference is visible in the journal instead of
+    having to be inferred from how long the stage took to die.
+    """
+    sleep = time.sleep if sleep is None else sleep
+    last: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except BaseException as exc:  # noqa: BLE001 — re-raised below unless 429
+            wait = _retry_after(exc)
+            if wait is None or attempt == attempts:
+                raise
+            wait = min(wait * attempt, HUB_RETRY_CAP_S)
+            logger.warning(
+                "hub rate limit (attempt {}/{}), waiting {:.0f}s — the call is "
+                "re-run whole, so this only helps if the quota, not this call, "
+                "was the problem: {}",
+                attempt, attempts, wait, str(exc)[:160],
+            )
+            sleep(wait)
+            last = exc
+    raise last  # unreachable; the loop either returns or raises
 
 
 class HFPageSource:
@@ -98,14 +188,14 @@ class HFPageSource:
         # 548,322 examples / 6.96 TB — and raises NonMatchingSplitsSizesError.
         # Selecting a subset with data_files can never match those numbers, so the
         # check is meaningless here and fails every job by construction.
-        ds = load_dataset(
+        ds = with_hub_retry(lambda: load_dataset(
             hf_repo,
             data_files={"train": list(data_files)},
             split="train",
             streaming=not self.cache,
             revision=revision,
             verification_mode="no_checks",
-        )
+        ))
         return iter(self._raw_images(ds))
 
     @staticmethod
@@ -142,13 +232,25 @@ class PreparedSet:
     chars: int = 0
     charset: set[str] = field(default_factory=set)
     bytes_written: int = 0
+    #: Lines whose width:height exceeds ``pagexml.MAX_LINE_ASPECT`` — almost always
+    #: a segmentation error, and the thing that sets peak VRAM for every batch it
+    #: lands in. Reported before the first epoch rather than diagnosed after the
+    #: third OOM (#90).
+    wide_lines: int = 0
+    max_aspect: float = 0.0
 
     @property
     def summary(self) -> str:
+        tail = ""
+        if self.lines:
+            share = 100.0 * self.wide_lines / self.lines
+            tail = (f", {self.wide_lines} over-wide lines ({share:.2f} %), "
+                    f"worst aspect {self.max_aspect:.0f}:1")
         return (
             f"{self.role}: {self.pages_written} pages, {self.lines} transcribed lines, "
             f"{self.chars} chars, {len(self.charset)} distinct characters, "
             f"{self.pages_skipped} pages skipped, {self.bytes_written / 1e6:.1f} MB"
+            f"{tail}"
         )
 
 
@@ -183,8 +285,18 @@ def materialize(
         page = row_to_page(index, row)
         index += 1
 
-        stats = page_stats(page.xml)
-        if not stats.usable:
+        # Drop mis-segmented lines *before* judging the page: kraken reads this
+        # PageXML through `ketos compile`, so a ceiling that only filtered the VLM
+        # path left them in — and one 135:1 line asked for a single 21.69 GiB
+        # allocation at batch_size 16, because a batch is padded to its widest
+        # member (#90).
+        page_xml, dropped = drop_wide_lines(page.xml)
+        out.wide_lines += dropped
+        stats = page_stats(page.xml)          # measured before the drop, so the
+        out.max_aspect = max(out.max_aspect, stats.max_aspect)   # tail is reported
+        if not page_stats(page_xml).usable:
+            # Either the page never had a transcription, or every line it had was
+            # an outlier. Both mean nothing trainable is left.
             out.pages_skipped += 1
             continue
 
@@ -200,13 +312,14 @@ def materialize(
         image_path = dest / page.image_name
         xml_path = dest / page.xml_name
         image_path.write_bytes(page.image)
-        xml_path.write_text(rewrite_image_filename(page.xml, page.image_name), encoding="utf-8")
+        xml_path.write_text(rewrite_image_filename(page_xml, page.image_name), encoding="utf-8")
 
         out.xml_paths.append(xml_path)
         out.pages_written += 1
-        out.lines += stats.transcribed_lines
-        out.chars += stats.chars
-        out.charset |= stats.charset
+        written = page_stats(page_xml)
+        out.lines += written.transcribed_lines
+        out.chars += written.chars
+        out.charset |= written.charset
         out.bytes_written += len(page.image)
 
     if not out.pages_written:

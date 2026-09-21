@@ -8,13 +8,18 @@ import json
 
 import pytest
 
-from atr_serving.training.contracts import VLM_PIXEL_BUDGET
+from atr_serving.training.contracts import (
+    VLM_MAX_SAMPLE_CHARS,
+    VLM_PIXEL_BUDGET,
+)
 from atr_serving.training.pagexml import line_boxes, parse_points
 from atr_serving.training.textmetrics import cer, score_pairs, wer
 from atr_serving.training.vlm_dataset import (
     Sample,
     VlmDatasetError,
     chat_example,
+    drop_long_samples,
+    drop_short_samples,
     line_samples,
     page_sample,
     read_jsonl,
@@ -204,3 +209,324 @@ def test_score_with_no_characters_reports_no_rate():
     score = score_pairs([("", "")])
     assert score.cer is None and score.wer is None
     assert score.as_report()["cer"] is None
+
+
+# ── apply_visual_budget (#86) ───────────────────────────────────────────────
+from atr_serving.training.vlm_dataset import (  # noqa: E402
+    VisualBudgetError,
+    apply_visual_budget,
+)
+
+
+class FakeImageProcessor:
+    """A Qwen3-VL image processor: `size` in pixel *areas*, patch 16 x merge 2."""
+
+    def __init__(self, size=None, max_pixels=None, patch_size=16, merge_size=2):
+        if size is not None:
+            self.size = size
+        if max_pixels is not None:
+            self.max_pixels = max_pixels
+        if patch_size is not None:
+            self.patch_size = patch_size
+        if merge_size is not None:
+            self.merge_size = merge_size
+
+
+class FakeProcessor:
+    def __init__(self, image_processor):
+        if image_processor is not None:
+            self.image_processor = image_processor
+
+
+def qwen3() -> FakeProcessor:
+    """What Qwen/Qwen3-VL-8B-Instruct's preprocessor_config.json actually declares."""
+    return FakeProcessor(FakeImageProcessor(
+        size={"longest_edge": 16777216, "shortest_edge": 65536}))
+
+
+class TestApplyVisualBudget:
+    """The budget was passed as `max_pixels=` and silently dropped.
+
+    Job 20260814T192904Z-qwen3vl-german-medieval-v1 trained at the model default
+    of 16384 visual tokens instead of 256, and died at step 2 of 774 when
+    truncation cut a 600-token image out of a 512-token sequence.
+    """
+
+    def test_qwen3_is_bounded_through_size_not_max_pixels(self):
+        processor = qwen3()
+        applied = apply_visual_budget(processor, 256 * 32 * 32)
+        assert applied.knob == "size.longest_edge"
+        assert processor.image_processor.size["longest_edge"] == 256 * 32 * 32
+
+    def test_the_default_line_budget_really_is_256_tokens_on_qwen3(self):
+        """The old constant used 28² — Qwen2-VL's grid — and bought 196, not 256."""
+        from atr_serving.training.contracts import VLM_PIXEL_BUDGET
+
+        applied = apply_visual_budget(qwen3(), VLM_PIXEL_BUDGET["line"])
+        assert applied.cell_px == 32 and applied.grid_known
+        assert applied.visual_tokens == 256
+
+    def test_the_untouched_default_would_have_been_16384_tokens(self):
+        """Why this matters: what the run was actually training at."""
+        default = qwen3().image_processor.size["longest_edge"]
+        assert default // (32 * 32) == 16384
+
+    def test_shortest_edge_is_left_alone(self):
+        processor = qwen3()
+        apply_visual_budget(processor, 256 * 32 * 32)
+        assert processor.image_processor.size["shortest_edge"] == 65536
+
+    def test_a_qwen2_style_processor_still_works(self):
+        """max_pixels is not wrong, just not Qwen3-VL's. Both are supported."""
+        processor = FakeProcessor(FakeImageProcessor(
+            max_pixels=1280 * 28 * 28, patch_size=14, merge_size=2))
+        applied = apply_visual_budget(processor, 256 * 28 * 28)
+        assert applied.knob == "max_pixels"
+        assert applied.cell_px == 28 and applied.visual_tokens == 256
+
+    def test_a_processor_with_both_knobs_gets_both(self):
+        """CHURRO's processor, and the reason R4 measured nothing (#128).
+
+        Qwen2.5-VL declares ``size={"longest_edge", "shortest_edge"}`` *and*
+        ``max_pixels``, and ``smart_resize`` reads ``max_pixels``. Setting only
+        the first knob left the budget at the model's default while the read-back
+        confirmed the write: R4 asked for 2,097,152 pixels against R1's
+        4,014,080 and the two runs produced byte-identical output.
+        """
+        processor = FakeProcessor(FakeImageProcessor(
+            size={"longest_edge": 4014080, "shortest_edge": 401408},
+            max_pixels=4014080, patch_size=14, merge_size=2))
+        applied = apply_visual_budget(processor, 2097152)
+        assert processor.image_processor.max_pixels == 2097152
+        assert processor.image_processor.size["longest_edge"] == 2097152
+        assert applied.knob == "size.longest_edge+max_pixels"
+
+    def test_a_processor_with_no_knob_is_refused(self):
+        processor = FakeProcessor(FakeImageProcessor(patch_size=16, merge_size=2))
+        with pytest.raises(VisualBudgetError, match="neither"):
+            apply_visual_budget(processor, 4096)
+
+    def test_a_processor_with_no_image_processor_is_refused(self):
+        with pytest.raises(VisualBudgetError, match="no image_processor"):
+            apply_visual_budget(FakeProcessor(None), 4096)
+
+    def test_a_budget_that_does_not_stick_is_refused(self):
+        """The failure mode this whole helper exists for: it looked set, it wasn't."""
+        class Stubborn(FakeImageProcessor):
+            @property
+            def size(self):
+                return {"longest_edge": 16777216, "shortest_edge": 65536}
+
+            @size.setter
+            def size(self, value):
+                pass                      # accepts, discards — as the kwarg did
+
+        with pytest.raises(VisualBudgetError, match="did not take"):
+            apply_visual_budget(FakeProcessor(Stubborn()), 4096)
+
+    def test_an_unknown_grid_falls_back_and_says_so(self):
+        processor = FakeProcessor(FakeImageProcessor(
+            size={"longest_edge": 1}, patch_size=None, merge_size=None))
+        applied = apply_visual_budget(processor, 256 * 32 * 32)
+        assert applied.grid_known is False
+        assert "ASSUMED" in str(applied)
+
+    def test_str_is_readable_because_it_is_printed_into_the_job_log(self):
+        assert str(apply_visual_budget(qwen3(), 256 * 32 * 32)) == (
+            "size.longest_edge=262144 -> ~256 visual tokens (32px cell)")
+
+# ── dropping samples too long to afford (#110) ──────────────────────────────
+def _sample(chars: int, name: str = "p") -> Sample:
+    return Sample(image=f"{name}.jpg", text="x" * chars, source_type="page")
+
+
+def test_a_sample_over_the_cap_is_dropped():
+    result = drop_long_samples([_sample(100), _sample(9000), _sample(200)], 8000)
+    assert result.dropped == 1
+    assert [len(s.text) for s in result.kept] == [100, 200]
+
+
+def test_the_cap_is_inclusive():
+    # 8000 chars is affordable; the cap is the last length that is.
+    assert drop_long_samples([_sample(8000)], 8000).dropped == 0
+    assert drop_long_samples([_sample(8001)], 8000).dropped == 1
+
+
+def test_the_longest_is_measured_before_the_drop():
+    # The outlier is the finding. A record showing only what survived would hide
+    # the 32,477-character page that cost eleven hours.
+    result = drop_long_samples([_sample(100), _sample(32477)], 8000)
+    assert result.max_chars == 32477
+    assert result.dropped == 1
+
+
+def test_the_page_that_killed_the_german_run_would_be_dropped():
+    # 20260908T101611Z-qwen3vl-german-pages-v1: one validation page of 32,477
+    # characters tokenized to 14,411 tokens and asked cross-entropy for 8.16 GiB,
+    # at step 785 of 2355, 11h24m in.
+    corpus = [_sample(383)] * 100 + [_sample(32477)]
+    result = drop_long_samples(corpus, VLM_MAX_SAMPLE_CHARS["page"])
+    assert result.dropped == 1
+    assert all(len(s.text) <= 8000 for s in result.kept)
+
+
+def test_nothing_is_dropped_from_an_ordinary_corpus():
+    # Median 383, p90 ~2,200, p99 ~5,000 — the shape the cap was chosen against.
+    corpus = [_sample(n) for n in (383, 371, 2183, 2275, 4969, 5438)]
+    result = drop_long_samples(corpus, VLM_MAX_SAMPLE_CHARS["page"])
+    assert result.dropped == 0
+    assert result.max_chars == 5438
+
+
+def test_a_mis_segmented_line_is_dropped_at_line_granularity():
+    # A "line" of 1,200 characters is a block the segmenter merged, not a line.
+    result = drop_long_samples([_sample(13), _sample(1200)],
+                               VLM_MAX_SAMPLE_CHARS["line"])
+    assert result.dropped == 1
+
+
+def test_the_filter_says_what_it_did():
+    assert "no sample over the cap" in str(drop_long_samples([_sample(10)], 8000))
+    assert "dropped 1 sample(s)" in str(drop_long_samples([_sample(9000)], 8000))
+
+
+# ── the visual budget across transformers versions (#86, 5.x) ───────────────
+class _SizeDict:
+    """transformers 5.x's `SizeDict`: attributes, not mapping access."""
+
+    def __init__(self, longest_edge, shortest_edge):
+        self.longest_edge = longest_edge
+        self.shortest_edge = shortest_edge
+
+
+class _Processor:
+    def __init__(self, image_processor):
+        self.image_processor = image_processor
+
+
+class _ImageProcessor:
+    def __init__(self, size):
+        self.size = size
+        self.patch_size = 16
+        self.merge_size = 2
+
+
+def test_budget_applies_to_a_4x_dict_size():
+    from atr_serving.training.vlm_dataset import apply_visual_budget
+
+    ip = _ImageProcessor({"longest_edge": 16777216, "shortest_edge": 65536})
+    applied = apply_visual_budget(_Processor(ip), 262144)
+    assert ip.size["longest_edge"] == 262144
+    assert applied.visual_tokens == 262144 // (16 * 2) ** 2
+
+
+def test_budget_applies_to_a_5x_sizedict():
+    """transformers 5.17 made `size` an object; the knob is still longest_edge.
+
+    Before this, the guard fell through both branches and refused outright —
+    correctly, since the alternative was training at 16,384 visual tokens an
+    image against an intended 256 (#86). Caught on job 14717192.
+    """
+    from atr_serving.training.vlm_dataset import apply_visual_budget
+
+    ip = _ImageProcessor(_SizeDict(longest_edge=16777216, shortest_edge=65536))
+    applied = apply_visual_budget(_Processor(ip), 262144)
+    assert ip.size.longest_edge == 262144
+    assert applied.visual_tokens == 262144 // (16 * 2) ** 2
+
+
+def test_budget_still_refuses_when_there_is_no_knob():
+    from atr_serving.training.vlm_dataset import VisualBudgetError, apply_visual_budget
+
+    ip = _ImageProcessor(None)
+    with pytest.raises(VisualBudgetError):
+        apply_visual_budget(_Processor(ip), 262144)
+
+
+def test_warmup_ratio_is_converted_for_transformers_5x():
+    """5.x dropped warmup_ratio and kept warmup_steps; the schedule must not move."""
+    from vlm_train_svc.train_qlora import warmup_kwarg
+
+    # Injected rather than probed, so this runs in the gateway venv, which has
+    # no transformers at all.
+    assert warmup_kwarg(0.05, 1000, supports_ratio=True) == {"warmup_ratio": 0.05}
+    assert warmup_kwarg(0.05, 1000, supports_ratio=False) == {"warmup_steps": 50}
+    # A ratio too small to reach a whole step still warms up for one.
+    assert warmup_kwarg(0.0001, 100, supports_ratio=False) == {"warmup_steps": 1}
+
+
+def test_no_warmup_asks_for_neither():
+    from vlm_train_svc.train_qlora import warmup_kwarg
+
+    assert warmup_kwarg(0.0, 1000, supports_ratio=False) == {}
+
+
+# ── generation must stop at the end of the turn (Qwen3.5 ships no gen config) ─
+class _Tok:
+    def __init__(self, vocab, unk=0):
+        self.vocab, self.unk_token_id = vocab, unk
+
+    def convert_tokens_to_ids(self, name):
+        return self.vocab.get(name, self.unk_token_id)
+
+
+def test_stop_ids_come_from_each_models_own_tokenizer():
+    """Looked up by name: the two families disagree on every id."""
+    from vlm_train_svc.evaluate_qlora import stop_token_ids
+
+    qwen3vl = _Tok({"<|im_end|>": 151645, "<|endoftext|>": 151643})
+    qwen35 = _Tok({"<|im_end|>": 248046, "<|endoftext|>": 248044})
+    assert stop_token_ids(qwen3vl) == [151645, 151643]
+    assert stop_token_ids(qwen35) == [248046, 248044]
+
+
+def test_a_tokenizer_without_stop_tokens_is_refused():
+    """Better to fail than to let every prediction run to max_new_tokens."""
+    from vlm_train_svc.evaluate_qlora import stop_token_ids
+
+    with pytest.raises(RuntimeError):
+        stop_token_ids(_Tok({}))
+
+
+# ── dropping samples too short to teach anything but stopping ───────────────
+def test_a_sample_under_the_floor_is_dropped():
+    result = drop_short_samples([_sample(2), _sample(45), _sample(1)], 4)
+    assert result.dropped == 2
+    assert [len(s.text) for s in result.kept] == [45]
+
+
+def test_the_floor_is_exclusive():
+    # min_train_chars=4 means "at least 4 chars": 4 survives, 3 does not.
+    assert drop_short_samples([_sample(4)], 4).dropped == 0
+    assert drop_short_samples([_sample(3)], 4).dropped == 1
+
+
+def test_a_floor_of_zero_drops_nothing():
+    corpus = [_sample(1), _sample(2), _sample(45)]
+    assert drop_short_samples(corpus, 0).dropped == 0
+
+
+def test_the_shortest_is_measured_before_the_drop():
+    # Same reason as the long filter: the record should show what the corpus
+    # contained, not what survived it.
+    result = drop_short_samples([_sample(1), _sample(45)], 4)
+    assert result.min_chars == 1
+    assert result.dropped == 1
+
+
+def test_the_medieval_short_tail_is_what_the_floor_removes():
+    # The measured medieval distribution: median 12 chars, 20.9% at 1-3 chars
+    # (folio numbers, column figures, marginalia: "dat", "16", "B VI", "190").
+    # A model trained on that emits end-of-turn after the first word and scores
+    # 0.14 output/reference on real 16-40 char lines.
+    corpus = [_sample(n) for n in (3, 2, 16, 1, 45, 12, 3, 64, 2, 104)]
+    result = drop_short_samples(corpus, 4)
+    assert result.dropped == 5
+    assert [len(s.text) for s in result.kept] == [16, 45, 12, 64, 104]
+
+
+def test_the_nineteenth_century_corpus_is_barely_touched():
+    # Median 30 chars, 0.8% at <=3 — which is why it reached 1.0% CER on the
+    # same code, prompt and evaluator that gave medieval 0.53.
+    corpus = [_sample(n) for n in (23, 27, 30, 30, 32, 35, 28, 31)]
+    assert drop_short_samples(corpus, 4).dropped == 0

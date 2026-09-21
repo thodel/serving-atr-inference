@@ -19,10 +19,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
+from collections import defaultdict
 from pathlib import Path
 
+from atr_serving.training.churro_xml import (
+    CHURRO_SYSTEM_PROMPT,
+    flatten,
+    flatten_whitespace,
+    normalize_convention,
+)
 from atr_serving.training.textmetrics import score_pairs
-from atr_serving.training.vlm_dataset import chat_example, read_jsonl
+from atr_serving.training.vlm_dataset import (
+    CHAT_TEMPLATE_KWARGS,
+    apply_visual_budget,
+    chat_example,
+    read_jsonl,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -36,9 +49,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--report", required=True)
     p.add_argument("--base-model", required=True)
     p.add_argument("--data-root", required=True)
-    p.add_argument("--prompt", required=True)
+    p.add_argument("--prompt", default="",
+                   help="user-turn instruction; required for --template plain")
+    p.add_argument("--template", default="plain", choices=["plain", "churro-xml"],
+                   help="plain: our prompt in the user turn, plain-text output. "
+                        "churro-xml: CHURRO's own system message, an image-only user "
+                        "turn, HistoricalDocument XML flattened by CHURRO's rule before "
+                        "scoring (docs/CHURRO_PLAN.md §1.1)")
     p.add_argument("--granularity", default="line", choices=["line", "page"])
-    p.add_argument("--max-pixels", type=int, required=True)
+    p.add_argument("--max-pixels", type=int, required=True,
+                   help="visual budget in pixels; 0 keeps the processor's own default, "
+                        "which is what CHURRO's inference uses and so the only fair "
+                        "setting for a zero-shot comparison with it")
     p.add_argument("--max-seq-len", type=int, required=True)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda:0")
@@ -54,6 +76,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # That is the silent success this subsystem refuses everywhere else.
     if bool(args.adapter) == bool(args.no_adapter):
         p.error("pass exactly one of --adapter <dir> or --no-adapter")
+    if args.template == "plain" and not args.prompt:
+        p.error("--template plain needs --prompt")
     return args
 
 
@@ -77,9 +101,16 @@ def load_model(args):
     processor_src = args.base_model
     if args.adapter and (Path(args.adapter) / "preprocessor_config.json").is_file():
         processor_src = args.adapter
-    processor = AutoProcessor.from_pretrained(
-        processor_src, trust_remote_code=True, max_pixels=args.max_pixels,
-    )
+    # Same budget, applied the same way as in training — a CER measured at a
+    # different visual budget than the model was trained at is not comparable (#86).
+    processor = AutoProcessor.from_pretrained(processor_src, trust_remote_code=True)
+    if args.max_pixels > 0:
+        print(f"visual budget: {apply_visual_budget(processor, args.max_pixels)}", flush=True)
+    else:
+        ip = getattr(processor, "image_processor", None)
+        print(f"visual budget: processor default "
+              f"(size={getattr(ip, 'size', None)}, max_pixels={getattr(ip, 'max_pixels', None)})",
+              flush=True)
     if processor.tokenizer.pad_token_id is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
@@ -97,18 +128,73 @@ def load_model(args):
     return model, processor
 
 
-def transcribe(model, processor, image_path: Path, prompt: str, max_new_tokens: int) -> str:
+def _looks_truncated(text: str, processor, cap: int) -> bool:
+    """Did generation stop because it hit the cap rather than because it was done?
+
+    Measured on the tokenizer rather than guessed from characters: the ratio of
+    characters to tokens varies with orthography, and early modern German runs
+    near two, which is exactly why 256 tokens looked like a plausible amount of
+    text while being half a page (#92).
+    """
+    if not text:
+        return False
+    try:
+        n = len(processor.tokenizer(text, add_special_tokens=False).input_ids)
+    except Exception:  # noqa: BLE001 — a diagnostic must never fail the run
+        return False
+    return n >= cap - 2
+
+
+#: The tokens that end an assistant turn in the Qwen chat format. Looked up by
+#: NAME in each model's own tokenizer, never by id: the two families disagree
+#: completely (`<|im_end|>` is 151645 in Qwen3-VL and 248046 in Qwen3.5).
+STOP_TOKENS = ("<|im_end|>", "<|endoftext|>")
+
+
+def stop_token_ids(tokenizer) -> list[int]:
+    """The ids ``generate`` must stop on, from this model's tokenizer.
+
+    Qwen3-VL ships a ``generation_config.json`` with ``eos_token_id = [151645,
+    151643]``, so ``generate`` stopped at the end of the turn without being told
+    to. **Qwen3.5 ships no generation config at all.** Its fine-tuned adapters
+    learned to end the turn — the output showed the transcription, then the
+    special token stripped to blank lines, then the transcription again — but
+    ``generate`` had nothing to stop on and ran every line to the
+    ``max_new_tokens`` cap. The 2B arm scored CER 6.16 with a length-controlled
+    CER of 0.48: a model that reads well, scored as if it could not.
+
+    Passing the ids explicitly makes the stop condition a property of this code
+    rather than of whichever checkpoint happens to ship a config file.
+    """
+    unk = getattr(tokenizer, "unk_token_id", None)
+    ids = []
+    for name in STOP_TOKENS:
+        tid = tokenizer.convert_tokens_to_ids(name)
+        if isinstance(tid, int) and tid >= 0 and tid != unk and tid not in ids:
+            ids.append(tid)
+    if not ids:
+        raise RuntimeError(
+            f"none of {STOP_TOKENS} exist in this tokenizer — generation would have "
+            "no stop condition and every prediction would run to max_new_tokens")
+    return ids
+
+
+def transcribe(model, processor, image_path: Path, prompt: str, max_new_tokens: int,
+               system: str | None = None) -> str:
     import torch
     from PIL import Image
 
     with Image.open(image_path) as raw:
         image = raw.convert("RGB")
         text = processor.apply_chat_template(
-            chat_example(prompt), tokenize=False, add_generation_prompt=True)
+            chat_example(prompt, system=system), tokenize=False,
+            add_generation_prompt=True, **CHAT_TEMPLATE_KWARGS)
         inputs = processor(text=[text], images=[image], return_tensors="pt")
     inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
     with torch.no_grad():
-        generated = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        stops = stop_token_ids(processor.tokenizer)
+        generated = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                                   eos_token_id=stops, pad_token_id=stops[0])
     # Strip the prompt: decoding the whole sequence would score the instruction
     # as if the model had produced it.
     prompt_len = inputs["input_ids"].shape[1]
@@ -122,17 +208,53 @@ def main(argv: list[str] | None = None) -> int:
 
     set_seed(args.seed)
     root = Path(args.data_root)
-    samples = list(read_jsonl(args.val_jsonl))[: args.max_samples]
-    if not samples:
+    pool = list(read_jsonl(args.val_jsonl))
+    if not pool:
         raise SystemExit(f"{args.val_jsonl} has no samples to evaluate")
+    # Never the head (#120). The runner normally hands us a subset it already
+    # chose — stratified over the datasets, which it alone can do — and then this
+    # takes all of it. A file scored by hand, or one larger than the cap for any
+    # other reason, is drawn from at random rather than truncated: the order of
+    # val.jsonl is materialisation order, one dataset after another, so its first
+    # 200 pages were one source out of five for the German corpus.
+    if len(pool) > args.max_samples:
+        samples = random.Random(args.seed).sample(
+            sorted(pool, key=lambda s: s.image), args.max_samples)
+        selection = f"seeded draw of {args.max_samples} from {len(pool)}, seed {args.seed}"
+    else:
+        samples = pool
+        selection = f"all {len(pool)} samples of {Path(args.val_jsonl).name}"
+    print(f"eval selection: {selection}", flush=True)
 
     model, processor = load_model(args)
+    churro = args.template == "churro-xml"
+    system = CHURRO_SYSTEM_PROMPT if churro else None
     pairs: list[tuple[str, str]] = []
     examples: list[dict] = []
+    #: Every raw output, kept beside the report: for CHURRO the XML is the source
+    #: of truth and the flattened text a derived view (its own docs say as much).
+    raw_outputs: list[dict] = []
+    #: Predictions that stopped within a hair of the generation cap, which is what
+    #: a truncated transcription looks like from outside (#92).
+    at_cap = 0
+    #: CHURRO outputs that would not parse. CHURRO's tooling scores these as empty
+    #: pages; we recover the text and count them here instead (churro_xml.flatten).
+    unparsed = 0
+    #: CHURRO outputs with no HistoricalDocument in them — the model ignored the format.
+    not_xml = 0
     for index, sample in enumerate(samples, 1):
-        prediction = transcribe(model, processor, root / sample.image,
-                                args.prompt, args.max_new_tokens)
+        raw = transcribe(model, processor, root / sample.image,
+                         args.prompt, args.max_new_tokens, system=system)
+        if _looks_truncated(raw, processor, args.max_new_tokens):
+            at_cap += 1
+        prediction = raw
+        if churro:
+            flat = flatten(raw)
+            prediction = flat.text
+            unparsed += not flat.parsed
+            not_xml += not flat.was_xml
         pairs.append((prediction, sample.text))
+        raw_outputs.append({"image": sample.image, "raw": raw})
         if len(examples) < 10:  # a handful in the report, for eyeballing
             examples.append({"image": sample.image, "reference": sample.text,
                              "prediction": prediction})
@@ -141,6 +263,31 @@ def main(argv: list[str] | None = None) -> int:
 
     score = score_pairs(pairs)
     report = score.as_report()
+    # Per source, when the subset says which source each page came from. This is
+    # the number the headline CER hides: v3 read the St. Galler Missiven at 0.38
+    # and the Rats- und Richtebücher at 1.91, and one figure for both describes
+    # neither (#120, #125).
+    by_source: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for sample, pair in zip(samples, pairs):
+        if sample.source:
+            by_source[sample.source].append(pair)
+    report["by_source"] = {
+        name: {k: v for k, v in score_pairs(rows).as_report().items() if k != "examples"}
+        for name, rows in sorted(by_source.items())
+    } or None
+    # Layout-free, notation kept: line breaks in our ground truth are partly a
+    # segmentation artefact (78 % one-word "lines" in the Rats- und Richtebücher),
+    # and a model writing real lines pays CER ~0.13 for that alone.
+    flat = score_pairs([(flatten_whitespace(h), flatten_whitespace(r)) for h, r in pairs])
+    report["whitespace_flat"] = {
+        k: v for k, v in flat.as_report().items() if k != "examples"}
+    # Diagnostic, never the headline: the same notation-free mapping on both sides
+    # separates "could it read the page" from "did it write our notation"
+    # (docs/CHURRO_PLAN.md §2). Reported for every template, so arms compare.
+    normalized = score_pairs([(normalize_convention(h), normalize_convention(r))
+                              for h, r in pairs])
+    report["convention_normalized"] = {
+        k: v for k, v in normalized.as_report().items() if k != "examples"}
     report.update({
         "base_model": args.base_model,
         # Named unambiguously so a baseline report can never be mistaken for a
@@ -148,17 +295,45 @@ def main(argv: list[str] | None = None) -> int:
         "adapter": args.adapter,
         "is_baseline": args.adapter is None,
         "granularity": args.granularity,
-        "prompt": args.prompt,
+        "template": args.template,
+        "prompt": system if churro else args.prompt,
+        "max_pixels": args.max_pixels or "processor default",
         # Named so a reader cannot mistake a capped run for a full one.
         "eval_cap": args.max_samples,
-        "val_total": sum(1 for _ in read_jsonl(args.val_jsonl)),
+        # How the scored pages were chosen. A CER is not comparable with one
+        # drawn differently, and before #120 nothing in the report said so.
+        "eval_selection": selection,
+        "val_total": len(pool),
+        "max_new_tokens": args.max_new_tokens,
+        # The number that turns a silent halving into a visible one. A CER is
+        # meaningless when the model was cut off, and nothing else in this report
+        # says so: qwen3vl-sg-missiven-v1 was recorded at CER 0.5921 with every
+        # page truncated at 256 tokens, and scored 0.2785 once the cap was raised.
+        "truncated_at_cap": at_cap,
+        "xml_unparsed": unparsed if churro else None,
+        "xml_absent": not_xml if churro else None,
         "examples": examples,
     })
+    if at_cap:
+        share = 100.0 * at_cap / len(pairs)
+        print(f"WARNING: {at_cap} of {len(pairs)} predictions ({share:.0f} %) ran to "
+              f"--max-new-tokens={args.max_new_tokens}. The CER below is a *floor*: "
+              f"those transcriptions were cut off, not wrong. Raise the cap "
+              f"(page granularity needs ~1500) and score again.", flush=True)
+    if churro and unparsed:
+        print(f"NOTE: {unparsed} of {len(pairs)} XML outputs did not parse and were "
+              f"recovered tolerantly. CHURRO's own tooling would have scored them as "
+              f"empty pages.", flush=True)
     out = Path(args.report)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    out.with_suffix(".raw.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in raw_outputs),
+        encoding="utf-8")
     print(f"CER {score.cer:.4f}  WER {score.wer}  over {score.samples} samples -> {out}",
           flush=True)
+    print(f"CER {flat.cer:.4f} whitespace-flat (layout ignored, notation kept)", flush=True)
+    print(f"CER {normalized.cer:.4f} convention-normalized (diagnostic)", flush=True)
     return 0
 
 

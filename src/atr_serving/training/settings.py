@@ -37,6 +37,9 @@ class TrainerSettings(BaseSettings):
     trained_root: Path = Path.home() / "atr-cache" / "trained"
     #: The gitignored registry overlay trained models are registered in.
     overlay_path: Path = REPO_ROOT / "config" / "models.local.yaml"
+    #: The tracked registry, read only to resolve a ``base_model`` given as a
+    #: registry id rather than a Zenodo DOI (#76). Never written to.
+    models_config: Path = REPO_ROOT / "config" / "models.yaml"
     #: Checkpoints go to LOCAL disk, not the job directory on the share. Lightning
     #: saves them via a temp file + rename; with the target on CIFS and the temp
     #: local that rename is cross-device, and the fsspec version datasets<4 pins
@@ -61,6 +64,24 @@ class TrainerSettings(BaseSettings):
     #: that made it the old default. It inverts entirely at terabyte scale, which
     #: is why the default moved rather than the option disappearing.
     cache_datasets: bool = False
+
+    #: Reuse a compiled corpus across jobs (#109). Between 24 August and
+    #: 5 September the same four-dataset German corpus was compiled eight times —
+    #: 12,300 pages, ~41 GB of arrow, ~2.5 hours each — five of those differing
+    #: from their predecessor only in a hyperparameter the *train* stage reads.
+    #: The cache is keyed on the dataset selection (see
+    #: :mod:`atr_serving.training.artefact_cache`), so those five are one compile.
+    artefact_cache: bool = True
+    #: Deliberately **not** under ``jobs_root``: the job directory is the wrong
+    #: home for something meant to outlive the job, and cleaning up finished jobs
+    #: — which is how 221 GB of dead arrows were removed on 2026-09-08 — must not
+    #: take the cache with it.
+    artefact_cache_root: Path = Path.home() / "atr-cache" / "artefacts"
+    #: Size budget, in GB. 0 disables eviction by size (expired unpinned entries
+    #: are still dropped). Two corpus-scale artefacts is the intent: the cache
+    #: sits on the box's system disk (457 GB free), not on the 12 TB share, so
+    #: this is a real constraint rather than a formality.
+    artefact_cache_max_gb: int = 100
 
     # ── executables ───────────────────────────────────────────────────────
     ketos: Path = REPO_ROOT / ".venvs" / "kraken-train" / "bin" / "ketos"
@@ -98,20 +119,51 @@ class TrainerSettings(BaseSettings):
     #: `/` is ~80 % full on asterAIx — never materialize a dataset into the last
     #: of it.
     min_free_disk_gb: int = 50
+    #: Pages materialized before a chunk is compiled and deleted (#39). 0 = off,
+    #: which materializes the whole selection first — right for the 238-page test
+    #: case, impossible for the full corpus: 548,322 pages is ~6.96 TB of pages on
+    #: top of a ~6.6 TB hub cache, on a share with ~6.2 TB free. With chunking on,
+    #: peak page-disk is one chunk instead of the whole selection.
+    chunk_pages: int = 0
+
+    #: Publish a finished model to the Hub when its character accuracy reaches
+    #: this, in percent. **0 disables it**, and that is the default: uploading is
+    #: outward-facing and the hub keeps history, so it is opted into deliberately.
+    #: Repos are created **private** — `publish.py` takes no `--public` from
+    #: automation, and no licence is ever invented (#88).
+    auto_publish_min_accuracy: float = 0.0
+    #: Where auto-published models go. Ignored when the threshold is 0.
+    auto_publish_org: str = "dh-unibe"
+
     #: Training and inference do not share the card politely; one job at a time.
     max_concurrent: int = 1
     #: How often the scheduler reconciles jobs and starts a queued one.
     poll_interval_s: int = 10
     #: Lines of a stage log kept on a failed job record.
     log_tail_lines: int = 50
+    #: Passed to every spawned training process. Empty leaves the allocator alone.
+    cuda_alloc_conf: str = "expandable_segments:True"
 
     def min_free_vram_for(self, engine: str) -> int:
         """VRAM a job of this engine must find free before it may start."""
         return self.vlm_min_free_vram_mb if engine == "vllm" else self.min_free_vram_mb
 
     def env_for_child(self) -> dict[str, str]:
-        """Environment overrides for a spawned training process."""
-        return {"CUDA_VISIBLE_DEVICES": str(self.gpu)}
+        """Environment overrides for a spawned training process.
+
+        ``expandable_segments`` because the allocator's fixed-size segments
+        fragment badly under this workload: at the OOM that killed
+        `20260908T101611Z-qwen3vl-german-pages-v1`, **5.72 GiB were reserved by
+        PyTorch but unallocated** — most of the 8.16 GiB the run then could not
+        find. It is not a fix for that failure (one 8 GiB allocation is one
+        allocation however the heap is arranged, which is what #110's compile-time
+        cap addresses), but it is free, and the hand-run sweep on this box had
+        already been setting it.
+        """
+        return {
+            "CUDA_VISIBLE_DEVICES": str(self.gpu),
+            "PYTORCH_CUDA_ALLOC_CONF": self.cuda_alloc_conf,
+        }
 
 
 _settings: TrainerSettings | None = None

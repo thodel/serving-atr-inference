@@ -81,7 +81,10 @@ for entry in "${VENV_ENTRIES[@]}"; do
   detail=""
 
   # 1. Import smoke test.
-  if ! out=$("${python}" -c "${smoke}" 2>&1); then
+  # ATR_REGISTRY_ROOT empty: importing atr_serving.app builds the app, and with the
+  # shared registry on (#138, set in .env) that publishes this checkout's
+  # config/models.yaml to the share and waits on it. A smoke test must not.
+  if ! out=$(ATR_REGISTRY_ROOT= "${python}" -c "${smoke}" 2>&1); then
     venv_ok=false
     detail="${detail}
       imports: ${out}"

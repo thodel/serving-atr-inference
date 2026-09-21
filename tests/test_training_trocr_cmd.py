@@ -37,14 +37,15 @@ def test_train_cmd_runs_the_module_with_the_given_interpreter():
         PY,
         params=TrOCRTrainParams(),
         base_model=BASE_MODEL,
-        train_manifest="/j/data/train.txt",
-        val_manifest="/j/data/val.txt",
+        train_manifest="/j/data/train.jsonl",
+        val_manifest="/j/data/val.jsonl",
+        data_root="/j",
         output_dir="/scratch/ckpt",
     )
     assert cmd[:3] == [PY, "-m", TRAIN_MODULE]
     assert value(cmd, "--base-model") == BASE_MODEL
-    assert value(cmd, "--train-manifest") == "/j/data/train.txt"
-    assert value(cmd, "--val-manifest") == "/j/data/val.txt"
+    assert value(cmd, "--train-manifest") == "/j/data/train.jsonl"
+    assert value(cmd, "--val-manifest") == "/j/data/val.jsonl"
     assert value(cmd, "--output-dir") == "/scratch/ckpt"
 
 
@@ -54,8 +55,9 @@ def test_train_cmd_requires_a_base_model():
             PY,
             params=TrOCRTrainParams(),
             base_model="",
-            train_manifest="/j/data/train.txt",
-            val_manifest="/j/data/val.txt",
+            train_manifest="/j/data/train.jsonl",
+            val_manifest="/j/data/val.jsonl",
+            data_root="/j",
             output_dir="/scratch/ckpt",
         )
 
@@ -65,7 +67,7 @@ def test_default_params_match_the_class_docstring():
     params = TrOCRTrainParams()
     cmd = train_cmd(
         PY, params=params, base_model=BASE_MODEL,
-        train_manifest="t", val_manifest="v", output_dir="/o",
+        train_manifest="t", val_manifest="v", data_root="/j", output_dir="/o",
     )
     assert value(cmd, "--epochs") == "3"
     assert value(cmd, "--batch-size") == "1"
@@ -83,7 +85,7 @@ def test_negated_flags_are_explicit_not_omitted():
     params = TrOCRTrainParams(gradient_checkpointing=False)
     cmd = train_cmd(
         PY, params=params, base_model=BASE_MODEL,
-        train_manifest="t", val_manifest="v", output_dir="/o",
+        train_manifest="t", val_manifest="v", data_root="/j", output_dir="/o",
     )
     assert "--no-gradient-checkpointing" in cmd
     assert "--gradient-checkpointing" not in cmd
@@ -94,7 +96,7 @@ def test_precision_is_passed():
         params = TrOCRTrainParams(precision=prec)
         cmd = train_cmd(
             PY, params=params, base_model=BASE_MODEL,
-            train_manifest="t", val_manifest="v", output_dir="/o",
+            train_manifest="t", val_manifest="v", data_root="/j", output_dir="/o",
         )
         assert value(cmd, "--precision") == prec
 
@@ -102,13 +104,13 @@ def test_precision_is_passed():
 def test_wandb_is_off_unless_a_run_name_is_given():
     assert "--wandb-run" not in train_cmd(
         PY, params=TrOCRTrainParams(), base_model=BASE_MODEL,
-        train_manifest="t", val_manifest="v", output_dir="/o",
+        train_manifest="t", val_manifest="v", data_root="/j", output_dir="/o",
     )
     cmd = train_cmd(
         PY,
         params=TrOCRTrainParams(wandb_run="trocr-run-1"),
         base_model=BASE_MODEL,
-        train_manifest="t", val_manifest="v", output_dir="/o",
+        train_manifest="t", val_manifest="v", data_root="/j", output_dir="/o",
     )
     assert value(cmd, "--wandb-run") == "trocr-run-1"
 
@@ -117,7 +119,7 @@ def test_beam_size_and_length_penalty_are_passed():
     params = TrOCRTrainParams(beam_size=4, length_penalty=0.6)
     cmd = train_cmd(
         PY, params=params, base_model=BASE_MODEL,
-        train_manifest="t", val_manifest="v", output_dir="/o",
+        train_manifest="t", val_manifest="v", data_root="/j", output_dir="/o",
     )
     assert value(cmd, "--beam-size") == "4"
     assert value(cmd, "--length-penalty") == "0.6"
@@ -131,12 +133,13 @@ def test_evaluate_cmd_names_the_checkpoint_the_report_and_the_manifest():
         params=TrOCRTrainParams(eval_samples=50),
         base_model=BASE_MODEL,
         checkpoint="/scratch/ckpt/checkpoint-3",
-        val_manifest="/j/data/val.txt",
+        val_manifest="/j/data/val.jsonl",
+        data_root="/j",
         report="/j/data/eval_report.json",
     )
     assert cmd[:3] == [PY, "-m", EVAL_MODULE]
     assert value(cmd, "--checkpoint") == "/scratch/ckpt/checkpoint-3"
-    assert value(cmd, "--val-manifest") == "/j/data/val.txt"
+    assert value(cmd, "--val-manifest") == "/j/data/val.jsonl"
     assert value(cmd, "--report") == "/j/data/eval_report.json"
     assert value(cmd, "--max-samples") == "50"
     assert value(cmd, "--max-new-tokens") == "256"
@@ -146,7 +149,8 @@ def test_evaluate_cmd_reuses_base_model_and_device():
     params = TrOCRTrainParams(device="cuda:0", max_new_tokens=128, beam_size=3)
     cmd = evaluate_cmd(
         PY, params=params, base_model="dh-unibe/trocr-medieval-escriptmask",
-        checkpoint="/ckpt", val_manifest="/j/v.txt", report="/j/r.json",
+        checkpoint="/ckpt", val_manifest="/j/v.jsonl", data_root="/j",
+        report="/j/r.json",
     )
     assert value(cmd, "--base-model") == "dh-unibe/trocr-medieval-escriptmask"
     assert value(cmd, "--beam-size") == "3"
@@ -193,6 +197,50 @@ def test_find_checkpoint_returns_none_for_a_specific_epoch_not_present(tmp_path)
 def test_find_checkpoint_returns_none_for_a_non_directory(tmp_path):
     tmp_path.joinpath("checkpoint-1").touch()
     assert find_checkpoint(tmp_path) is None
+
+
+def _finished_run(root):
+    """What ``train_trocr`` leaves behind after a clean run.
+
+    The distinction that matters: the processor is saved at the top level and
+    **nowhere else**. The Trainer's own ``checkpoint-<N>`` carries weights and
+    tokenizer but no ``preprocessor_config.json``.
+    """
+    ckpt = root / "checkpoint-119"
+    ckpt.mkdir()
+    for name in ("model.safetensors", "config.json", "tokenizer.json"):
+        (ckpt / name).touch()
+    for name in ("model.safetensors", "config.json", "tokenizer.json",
+                 "preprocessor_config.json", "training_summary.json"):
+        (root / name).touch()
+    return ckpt
+
+
+def test_a_finished_run_is_evaluated_where_its_processor_is(tmp_path):
+    """The regression that failed 20260910T121127Z-trocr-thun-smoke-v2.
+
+    Training went through; the test stage pointed at ``checkpoint-119`` and died
+    in ``AutoProcessor.from_pretrained`` for want of a preprocessor config.
+    """
+    _finished_run(tmp_path)
+    found = find_checkpoint(tmp_path)
+    assert found == tmp_path
+    assert (found / "preprocessor_config.json").is_file()
+
+
+def test_an_unfinished_run_still_falls_back_to_its_latest_checkpoint(tmp_path):
+    """No final save: the epoch checkpoints are all there is."""
+    for epoch in (1, 3):
+        d = tmp_path / f"checkpoint-{epoch}"
+        d.mkdir()
+        (d / "model.safetensors").touch()
+    assert find_checkpoint(tmp_path).name == "checkpoint-3"
+
+
+def test_a_named_epoch_still_selects_that_checkpoint_after_a_final_save(tmp_path):
+    """``epoch=N`` means that epoch, not "whatever is newest"."""
+    _finished_run(tmp_path)
+    assert find_checkpoint(tmp_path, epoch=119).name == "checkpoint-119"
 
 
 # ── report parsing ───────────────────────────────────────────────────────────

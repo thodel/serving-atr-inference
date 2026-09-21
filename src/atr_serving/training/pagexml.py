@@ -59,6 +59,39 @@ def _iter_local(root: ET.Element, name: str):
             yield el
 
 
+def _own_text(line: ET.Element) -> str:
+    """The transcription **of this line**, not of the first word inside it.
+
+    Transkribus exports word segmentation as ``<Word>`` children, each with its
+    own ``TextEquiv/Unicode``, and those come **before** the line's own
+    ``TextEquiv`` in document order. Searching the line's descendants for the
+    first ``Unicode`` therefore returns word 1 and drops the rest of the line.
+    That is what happened to the Zurich Rats- und Richtebücher: 453 characters
+    of transcription on a page, 84 of them kept (#125).
+
+    So the line's own ``TextEquiv`` — a *direct child* — is the answer. Only when
+    a line has none (exports that put text solely in the words) are the ``Word``
+    texts joined, in reading order as the file gives them. A line with neither is
+    untranscribed and yields ``""``.
+    """
+    for child in line:
+        if _localname(child.tag) != "TextEquiv":
+            continue
+        for uni in child.iter():
+            if _localname(uni.tag) == "Unicode" and uni.text and uni.text.strip():
+                return uni.text.strip()
+
+    words: list[str] = []
+    for child in line:
+        if _localname(child.tag) != "Word":
+            continue
+        for uni in child.iter():
+            if _localname(uni.tag) == "Unicode" and uni.text and uni.text.strip():
+                words.append(uni.text.strip())
+                break
+    return " ".join(words)
+
+
 def image_filename(xml_text: str) -> str:
     """Return the ``@imageFilename`` of the ``<Page>`` element."""
     page = _PAGE_TAG_RE.search(xml_text)
@@ -87,6 +120,68 @@ def rewrite_image_filename(xml_text: str, new_name: str) -> str:
     return xml_text[: page.start()] + new_tag + xml_text[page.end():]
 
 
+#: Width-to-height ratio above which a "line" is almost certainly mis-segmented —
+#: two columns merged, a rule read as a baseline, a marginal note swept into its
+#: neighbour. The counterpart to ``vlm_dataset.MIN_CROP_PX``, which rejects boxes
+#: that are too *small*; nothing rejected the absurd ones (#90).
+#:
+#: 60 is drawn from the corpus rather than chosen: over 328,229 German lines the
+#: median ratio is 9.9 and p99 is 58.1, so this drops roughly the top percent. The
+#: maximum measured was 135 — 8,657 px wide at the 64 px height kraken normalises
+#: to, which is not a line of text.
+#:
+#: It matters beyond data quality. kraken pads every batch to its widest member,
+#: so peak VRAM is ``batch_size x 64 x max(aspect in batch)`` and **one outlier is
+#: paid for by every other line in its batch**. That is why halving the batch
+#: raised memory instead of lowering it (64 -> 32.3 GiB, 32 -> 36.8 GiB): a
+#: smaller batch merely regrouped the outliers.
+MAX_LINE_ASPECT = 60.0
+
+
+_TEXTLINE_BLOCK_RE = re.compile(
+    r"[ \t]*<(?P<p>\w+:)?TextLine\b.*?</(?P=p)?TextLine>[ \t]*\n?", re.DOTALL
+)
+_COORDS_RE = re.compile(r"<(?:\w+:)?Coords\b[^>]*?points\s*=\s*([\"'])(.*?)\1", re.DOTALL)
+
+
+def drop_wide_lines(xml_text: str, max_aspect: float = MAX_LINE_ASPECT) -> tuple[str, int]:
+    """Remove ``TextLine`` elements whose box is absurdly wider than it is tall.
+
+    Returns the edited document and how many lines were removed.
+
+    Reporting the outliers was not enough for the kraken backend: it reads the
+    PageXML itself through ``ketos compile``, so a ceiling that only filtered the
+    VLM path left them in. One of them ended a run at ``batch_size: 16`` with a
+    **single 21.69 GiB allocation** — kraken pads a batch to its widest member, so
+    one 135:1 line costs more than the other fifteen together (#90).
+
+    Regex surgery rather than an ElementTree round-trip, for the reason this
+    module gives at the top: re-serializing rewrites namespace prefixes, and the
+    PageXML that goes to ``ketos`` should differ from the source only where we
+    meant it to.
+    """
+    dropped = 0
+
+    def replace(match: "re.Match[str]") -> str:
+        nonlocal dropped
+        block = match.group(0)
+        coords = _COORDS_RE.search(block)
+        if not coords:
+            return block                     # no geometry to judge; leave it alone
+        points = parse_points(coords.group(2))
+        if len(points) < 2:
+            return block
+        xs = [x for x, _ in points]
+        ys = [y for _, y in points]
+        width, height = max(xs) - min(xs), max(ys) - min(ys)
+        if height > 0 and width > 0 and (width / height) > max_aspect:
+            dropped += 1
+            return ""
+        return block
+
+    return _TEXTLINE_BLOCK_RE.sub(replace, xml_text), dropped
+
+
 def line_texts(xml_text: str) -> list[str]:
     """Transcription of every ``TextLine``, in document order.
 
@@ -99,15 +194,7 @@ def line_texts(xml_text: str) -> list[str]:
     except ET.ParseError as exc:
         raise PageXMLError(f"unparsable PageXML: {exc}") from exc
 
-    out: list[str] = []
-    for line in _iter_local(root, "TextLine"):
-        text = ""
-        for uni in _iter_local(line, "Unicode"):
-            if uni.text and uni.text.strip():
-                text = uni.text
-                break
-        out.append(text)
-    return out
+    return [_own_text(line) for line in _iter_local(root, "TextLine")]
 
 
 def parse_points(points: str) -> list[tuple[int, int]]:
@@ -176,11 +263,7 @@ def line_boxes(xml_text: str) -> list[TextLineBox]:
 
     boxes: list[TextLineBox] = []
     for index, line in enumerate(_iter_local(root, "TextLine")):
-        text = ""
-        for uni in _iter_local(line, "Unicode"):
-            if uni.text and uni.text.strip():
-                text = uni.text.strip()
-                break
+        text = _own_text(line)
         if not text:
             continue
 
@@ -212,12 +295,23 @@ def line_boxes(xml_text: str) -> list[TextLineBox]:
     return boxes
 
 
+def is_plausible_line(box: "TextLineBox", max_aspect: float = MAX_LINE_ASPECT) -> bool:
+    """Does this box look like one line of text rather than a segmentation error?"""
+    if box.height <= 0 or box.width <= 0:
+        return False
+    return (box.width / box.height) <= max_aspect
+
+
 @dataclass
 class PageStats:
     lines: int = 0
     transcribed_lines: int = 0
     chars: int = 0
     charset: set[str] = field(default_factory=set)
+    #: Lines whose aspect ratio exceeds :data:`MAX_LINE_ASPECT`.
+    wide_lines: int = 0
+    #: The worst ratio on the page, so a corpus summary can report its tail.
+    max_aspect: float = 0.0
 
     @property
     def usable(self) -> bool:
@@ -231,6 +325,12 @@ def page_stats(xml_text: str) -> PageStats:
     base model's codec has never seen are exactly what ``union`` has to add.
     """
     stats = PageStats()
+    for box in line_boxes(xml_text):
+        if box.height > 0 and box.width > 0:
+            aspect = box.width / box.height
+            stats.max_aspect = max(stats.max_aspect, aspect)
+            if aspect > MAX_LINE_ASPECT:
+                stats.wide_lines += 1
     for text in line_texts(xml_text):
         stats.lines += 1
         stripped = text.strip()

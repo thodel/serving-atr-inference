@@ -45,11 +45,20 @@ class IllegalTransition(JobStoreError):
 
 
 #: The lifecycle. Terminal statuses have no outgoing edges.
+#:
+#: ``training`` has a **self-edge**, and it is the only one. A job on a
+#: preemptable queue can lose its node mid-training and be requeued by the
+#: scheduler; when the runner starts again on the same job it is not beginning a
+#: new attempt, it is continuing this one from the last checkpoint. Marking that
+#: ``cancelled`` and starting over would throw away hours of GPU time and, on a
+#: multi-day run, would never finish at all. Every other status stays exactly as
+#: strict: a completed or failed job is still terminal, and a cancellation is
+#: still a cancellation.
 TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"preparing", "cancelled", "failed"}),
     "preparing": frozenset({"compiling", "cancelled", "failed"}),
     "compiling": frozenset({"training", "cancelled", "failed"}),
-    "training": frozenset({"testing", "cancelled", "failed"}),
+    "training": frozenset({"testing", "cancelled", "failed", "training"}),
     "testing": frozenset({"registering", "cancelled", "failed"}),
     "registering": frozenset({"completed", "cancelled", "failed"}),
     "completed": frozenset(),
@@ -96,7 +105,46 @@ class JobPaths:
             p.mkdir(parents=True, exist_ok=True)
 
 
-def _pid_alive(pid: int) -> bool:
+def _pid_state(pid: int, proc_root: str | Path = "/proc") -> str | None:
+    """The process state letter from ``/proc/<pid>/stat``, or None if no entry.
+
+    The ``comm`` field is parenthesised and may contain spaces — a defunct child
+    of ours reads ``(python) Z``, and one named by the kernel can read worse — so
+    the line is split on the **last** ``)`` rather than on whitespace. Splitting
+    from the left is the bug this function exists to avoid introducing.
+    """
+    try:
+        line = (Path(proc_root) / str(pid) / "stat").read_text(encoding="utf-8")
+        return line.rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return None
+
+
+def _pid_alive(pid: int, proc_root: str | Path = "/proc") -> bool:
+    """Whether ``pid`` is a process still doing something.
+
+    **A zombie is dead.** This is the whole reason the function does not simply
+    use ``os.kill(pid, 0)``: a defunct child keeps its pid and its ``/proc`` entry
+    until someone waits on it, so the signal probe succeeds and the process reads
+    as alive for ever. On 2026-09-10 that left
+    ``20260909T190659Z-qwen3vl-german-pages-v2`` at ``status: training`` after its
+    trainer had died in a network outage — measured on the box:
+
+        os.kill(2786095, 0)      -> no error
+        /proc/2786095/stat       -> state Z
+
+    and with ``max_concurrent: 1`` that one stale record meant no job could start
+    again, on two idle GPUs, until the record was edited by hand (#118).
+
+    ``/proc`` is Linux; elsewhere there is no zombie distinction to be had from
+    the signal probe, so that is the fallback and it keeps the old behaviour.
+    """
+    if Path(proc_root).is_dir():
+        # Where /proc exists it is authoritative, for both answers: a state letter
+        # says what the process is doing, and a missing entry says it is gone.
+        return _pid_state(pid, proc_root) not in (None, "Z")
+    # No /proc at all (macOS, where the dev suite runs). There is no zombie
+    # distinction to be had from a signal probe, so this keeps the old behaviour.
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -104,6 +152,30 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:  # exists, owned by someone else
         return True
     return True
+
+
+def reap_children() -> int:
+    """Wait on any finished child, so it stops being a zombie. Returns how many.
+
+    The runners are spawned detached and their ``Popen`` handles are discarded, so
+    nothing ever waits on them and every finished run leaves a defunct entry
+    behind. :func:`_pid_alive` no longer believes those, which is the fix that
+    matters; this keeps them from piling up in the process table as well.
+
+    Never raises and never blocks: ``ECHILD`` simply means there is nothing to
+    reap, which is the normal case.
+    """
+    reaped = 0
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return reaped
+        except OSError:
+            return reaped
+        if pid == 0:
+            return reaped
+        reaped += 1
 
 
 class JobStore:
@@ -135,7 +207,10 @@ class JobStore:
         if paths.job_json.exists():
             raise JobStoreError(f"job {job_id} already exists")
         paths.mkdirs()
-        job = TrainJob(id=job_id, request=request, status="queued")
+        # Which code accepted the job (#147). Imported here, not at module level:
+        # codeversion imports contracts, and the store is imported by everything.
+        from atr_serving.training.codeversion import current_code
+        job = TrainJob(id=job_id, request=request, status="queued", code=current_code())
         self.save(job)
         return job
 

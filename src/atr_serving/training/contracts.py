@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -39,19 +39,63 @@ KRAKEN_PLUS_SPEC = (
 # to run here — vLLM 0.11 would need the whole card.
 VLM_BASE_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 
+#: TrOCR fine-tunes always start from a pretrained encoder-decoder; there is no
+#: from-scratch case. Mirrors VLM_BASE_MODEL so the two backends read alike.
+TROCR_BASE_MODEL = "microsoft/trocr-base-handwritten"
+
 #: Instruction given to the VLM for every training and evaluation example. It is
 #: stored on the trained ModelSpec (``prompt``) so serving replays exactly the
 #: wording the model was tuned on — a different prompt at inference is a silent
 #: distribution shift.
 VLM_PROMPT = "Transcribe the handwritten text in this image exactly as written."
 
-#: Visual-token budget per sample kind, in pixels (the processor divides by 28²
-#: to get visual tokens). Same figures as lassberg/vlm_training's collator: a
-#: line crop needs a few hundred tokens, a full page needs thousands, and feeding
-#: both through one budget either starves the page or wastes the line.
-VLM_PIXEL_BUDGET: dict[str, int] = {"line": 256 * 28 * 28, "page": 2048 * 28 * 28}
+#: Visual-token budget per sample kind, in pixels. A processor divides by the area
+#: of one merged patch to get visual tokens, and **that area is model-specific**:
+#: 28² is Qwen2-VL (patch 14 x merge 2), while Qwen3-VL is patch 16 x merge 2 = 32².
+#: These figures carry the intended *token* counts — 256 for a line, 2048 for a page,
+#: as in lassberg/vlm_training's collator — against Qwen3-VL's grid, because that is
+#: what ``VlmTrainParams.base_model`` points at. The runtime does not trust this: it
+#: re-derives the cap from the processor's own patch_size/merge_size and reports it
+#: (``vlm_dataset.apply_visual_budget``), so a base with a different grid cannot
+#: quietly train at another budget than the one written here (#86).
+VLM_PIXEL_BUDGET: dict[str, int] = {"line": 256 * 32 * 32, "page": 2048 * 32 * 32}
 #: Token budget per sample kind (prompt + image + transcription).
 VLM_MAX_SEQ_LEN: dict[str, int] = {"line": 512, "page": 4096}
+#: Tokens the model may *generate* at evaluation, per sample kind. This has to
+#: scale with granularity for the same reason the input budget does, and it did
+#: not: a flat 256 was right for a line and cut a page in half (#92).
+#:
+#: The failure is invisible, which is what makes it dangerous — it surfaces as a
+#: bad CER, not as an error. `qwen3vl-sg-missiven-v1` was recorded at CER 0.5921
+#: with `length_ratio` 0.515; re-scored at 1536 tokens the same adapter gives
+#: **0.2785** at `length_ratio` 1.027. Half the reference was never generated.
+#:
+#: A St. Gallen missive page averages 967 reference characters at roughly 2
+#: characters per token in this orthography, so ~500 tokens; 1536 leaves room for
+#: the long ones without inviting a runaway generation.
+VLM_MAX_NEW_TOKENS: dict[str, int] = {"line": 256, "page": 1536}
+#: Transcription length past which a sample is dropped at compile rather than
+#: trained on (#110). **This is not `VLM_MAX_SEQ_LEN` in other units** — the two
+#: answer different questions, and conflating them is what cost eleven hours.
+#:
+#: `VLM_MAX_SEQ_LEN` is the budget the visual sizing targets; a sample over it is
+#: reported and trained anyway, and samples at 4–8 k tokens trained fine.
+#: This is the point where one sample's loss tensor stops being affordable at
+#: all: cross-entropy upcasts the logits to fp32, so a sequence costs
+#: ``tokens × 151,936 × 4`` bytes in a single allocation.
+#: `20260908T101611Z-qwen3vl-german-pages-v1` died in its eval loop 11 h 24 m in,
+#: at step 785 of 2355, on **one page of 32,477 characters** — 88× the median of
+#: 383 — which tokenized to 14,411 tokens and asked for **8.16 GiB** at once.
+#:
+#: 8,000 was chosen from that corpus's own distribution (13,953 pages: median 383,
+#: p90 ~2,200, p99 ~5,000, max 32,477). It drops **24 samples, 0.17 %**, and caps
+#: the loss allocation at ~3.4 GiB. The next threshold down, 6,000, saves 0.5 GiB
+#: and costs three times as many pages; 12,000 keeps 18 more pages and gives back
+#: a third of the headroom.
+#:
+#: A "line" longer than 1,000 characters is not a line — it is a mis-segmented
+#: block, and it was never going to train usefully.
+VLM_MAX_SAMPLE_CHARS: dict[str, int] = {"line": 1000, "page": 8000}
 
 # A model id doubles as a directory name and a registry id — keep it boring.
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -92,6 +136,14 @@ def utcnow() -> datetime:
 
 class DatasetNotOnHub(LookupError):
     """The repo (or the pinned revision) is not there."""
+
+
+class MultipleDatasets(AttributeError):
+    """Raised when single-dataset code meets a job that has several (#40).
+
+    An AttributeError subclass so it reads naturally where ``.dataset`` used to
+    be an attribute, and so ``getattr(req, "dataset", None)`` still degrades.
+    """
 
 
 class DatasetSelectionError(ValueError):
@@ -180,6 +232,9 @@ class DatasetCounts(BaseModel):
     lines: int = 0
     chars: int = 0
     samples_written: int = 0
+    #: Lines whose aspect ratio marks them as probably mis-segmented (#90).
+    wide_lines: int = 0
+    max_aspect: float = 0.0
 
 
 class KrakenTrainParams(BaseModel):
@@ -189,9 +244,15 @@ class KrakenTrainParams(BaseModel):
 
     spec: str = KRAKEN_PLUS_SPEC
     batch_size: int = Field(default=256, ge=1)
+    #: ``cosine``, not ``1cycle``: kraken 7.0.2 hands ``OneCycleLR`` a
+    #: ``steps_per_epoch`` counted in **samples**, so the cycle is ``batch_size``
+    #: times too long and no run ever leaves the warmup — every kraken run this
+    #: project did before 2026-09-15 trained at a near-constant ``lrate / 25``
+    #: (#96). ``1cycle`` stays in the type so job records written then still load;
+    #: :func:`ketos_cmd.train_cmd` refuses to build a new run with it.
     schedule: Literal[
         "constant", "1cycle", "exponential", "step", "reduceonplateau", "cosine"
-    ] = "1cycle"
+    ] = "cosine"
     lrate: float = Field(default=1e-4, gt=0.0)
     quit: Literal["early", "fixed"] = "fixed"
     epochs: int = Field(default=50, ge=1)
@@ -217,10 +278,17 @@ class KrakenTrainParams(BaseModel):
 
     @model_validator(mode="after")
     def _one_cycle_needs_a_full_cycle(self) -> "KrakenTrainParams":
-        """kraken derives the 1cycle length from ``--epochs`` and steps OneCycleLR
-        per batch, so early stopping can cut the cycle off mid-ramp and leave the
-        LR nowhere near its annealed value. If someone asks for both anyway, hold
-        the run to the full cycle by defaulting ``min_epochs`` to ``epochs``."""
+        """kraken derives the 1cycle length from ``--epochs``, so early stopping
+        can cut the cycle off mid-ramp and leave the LR nowhere near its annealed
+        value. If someone asks for both anyway, hold the run to the full cycle by
+        defaulting ``min_epochs`` to ``epochs``.
+
+        This was written believing OneCycleLR is stepped per batch. It is stepped
+        per batch, but kraken sizes the cycle in **samples** (#96), so the cycle
+        is ``batch_size`` times too long and cutting it short is the smaller of
+        the two problems by far. The guard is kept for the day the sizing is
+        fixed upstream; until then ``train_cmd`` does not let a 1cycle run start.
+        """
         if self.schedule == "1cycle" and self.quit == "early" and self.min_epochs is None:
             object.__setattr__(self, "min_epochs", self.epochs)
         return self
@@ -267,7 +335,19 @@ class VlmTrainParams(BaseModel):
     modules_to_save: list[str] = Field(default_factory=list)
 
     # ── optimisation ─────────────────────────────────────────────────────────
+    #: Minimum epochs. With ``max_epochs`` set this is a floor, not a count.
     epochs: int = Field(default=3, ge=1)
+    #: Ceiling for the continuation policy (#88). None = train exactly ``epochs``
+    #: and stop, the old behaviour. Set it and the run keeps going while the
+    #: validation loss still improves, the way kraken's ``--quit early`` does —
+    #: ``kraken-medieval-shard00-std`` ran to epoch 66 under a 30-epoch schedule
+    #: and peaked at 21, which a fixed count would have missed by 45 epochs.
+    max_epochs: int | None = Field(default=None, ge=1)
+    #: Evaluations without a real improvement before stopping.
+    patience: int = Field(default=2, ge=1)
+    #: How much better counts as better. Without it a loss that improves in the
+    #: fifth decimal reads as improvement and the run never stops on its own.
+    min_delta: float = Field(default=1e-4, ge=0.0)
     #: Page samples can exceed 4 k tokens, so >1 risks OOM; scale with grad accum.
     batch_size: int = Field(default=1, ge=1)
     accumulate_grad_batches: int = Field(default=16, ge=1)
@@ -281,8 +361,26 @@ class VlmTrainParams(BaseModel):
 
     # ── budgets ──────────────────────────────────────────────────────────────
     #: None = the granularity's entry in VLM_PIXEL_BUDGET / VLM_MAX_SEQ_LEN.
-    max_pixels: int | None = Field(default=None, ge=28 * 28)
+    #: Checkpoint every N optimizer steps. 0 keeps the per-epoch strategy, which
+    #: is right when an epoch is minutes. It is useless on a preemptable queue at
+    #: corpus scale: one epoch over 10 M line crops is days, the walltime is 24 h,
+    #: and a job preempted at hour 23 with epoch-only checkpoints resumes from
+    #: nothing. Set it to something that costs a few minutes of redone work.
+    save_steps: int = Field(default=0, ge=0)
+    max_pixels: int | None = Field(default=None, ge=32 * 32)
     max_seq_len: int | None = Field(default=None, ge=32)
+    #: Drop training samples whose transcription is shorter than this. 0 = off.
+    #: **Training only** — validation keeps every sample, so a CER stays
+    #: comparable with runs made before the filter existed.
+    #:
+    #: For the reason it exists, see the medieval corpus: 20.9 % of its lines are
+    #: 1-3 characters (folio numbers, column figures, marginalia), against 0.8 %
+    #: in the 19th-century one. A model trained on them learns to emit
+    #: end-of-turn early and then writes only the first word of every real line -
+    #: output/reference length ran 1.70 at 1-3 chars, 0.67 at 4-15, 0.14 at
+    #: 16-40, for a corpus-wide length_ratio of 0.48 and a CER near 0.55 that had
+    #: nothing to do with the hyperparameters.
+    min_train_chars: int = Field(default=0, ge=0)
 
     # ── evaluation ───────────────────────────────────────────────────────────
     #: Generating a transcription per sample is ~1 s; a full validation split of
@@ -290,7 +388,9 @@ class VlmTrainParams(BaseModel):
     #: recorded in the report so a CER is never quietly measured on a subset the
     #: reader did not know about.
     eval_samples: int = Field(default=200, ge=1)
-    max_new_tokens: int = Field(default=256, ge=1)
+    #: None = the granularity's entry in VLM_MAX_NEW_TOKENS. An explicit value
+    #: overrides it, the same contract ``max_pixels`` and ``max_seq_len`` follow.
+    max_new_tokens: int | None = Field(default=None, ge=1)
 
     # ── run ──────────────────────────────────────────────────────────────────
     seed: int = 42
@@ -299,6 +399,28 @@ class VlmTrainParams(BaseModel):
     device: str = "cuda:0"
     #: Weights & Biases run name; None = reporting off (the box has no wandb key).
     wandb_run: str | None = None
+
+    @model_validator(mode="after")
+    def _check_epoch_bounds(self):
+        if self.max_epochs is not None and self.max_epochs < self.epochs:
+            raise ValueError(
+                f"max_epochs={self.max_epochs} is below epochs={self.epochs}. "
+                "`epochs` is the floor and `max_epochs` the ceiling (#88)."
+            )
+        return self
+
+    @property
+    def continuation(self):
+        """The policy this run trains under, or None for a fixed epoch count."""
+        from atr_serving.training.continuation import ContinuationPolicy
+
+        if self.max_epochs is None:
+            return None
+        return ContinuationPolicy(
+            min_epochs=self.epochs, max_epochs=self.max_epochs,
+            patience=self.patience, min_delta=self.min_delta,
+            greater_is_better=False,          # the metric is eval_loss
+        )
 
     @property
     def effective_batch_size(self) -> int:
@@ -310,6 +432,10 @@ class VlmTrainParams(BaseModel):
     def sequence_budget(self) -> int:
         return self.max_seq_len or VLM_MAX_SEQ_LEN[self.granularity]
 
+    def generation_budget(self) -> int:
+        """How many tokens evaluation may generate for one sample."""
+        return self.max_new_tokens or VLM_MAX_NEW_TOKENS[self.granularity]
+
 
 class TrOCRTrainParams(BaseModel):
     """Hyperparameters for a TrOCR fine-tune (microsoft/trocr-* or dh-unibe/*)."""
@@ -317,8 +443,10 @@ class TrOCRTrainParams(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     # ── model ────────────────────────────────────────────────────────────────
-    #: TrOCR is a fine-tune only — a base model is always required.
-    base_model: str = "microsoft/trocr-base-handwritten"
+    #: TrOCR is a fine-tune only — a base model is always required. Copied up to
+    #: ``TrainRequest.base_model`` at validation, which is what the runner and the
+    #: step-count guard read.
+    base_model: str = TROCR_BASE_MODEL
 
     # ── seq2seq optimisation ─────────────────────────────────────────────────
     epochs: int = Field(default=3, ge=1)
@@ -379,6 +507,27 @@ class TrainRequest(BaseModel):
     #: For backwards compatibility a single ``dataset`` field is also accepted
     #: and normalised to a one-element list.
     datasets: list[DatasetSpec] = Field(min_length=1)
+
+    @property
+    def dataset(self) -> DatasetSpec:
+        """The single dataset — for the paths that only make sense with one.
+
+        Reading this on a multi-dataset job **raises** rather than quietly
+        returning the first. Most of the subsystem was written when a job had
+        exactly one dataset, and silently handing back ``datasets[0]`` would turn
+        every un-migrated call site into a wrong answer instead of an error: a
+        model card naming one corpus for a model trained on three, a spec
+        verified while two others were not. Loud is the whole point — this repo's
+        recurring failure is a plausible number from a path nobody checked.
+        """
+        if len(self.datasets) != 1:
+            raise MultipleDatasets(
+                f"this job has {len(self.datasets)} datasets, so `.dataset` is "
+                "ambiguous. The caller needs to handle `.datasets` explicitly — "
+                "verifying, reporting or publishing only the first would be wrong "
+                "in a way that reads as correct."
+            )
+        return self.datasets[0]
     #: kraken: registry id or raw Zenodo DOI to fine-tune from, None = from
     #: scratch. vllm: the HF base checkpoint the LoRA adapts — never None, since
     #: there is no such thing as training a VLM from scratch here; it defaults to
@@ -387,6 +536,10 @@ class TrainRequest(BaseModel):
     params: KrakenTrainParams | TrOCRTrainParams | VlmTrainParams = Field(
         default_factory=KrakenTrainParams
     )
+    #: Run even when the step-count guard says the configuration cannot converge
+    #: (#72). For a deliberate smoke test; the override is recorded on the job so
+    #: the resulting CER is never read as an ordinary one.
+    force: bool = False
     notes: str | None = None
 
     @model_validator(mode="before")
@@ -429,6 +582,16 @@ class TrainRequest(BaseModel):
             )
         if self.engine == "vllm" and not self.base_model:
             object.__setattr__(self, "base_model", VLM_BASE_MODEL)
+        if self.engine == "trocr" and not self.base_model:
+            # TrOCR is a fine-tune only, and its base sat on the *params* model
+            # while the runner and the convergence guard both read
+            # ``request.base_model``. Left unfilled, a submitted job passed
+            # ``--base-model None`` to the training script, and #72 judged it
+            # "from scratch" — the 2,000-step floor rather than the 500 a
+            # fine-tune needs. One field is the source of truth; params supplies
+            # the default.
+            object.__setattr__(self, "base_model",
+                               getattr(self.params, "base_model", TROCR_BASE_MODEL))
         return self
 
 
@@ -473,6 +636,14 @@ class Progress(BaseModel):
     val_accuracy: float | None = None
     pages_written: int | None = None
     lines_written: int | None = None
+    #: Training lines after the split — what the step-count guard divides by.
+    #: Distinct from ``lines_written``, which counts every transcribed line found,
+    #: evaluation included.
+    train_lines: int | None = None
+    #: What the configuration will actually cost, computed once prepare knows the
+    #: line count (#72).
+    steps_per_epoch: int | None = None
+    total_steps: int | None = None
     #: VLM backend: training examples built in ``compile`` (one per cropped line,
     #: or one per page at ``granularity: page``). Distinct from ``lines_written``,
     #: which counts transcribed lines found while materializing — the two differ
@@ -481,6 +652,53 @@ class Progress(BaseModel):
     #: Per-dataset materialisation counts (pages, skipped, lines, chars).
     #: Supersedes the flat counters above when multiple datasets are used.
     dataset_counts: list[DatasetCounts] = Field(default_factory=list)
+    #: Training pages dropped because their document is reserved for evaluation
+    #: (#98). 0 means the registry was consulted and matched nothing — not that
+    #: nothing was checked, which is what the log line says.
+    reserved_pages: int = 0
+    #: Aspect ratio per character over the prepared lines — what the line-geometry
+    #: guard compares against the VGSL spec. Recorded so it can travel with a
+    #: cached artefact (#109), whose pages are deleted once it is stored.
+    aspect_per_char: float | None = None
+    #: VLM: samples dropped at compile for a transcription past
+    #: ``VLM_MAX_SAMPLE_CHARS``, and the longest one seen *before* the drop (#110).
+    #: Measured before so the record shows what the corpus contained, not what
+    #: survived — the outlier is the finding.
+    long_samples: int | None = None
+    #: VLM: training samples dropped at compile for being shorter than
+    #: ``min_train_chars``. Validation is never filtered, so this counts the
+    #: training split alone.
+    short_samples: int | None = None
+    max_sample_chars: int | None = None
+    #: The cached artefact (#109) this run's compiled corpus lives in, and
+    #: whether this job built it or reused one. Set on both paths, because after
+    #: compile the arrows are in the cache rather than in the job directory anyone
+    #: would look in first — "which corpus did this run actually train on" has to
+    #: stay answerable from the job record alone.
+    artefact: str | None = None
+
+
+class CodeVersion(BaseModel):
+    """Which code did something: the git commit of the checkout it was imported from.
+
+    A job record says what was trained and what it scored, and until #147 not
+    with which code — so a CER could not be tied to the evaluator that measured
+    it. On UBELIX that mattered twice: the container imports ``atr_serving`` from
+    a checkout via ``PYTHONPATH``, a job runs whatever that checkout holds when it
+    **starts**, and two runs started on a checkout a day behind ``main``.
+
+    ``commit`` is ``None`` when the code does not run from a git checkout (an
+    installed wheel) or git is unavailable: unknown is recorded as unknown, never
+    guessed. ``dirty`` means tracked files differed from ``commit``.
+    """
+
+    commit: str | None = None
+    dirty: bool | None = None
+
+    def short(self) -> str:
+        if not self.commit:
+            return "unknown"
+        return self.commit[:12] + ("+dirty" if self.dirty else "")
 
 
 class StageRecord(BaseModel):
@@ -490,6 +708,9 @@ class StageRecord(BaseModel):
     finished_at: datetime | None = None
     exit_code: int | None = None
     log: str | None = None  # path, relative to the job dir
+    #: The code this stage actually ran with, which on a resumed or requeued job
+    #: need not be the code the job was created with (#147).
+    code: CodeVersion | None = None
 
 
 class TrainJob(BaseModel):
@@ -499,6 +720,9 @@ class TrainJob(BaseModel):
 
     id: str
     request: TrainRequest
+    #: The code the job was created with (#147). Each stage records its own in
+    #: ``StageRecord.code``; see :meth:`code_summary`.
+    code: CodeVersion | None = None
     status: JobStatus = "queued"
     stage: JobStage | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -523,7 +747,19 @@ class TrainJob(BaseModel):
     #: the gateway for this model. False with a reason is a normal outcome, not a
     #: failure — the model is trained and registered, it is simply not advertised.
     promoted: bool | None = None
+    #: What auto-publish did, in words — including why it did nothing (#88). The
+    #: job record is where anyone looks for why a model is or is not on the hub.
+    published: str | None = None
     promotion_reason: str | None = None
+    #: Set when the step-count guard refused the configuration and ``force`` ran it
+    #: anyway (#72) — so a CER from a run that was known not to converge is never
+    #: mistaken for an ordinary one.
+    convergence_override: str | None = None
+    #: Set when the line-geometry guard refused the spec and ``force`` ran it
+    #: anyway (#91, S10). Kept separate from ``convergence_override``: they refuse
+    #: for unrelated reasons — too few optimizer steps versus too few CTC
+    #: timesteps — and a record that conflated them could not say which.
+    geometry_override: str | None = None
     #: Local scratch holding this run's checkpoints (outside the job directory —
     #: see TrainerSettings.checkpoint_root). Recorded so it is discoverable and
     #: can be cleaned up with the job.
@@ -532,3 +768,16 @@ class TrainJob(BaseModel):
     @property
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
+
+    def code_summary(self) -> dict[str, dict[str, Any] | None]:
+        """``{"created": …, "<stage>": …}`` — the code behind each part of this job.
+
+        Written into ``metadata.json`` by the register stage, so a published CER
+        names the commit of the evaluator that measured it (the ``test`` entry),
+        not only the one the job was submitted with.
+        """
+        out: dict[str, dict[str, Any] | None] = {
+            "created": self.code.model_dump() if self.code else None}
+        for record in self.stages:
+            out[record.name] = record.code.model_dump() if record.code else None
+        return out

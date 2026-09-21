@@ -11,11 +11,17 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from atr_serving.contracts import Line, OcrResponse, RecognitionResult, SegmentResponse
+from atr_serving.contracts import (
+    Line,
+    OcrResponse,
+    RecognitionResult,
+    SecondOpinion,
+    SegmentResponse,
+)
 from atr_serving.registry import ModelSpec
 
 __all__ = [
-    "Line", "OcrResponse", "RecognitionResult", "SegmentResponse",
+    "Line", "OcrResponse", "RecognitionResult", "SecondOpinion", "SegmentResponse",
     "EngineStatus", "HealthResponse", "ModelInfo", "ModelsResponse",
 ]
 

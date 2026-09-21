@@ -77,6 +77,10 @@ def settings(tmp_path: Path, venvs: Path) -> TrainerSettings:
         trained_root=tmp_path / "trained",
         overlay_path=tmp_path / "models.local.yaml",
         venvs_root=venvs,
+        # Isolated deliberately: the default is ~/atr-cache/checkpoints, so a test
+        # that writes checkpoints would land in the developer's home directory and
+        # collide with any other test whose job id shares its second.
+        checkpoint_root=tmp_path / "checkpoints",
         min_free_disk_gb=0.0,
     )
 
@@ -124,7 +128,7 @@ def test_submitted_job_is_readable(client):
     body = client.get(f"/jobs/{job_id}").json()
     assert body["request"]["model_id"] == "kraken-thun-missiven-v1"
     assert body["request"]["params"]["batch_size"] == 256
-    assert body["request"]["params"]["schedule"] == "1cycle"
+    assert body["request"]["params"]["schedule"] == "cosine"
 
 
 def test_invalid_request_is_rejected(client):
@@ -153,7 +157,7 @@ def test_a_project_on_both_sides_of_the_split_is_refused_at_submit(client):
 
 
 def test_a_spec_the_hub_rejects_is_refused_with_every_problem_at_once(client, app):
-    app.state.verify_spec = lambda spec, settings: [
+    app.state.verify_spec = lambda spec, settings, **kw: [
         "project 'GT_Thun-Trainig' not found under data/train/",
         "no .parquet files found",
     ]
@@ -166,7 +170,7 @@ def test_an_unreachable_hub_queues_the_job_rather_than_refusing_it(client, app):
     """"Could not check" is not "your spec is wrong". The job downloads when it
     starts, possibly hours later, so a hiccup now must not cost the submission —
     but the record says it went in unverified."""
-    def unreachable(spec, settings):
+    def unreachable(spec, settings, **kw):
         raise VerificationUnavailable("ConnectionError: hub unreachable")
 
     app.state.verify_spec = unreachable
@@ -177,14 +181,14 @@ def test_an_unreachable_hub_queues_the_job_rather_than_refusing_it(client, app):
 
 
 def test_a_verified_submission_says_so(client, app):
-    app.state.verify_spec = lambda spec, settings: []
+    app.state.verify_spec = lambda spec, settings, **kw: []
     resp = client.post("/jobs", json=BODY)
     assert resp.status_code == 202
     assert resp.json()["dataset_verified"] is True
 
 
 def test_verify_answers_without_queueing_anything(client, app):
-    app.state.verify_spec = lambda spec, settings: ["project 'typo' not found"]
+    app.state.verify_spec = lambda spec, settings, **kw: ["project 'typo' not found"]
     resp = client.post("/jobs/verify", json=BODY)
     assert resp.status_code == 200          # an answered question, not a failed request
     assert resp.json()["valid"] is False
@@ -560,11 +564,13 @@ def test_a_streaming_run_does_not_care_where_the_cache_lives(client, settings, m
 
 
 # ── the per-epoch record (#38) ──────────────────────────────────────────────
-def test_the_curve_is_404_until_the_train_stage_writes_it(client):
+def test_the_curve_answers_before_the_train_stage_writes_it(client):
+    """Was a 404 until #77. A caller polling a running job should not have to
+    handle one body for "not yet" and another for "here you go"."""
     job_id = client.post("/jobs", json=BODY).json()["job_id"]
     resp = client.get(f"/jobs/{job_id}/curve")
-    assert resp.status_code == 404
-    assert "train stage" in resp.json()["detail"]
+    assert resp.status_code == 200
+    assert resp.json()["points"] == []
 
 
 def test_the_curve_is_served_once_written(client):
@@ -582,3 +588,154 @@ def test_the_curve_is_served_once_written(client):
     assert body["best"] == {"epoch": 50, "val_metric": 0.92}
     assert body["still_improving"] is True
     assert body["complete"] is False        # top-10 only; never claims otherwise
+
+
+def test_every_dataset_is_verified_not_only_the_first(client, app):
+    """Checking one of three and answering "valid" is the same class of mistake
+    the guard exists to prevent."""
+    seen = []
+
+    def check(spec, settings, **kw):
+        seen.append(spec.hf_repo)
+        return ["project 'typo' not found"] if spec.hf_repo.endswith("second") else []
+
+    app.state.verify_spec = check
+    body = {**BODY, "datasets": [{"hf_repo": "dh-unibe/first", "train_projects": ["a"]},
+                                 {"hf_repo": "dh-unibe/second", "train_projects": ["b"]}]}
+    body.pop("dataset", None)
+    resp = client.post("/jobs/verify", json=body)
+
+    assert seen == ["dh-unibe/first", "dh-unibe/second"]
+    assert resp.json()["valid"] is False
+    assert "dh-unibe/second" in resp.json()["errors"][0]   # which one, not just what
+
+
+# ── base_model is checked at submit, not in the train stage (#76) ───────────
+class TestBaseModelAtSubmit:
+    """A run was lost to `kraken-medieval_generic_b is not a valid DOI` raised in
+    the TRAIN stage — after prepare and compile. Everything needed to refuse it
+    was in the request."""
+
+    @pytest.fixture(autouse=True)
+    def registry(self, app):
+        from atr_serving.registry import ModelSpec, Registry
+
+        app.state.registry = Registry([
+            ModelSpec(id="kraken-late_medieval_german", engine="kraken",
+                      zenodo_id="10.5281/zenodo.15366732", task="htr"),
+        ])
+        yield
+        if hasattr(app.state, "registry"):
+            delattr(app.state, "registry")
+
+    def test_an_unknown_base_model_is_refused_before_a_job_exists(self, client):
+        resp = client.post("/jobs", json={**BODY, "base_model": "kraken-nope"})
+        assert resp.status_code == 400
+        assert "kraken-late_medieval_german" in resp.json()["detail"]
+        assert client.get("/jobs").json()["jobs"] == []   # nothing was queued
+
+    def test_a_registry_id_is_accepted(self, client):
+        resp = client.post("/jobs", json={
+            **BODY, "base_model": "kraken-late_medieval_german",
+            "params": {"batch_size": 16, "epochs": 30, "resize": "union"}})
+        assert resp.status_code == 202
+
+    def test_a_zenodo_doi_is_still_accepted(self, client):
+        resp = client.post("/jobs", json={
+            **BODY, "base_model": "10.5281/zenodo.15366732",
+            "params": {"batch_size": 16, "epochs": 30}})
+        assert resp.status_code == 202
+
+    def test_from_scratch_is_unaffected(self, client):
+        """base_model is optional for kraken; absent means from scratch."""
+        assert client.post("/jobs", json=BODY).status_code == 202
+
+
+# ── the curve is for watching a RUNNING job (#77) ───────────────────────────
+class TestCurveWhileRunning:
+    """`training.json` is written when the train stage ends, so the endpoint had
+    nothing to say while a job was training — which is when it is most wanted.
+    Lightning writes each epoch's metric into the checkpoint filename as it goes,
+    so the data was on disk the whole time."""
+
+    def _training_job(self, client, settings, checkpoints: dict[int, float]):
+        job_id = client.post("/jobs", json=BODY).json()["job_id"]
+        store = store_of(client)
+        store.advance(store.load(job_id), "preparing")
+        store.advance(store.load(job_id), "compiling")
+        job = store.advance(store.load(job_id), "training")
+        ckpt = settings.checkpoint_root / job_id
+        ckpt.mkdir(parents=True, exist_ok=True)
+        for epoch, metric in checkpoints.items():
+            (ckpt / f"checkpoint_{epoch:02d}-{metric:.4f}.ckpt").touch()
+        job.checkpoint_dir = str(ckpt)
+        store.save(job)
+        return job_id
+
+    def test_a_running_job_reports_the_epochs_written_so_far(self, client, settings):
+        job_id = self._training_job(client, settings, {5: 0.71, 6: 0.73, 7: 0.75})
+        body = client.get(f"/jobs/{job_id}/curve").json()
+
+        assert body["live"] is True
+        assert [p["epoch"] for p in body["points"]] == [5, 6, 7]
+        assert body["best"]["epoch"] == 7
+        assert body["still_improving"] is True
+        assert "while the job is training" in body["note"]
+
+    def test_val_error_is_given_alongside_the_accuracy(self, client, settings):
+        job_id = self._training_job(client, settings, {5: 0.75})
+        point = client.get(f"/jobs/{job_id}/curve").json()["points"][0]
+        assert point["val_metric"] == 0.75
+        assert point["val_error"] == pytest.approx(0.25)
+
+    def test_a_job_that_has_not_trained_answers_in_the_same_shape(self, client):
+        """Not a 404: callers poll this, and an answer that changes shape between
+        'not yet' and 'here you go' makes every caller handle two bodies."""
+        job_id = client.post("/jobs", json=BODY).json()["job_id"]
+        resp = client.get(f"/jobs/{job_id}/curve")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["points"] == []          # iterable, not null — the #77 complaint
+        assert body["best"] is None
+        assert "no checkpoints yet" in body["note"]
+        assert body["job_id"] == job_id
+
+    def test_the_written_record_wins_once_the_stage_has_finished(self, client, settings):
+        """A finished stage's training.json is the authority; the checkpoint dir
+        gets pruned and would give a poorer answer."""
+        import json as _json
+
+        job_id = self._training_job(client, settings, {5: 0.71})
+        (store_of(client).paths(job_id).root / "training.json").write_text(
+            _json.dumps({"job_id": job_id, "points": [{"epoch": 42, "val_metric": 0.9}],
+                         "best": {"epoch": 42, "val_metric": 0.9}, "complete": False,
+                         "source": "file", "note": "final", "last_epoch": 42,
+                         "still_improving": True}),
+            encoding="utf-8")
+        body = client.get(f"/jobs/{job_id}/curve").json()
+        assert [p["epoch"] for p in body["points"]] == [42]
+        assert "live" not in body
+
+    def test_an_unknown_job_is_still_a_404(self, client):
+        assert client.get("/jobs/20260101T000000Z-nope/curve").status_code == 404
+
+
+# ── the GPU claim is gone (#139) ─────────────────────────────────────────────
+
+def test_the_trainer_no_longer_serves_a_gpu_claim(client):
+    """The gateway asked this before every vLLM launch (#129) while both shared
+    idhefix GPU 1. Training left that box on 16.09.2026; nothing asks now."""
+    assert client.get("/gpu-claim").status_code == 404
+    assert not hasattr(app_module, "refresh_gpu_claim")
+    assert not hasattr(app_module, "GPU_STAGES")
+
+
+def test_the_runner_no_longer_asks_the_gateway_to_let_go():
+    """A run reaching ``train`` used to POST the gateway's release endpoint."""
+    import importlib.util
+
+    from atr_serving.training.runner_base import BasePipeline
+
+    assert importlib.util.find_spec("atr_serving.training.gpu_release") is None
+    assert not hasattr(BasePipeline, "_release_gpu")

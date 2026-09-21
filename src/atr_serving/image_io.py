@@ -4,6 +4,8 @@ Provides:
 - ``decode_image``: bytes / Path / string → PIL.Image in RGB mode.
 - ``resize_longest_edge``: resize so the longest edge ≤ ``max_px``,
   preserving aspect ratio.
+- ``fit_pixel_budget``: resize so the total **area** ≤ ``max_pixels``.
+- ``encode_png``: PIL.Image → PNG bytes.
 - ``validate_format``: confirm the file bytes start with a known image magic.
 - ``SUPPORTED_EXTENSIONS``: set of extensions recognised by ``decode_image``.
 """
@@ -18,6 +20,8 @@ from PIL import Image
 
 __all__ = [
     "decode_image",
+    "fit_pixel_budget",
+    "encode_png",
     "resize_longest_edge",
     "validate_format",
     "SUPPORTED_EXTENSIONS",
@@ -157,3 +161,41 @@ def resize_longest_edge(img: Image.Image, max_px: int) -> Image.Image:
     new_h = int(round(h * scale))
     # PIL Resampling.BILINEAR is a good trade-off quality/speed for OCR input
     return img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+
+def fit_pixel_budget(img: Image.Image, max_pixels: int) -> Image.Image:
+    """Resize ``img`` so ``width * height`` is at most ``max_pixels``.
+
+    An **area**, not an edge — and the distinction is the whole point. A visual
+    transformer spends one token per merged patch, so what it can afford is a
+    number of pixels, not a length; a budget expressed as a longest edge says
+    nothing about what a wide page costs. Conflating the two is how a budget that
+    looked set turned out not to be (#86), which is why this sits beside
+    ``resize_longest_edge`` rather than inside it.
+
+    Aspect ratio is preserved and an image already within budget is returned
+    unchanged — never upscaled, because a model asked to read invented pixels
+    reads invented text.
+    """
+    if not isinstance(max_pixels, int) or max_pixels <= 0:
+        raise ValueError(f"max_pixels must be a positive integer, got {max_pixels!r}")
+
+    w, h = img.size
+    area = w * h
+    if area <= max_pixels:
+        return img
+
+    scale = (max_pixels / area) ** 0.5
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    return img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+
+
+def encode_png(img: Image.Image) -> bytes:
+    """PNG bytes for ``img``. Lossless, so a resize is the only thing that
+    changed — a JPEG round trip would add compression artifacts on top of it and
+    leave nobody able to say which of the two a reading reacted to."""
+    import io
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()

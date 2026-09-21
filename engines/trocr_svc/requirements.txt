@@ -1,7 +1,14 @@
 fastapi
 uvicorn
 python-multipart>=0.0.9
-torch>=2.2
-transformers>=4.40
+# PIN BOTH ENDS. `torch>=2.2` from the default index resolved to 2.12.1+cu130 on
+# 2026-08-10, and asterAIx runs driver 565.57.01 / CUDA 12.7 — so torch reported
+# "the NVIDIA driver on your system is too old", cuda.is_available() was False,
+# and this service transcribed on CPU for weeks. It looked healthy the whole
+# time: the warm-up succeeded, /health said ok, requests returned 200s. Slowly.
+# make_venvs.sh installs torch from the cu128 index BEFORE this file, as it does
+# for every other GPU venv; the pin here keeps a bare `pip install -r` honest.
+torch==2.8.0
+transformers>=4.40,<5
 Pillow>=10.0
 loguru

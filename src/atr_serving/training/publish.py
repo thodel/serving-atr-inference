@@ -423,9 +423,7 @@ def model_card(model: TrainedModel, repo_id: str, licence: str | None = None) ->
         f"| characters scored | {_plain(metrics.get('chars'))} |",
         f"| character errors | {_plain(metrics.get('errors'))} |",
         "",
-        "Measured on **this run's own held-out validation split** (page-level and "
-        "seeded, so no page contributes lines to both sides). It is not a score on a "
-        "shared benchmark and does not transfer to a different corpus.",
+        *_where_measured(model),
         "",
         "## Training data",
         "",
@@ -450,6 +448,7 @@ def model_card(model: TrainedModel, repo_id: str, licence: str | None = None) ->
         f"| engine | `{model.engine}` |",
         f"| base model | {base} |",
         f"| training job | `{_plain(model.job_id)}` |",
+        f"| code | {_code_cell(model.metadata.get('code'))} |",
         f"| trained | {_plain(model.metadata.get('created'))} |",
         f"| weights | {', '.join(f'`{p.name}`' for p in model.weights) or '—'} |",
         "",
@@ -464,6 +463,114 @@ def model_card(model: TrainedModel, repo_id: str, licence: str | None = None) ->
         lines += ["", "## Notes", "",
                   str(model.request.get("notes") or model.metadata.get("notes"))]
     return "\n".join(lines) + "\n"
+
+
+def _where_measured(model: TrainedModel) -> list[str]:
+    """Where the number on the card comes from.
+
+    The card used to state one provenance for every model: "this run's own
+    held-out validation split (page-level and seeded)". For
+    ``kraken-medieval-german-v2`` that was **wrong in the direction that
+    understates it** — its 21.31 % was measured against `german_test.arrow`, 695
+    pages of 200 documents the run never saw, a document-grouped hold-out and a
+    far stronger claim than an in-run page split (#98).
+
+    A metric recorded with ``measured_on`` says so itself; the fixed sentence is
+    for the ordinary case where the run scored its own split. A card whose
+    provenance line is a template rather than a fact is how a leaky number and a
+    clean one come to look identical.
+    """
+    metrics = model.metrics
+    measured_on = metrics.get("measured_on")
+    note = metrics.get("note")
+    if measured_on:
+        lines = [f"Measured on **{measured_on}** — not on this run's own validation "
+                 "split. It is not a score on a shared benchmark and does not transfer "
+                 "to a different corpus."]
+        if note:
+            lines += ["", str(note)]
+        return lines
+    return [
+        "Measured on **this run's own held-out validation split** (page-level and "
+        "seeded, so no page contributes lines to both sides). It is not a score on a "
+        "shared benchmark and does not transfer to a different corpus.",
+        *_validation_scope(model),
+    ]
+
+
+def _validation_scope(model: TrainedModel) -> list[str]:
+    """Say how much of the validation set is genuinely unseen *hands*.
+
+    "Held-out validation split" is true of every run here and still hides the
+    distinction that decides what the number means. A dataset with
+    ``eval_projects`` contributes whole project directories the model never saw:
+    different writers, different hands. A dataset without them contributes a
+    seeded partition of the *same* projects — unseen pages in a hand the model
+    trained on, which is a much easier test.
+
+    A corpus that mixes the two reports one CER over both, and the headline then
+    reads as a held-out-hands number when most of it is not. On the 19th-century
+    run, `kurrent-xix` held out 21 `TEST_CITlab_*` projects while
+    `zh-regierungsratsprotokolle` — half the pages — contributed only a partition
+    split, and the card said nothing about it.
+
+    Derived from the run's own dataset records rather than written as a fixed
+    sentence, so it stays true for a corpus this code has never seen, including
+    one where every dataset holds projects out.
+    """
+    datasets = model.datasets
+    if not datasets:
+        return []
+    held = [d for d in datasets if d.eval_projects]
+    split = [d for d in datasets if not d.eval_projects]
+
+    def _names(links: list[Any]) -> str:
+        return ", ".join(f"`{d.repo}`" for d in links)
+
+    if not held:
+        return ["", "**The validation split is a seeded partition of the training "
+                    "projects.** It measures the model on pages it has not seen, in "
+                    "hands it has. Expect a higher error rate on a new writer."]
+    if not split:
+        return ["", "Every dataset here holds whole projects out of training "
+                    f"({_names(held)}), so the score is on **unseen hands**, not "
+                    "merely unseen pages."]
+    whose = "their own" if len(split) > 1 else "its own"
+    return ["", "**The score mixes two kinds of validation, and the difference "
+                f"matters.** {_names(held)} held whole projects out of training, so "
+                f"those lines test unseen hands. {_names(split)} contributed a seeded "
+                f"partition of {whose} training projects instead — unseen pages in a "
+                "hand the model trained on, which is the easier test. The figure above "
+                "is one CER over both, so read it as *mostly in-domain*, not as a "
+                "held-out-hands benchmark. Scoring the held-out projects on their own "
+                "would give the stricter number."]
+
+
+def _code_cell(code: Any) -> str:
+    """The commit that measured the metrics, and the one the job began with if different.
+
+    ``metadata["code"]`` is ``TrainJob.code_summary()`` (#147). Models registered
+    before it have none, and the card says so rather than leaving the row out: an
+    absent provenance row reads as an oversight, an explicit one as a fact.
+    """
+    if not isinstance(code, dict):
+        return "not recorded (trained before #147)"
+
+    def short(entry: Any) -> str | None:
+        if not isinstance(entry, dict) or not entry.get("commit"):
+            return None
+        return str(entry["commit"])[:12] + ("+dirty" if entry.get("dirty") else "")
+
+    measured, created = short(code.get("test")), short(code.get("created"))
+    trained = short(code.get("train"))
+    if measured is None and created is None:
+        return "not recorded"
+    parts = [f"evaluated with `{measured}`" if measured else "evaluator commit not recorded"]
+    if trained and trained != measured:
+        parts.append(f"trained with `{trained}`")
+    if created and created not in (measured, trained):
+        parts.append(f"submitted with `{created}`")
+    return ", ".join(parts)
 
 
 def _projects(projects: Any) -> str:

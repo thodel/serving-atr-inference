@@ -212,10 +212,13 @@ def test_an_explicit_base_model_is_kept():
 
 # ── backends ────────────────────────────────────────────────────────────────
 def test_each_backend_has_its_own_venv_and_runner():
-    assert set(BACKENDS) == {"kraken", "vllm"}
+    assert set(BACKENDS) == {"kraken", "trocr", "vllm"}
     venvs = {b.venv for b in BACKENDS.values()}
     modules = {b.runner_module for b in BACKENDS.values()}
-    assert len(venvs) == len(modules) == 2  # no shared dependency tree
+    # No shared dependency tree: kraken 7.0.2, a transformers new enough for
+    # Qwen3-VL, and TrOCR's own pin cannot coexist, and the supervising service
+    # imports none of them — it spawns each job with that engine's interpreter.
+    assert len(venvs) == len(modules) == len(BACKENDS)
 
 
 def test_runner_python_points_into_the_engine_s_venv():
@@ -224,5 +227,73 @@ def test_runner_python_points_into_the_engine_s_venv():
 
 
 def test_an_engine_without_a_backend_is_named():
-    with pytest.raises(UnknownBackend, match="trocr"):
-        backend_for("trocr")
+    """trocr was the example here until #44 gave it one."""
+    with pytest.raises(UnknownBackend, match="party"):
+        backend_for("party")
+
+
+# ── continuation flags (#88) ────────────────────────────────────────────────
+class TestContinuationFlags:
+    """They belong to training only. ``_common`` feeds evaluate_qlora too, whose
+    parser exits 2 on an unknown flag — six roundtrip tests caught that."""
+
+    def _train(self, **kw):
+        return train_cmd(PY, params=VlmTrainParams(**kw), base_model=VLM_BASE_MODEL,
+                         train_jsonl="t", val_jsonl="v", data_root="/j",
+                         output_dir="/o")
+
+    def test_the_ceiling_reaches_the_trainer(self):
+        cmd = self._train(epochs=1, max_epochs=8, patience=3, min_delta=0.01)
+        assert value(cmd, "--epochs") == "1"
+        assert value(cmd, "--max-epochs") == "8"
+        assert value(cmd, "--patience") == "3"
+        assert value(cmd, "--min-delta") == "0.01"
+
+    def test_without_a_ceiling_max_epochs_mirrors_epochs(self):
+        """Which is how the trainer knows continuation is off."""
+        cmd = self._train(epochs=3)
+        assert value(cmd, "--max-epochs") == value(cmd, "--epochs") == "3"
+
+    def test_the_eval_command_never_sees_them(self):
+        cmd = evaluate_cmd(PY, params=VlmTrainParams(epochs=1, max_epochs=8),
+                           base_model="b", adapter_dir="/ckpt", val_jsonl="v",
+                           data_root="/j", report="/r.json")
+        for flag in ("--max-epochs", "--patience", "--min-delta"):
+            assert flag not in cmd
+
+    def test_a_ceiling_below_the_floor_is_refused_at_construction(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="below epochs"):
+            VlmTrainParams(epochs=5, max_epochs=2)
+
+
+class TestGenerationBudget:
+    """The input budget scaled with granularity and the output budget did not.
+
+    qwen3vl-sg-missiven-v1 was recorded at CER 0.5921 with length_ratio 0.515 —
+    every page cut in half at 256 tokens. The same adapter, re-scored at 1536,
+    gives 0.2785 at length_ratio 1.027. Nothing about the model changed (#92).
+    """
+
+    def test_a_line_keeps_the_old_default(self):
+        assert VlmTrainParams(granularity="line").generation_budget() == 256
+
+    def test_a_page_gets_room_for_a_page(self):
+        """~967 reference characters at ~2 chars/token in this orthography."""
+        assert VlmTrainParams(granularity="page").generation_budget() == 1536
+
+    def test_an_explicit_value_still_wins(self):
+        assert VlmTrainParams(granularity="page",
+                              max_new_tokens=4000).generation_budget() == 4000
+
+    def test_the_eval_command_passes_the_resolved_budget(self):
+        cmd = evaluate_cmd(PY, params=VlmTrainParams(granularity="page"),
+                           base_model="b", adapter_dir="/ckpt", val_jsonl="v",
+                           data_root="/j", report="/r.json")
+        assert value(cmd, "--max-new-tokens") == "1536"
+
+    def test_the_generation_budget_is_never_below_the_line_default(self):
+        """A page cannot need less room than a line of the same page."""
+        for g in ("line", "page"):
+            assert VlmTrainParams(granularity=g).generation_budget() >= 256

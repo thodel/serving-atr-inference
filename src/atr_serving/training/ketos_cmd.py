@@ -19,7 +19,10 @@ from atr_serving.training.contracts import KrakenTrainParams, Metrics
 
 __all__ = [
     "KetosCommandError",
+    "ONE_CYCLE_REFUSAL",
+    "COMPILE_WORKER_TAPER_PAGES",
     "compile_cmd",
+    "compile_workers",
     "train_cmd",
     "evaluate_cmd",
     "find_best_weights",
@@ -40,6 +43,33 @@ def _global_opts(device: str, workers: int | None = None, seed: int | None = Non
     if seed is not None:
         opts += ["--seed", str(seed)]
     return opts
+
+
+#: Above this many pages in one manifest, ``compile_workers`` starts reducing
+#: ``--workers``. Below it, the requested count is used unchanged.
+COMPILE_WORKER_TAPER_PAGES = 20_000
+
+
+def compile_workers(requested: int, pages: int) -> int:
+    """How many ``ketos compile`` workers a manifest of this size can afford (#85).
+
+    Each worker decodes pages independently, so peak RSS scales with
+    ``workers x page size`` while ``--workers`` stayed a fixed 8 no matter how
+    large the manifest was. Job ``20260808T183111Z-kraken-medieval-full-v1``
+    compiled a single 461,586-page manifest with 8 workers and was SIGKILLed after
+    1 h 51 m; the OOM killer is the leading explanation, unconfirmed only because
+    the kernel journal for that day could not be read.
+
+    Chunking (#39) is the real fix — it bounds a manifest to ``chunk_pages`` — but
+    it is off by default and does not apply to the val side, so this is the floor
+    under it rather than a substitute for it. The taper is inverse-linear: the
+    requested count up to the threshold, then scaled down so that
+    ``workers x pages`` stays roughly constant, never below 1.
+    """
+    requested = max(1, requested)
+    if pages <= COMPILE_WORKER_TAPER_PAGES:
+        return requested
+    return max(1, min(requested, requested * COMPILE_WORKER_TAPER_PAGES // pages))
 
 
 def compile_cmd(
@@ -68,6 +98,30 @@ def compile_cmd(
     return cmd
 
 
+#: Why ``--schedule 1cycle`` cannot be used on kraken 7.0.2 (#96).
+#:
+#: ``kraken/train/vgsl.py`` passes ``len_train_set=len(datamodule.train_set)`` —
+#: a count of **samples** — into ``OneCycleLR(steps_per_epoch=...)``, which wants
+#: optimizer steps. The cycle therefore comes out ``batch_size`` times too long:
+#: shard_00 at 30 epochs produced ``total_steps`` 24,951,540 against 97,470 real
+#: steps, and that figure was *identical* at batch 64 and batch 256, which is the
+#: fingerprint. ``OneCycleLR`` starts at ``max_lr / 25`` and warms up over the
+#: first 30 % of the cycle, so the warmup would end after ~2,304 epochs: run 2
+#: moved from 4.000e-05 to 4.324e-05 in 85 epochs and 27 hours, and the annealing
+#: phase — the whole point of 1cycle — is never reached.
+#:
+#: So ``--lrate`` has silently meant ``lrate / 25``, held roughly constant, for
+#: every kraken run this project has done.
+ONE_CYCLE_REFUSAL = (
+    "--schedule 1cycle is broken on kraken 7.0.2: OneCycleLR is given "
+    "steps_per_epoch in samples rather than optimizer steps, so the cycle is "
+    "batch_size times too long, no run leaves the warmup, and --lrate silently "
+    "means lrate/25 (#96). Use 'cosine' (the default) or 'constant', which are "
+    "stepped the same way but encode no total length. If you deliberately want "
+    "the frozen warmup rate, ask for 'constant' at the rate you actually want."
+)
+
+
 def train_cmd(
     ketos: str | Path,
     *,
@@ -90,9 +144,14 @@ def train_cmd(
     * **the batch size must be passed explicitly.** The leading ``256`` of the
       VGSL spec only sizes ``example_input_array``; the dataloader reads
       ``--batch-size``.
+    * **``--epochs`` does not bound a run under ``--quit early``** — it sizes the
+      schedule and the ``stage N/∞`` counter, and ``--lag`` decides when to stop.
+      Worth knowing before reading ``epochs`` as "how long this will take" (#96).
     """
     if format_type not in {"path", "xml", "alto", "page", "binary"}:
         raise KetosCommandError(f"ketos 7.0.2 train has no format type {format_type!r}")
+    if params.schedule == "1cycle":
+        raise KetosCommandError(ONE_CYCLE_REFUSAL)
 
     cmd = [str(ketos), *_global_opts(params.device, params.workers, params.seed), "train",
            "--format-type", format_type,
@@ -256,4 +315,23 @@ def parse_test_report(text: str) -> Metrics:
         metrics.cer = 1.0 - metrics.char_accuracy / 100.0
     if metrics.word_accuracy is not None:
         metrics.wer = 1.0 - metrics.word_accuracy / 100.0
+
+    # length_ratio for the CTC path (#55). kraken reports no hypothesis length, but
+    # it is recoverable from the edit counts, because kraken and textmetrics use the
+    # SAME convention — verified in kraken/ketos/recognition.py, which aligns
+    # global_align(gt, pred) and then counts a gap in the GT side as a *deletion*
+    # and a gap in the prediction as an *insertion*:
+    #
+    #     insertions → characters MISSING from the hypothesis
+    #     deletions  → characters the hypothesis added
+    #
+    # so  hypothesis_chars = chars - insertions + deletions.
+    #
+    # This is inverted from the usual ASR convention, where an insertion is an extra
+    # emitted character. It is kept because both sides of this codebase already agree
+    # on it and a silent re-definition would corrupt every stored Metrics record.
+    if (metrics.chars and metrics.insertions is not None
+            and metrics.deletions is not None):
+        hyp_chars = metrics.chars - metrics.insertions + metrics.deletions
+        metrics.length_ratio = max(0.0, hyp_chars) / metrics.chars
     return metrics

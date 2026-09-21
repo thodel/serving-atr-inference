@@ -12,9 +12,12 @@ from atr_serving.training.hf_source import (
     VerificationUnavailable,
     DatasetSelectionError,
     data_files_for,
+    whole_split_glob,
+    collapse_complete_selection,
     hub_cache_dir,
     page_stem,
     project_glob,
+    resolve_to_files,
     row_to_page,
     verify_dataset_spec,
 )
@@ -42,15 +45,22 @@ def test_without_eval_projects_only_train_is_selected():
 
 
 def test_empty_selection_is_refused():
-    """Empty ``train_projects`` now means whole-dataset selection (no project dirs).
+    """The whole point: no projects must never mean 'download everything'.
 
-    The guard against unbounded selection is ``all_projects=True`` — it requires
-    ``max_pages`` and raises at construction time. ``train_projects=[]`` is a
-    valid whole-dataset spec, not an error.
+    #40 briefly made an empty selection resolve to the whole split, which is both
+    inconsistent with its own ``all_projects`` (that one requires ``max_pages``)
+    and silent on a per-project repo, where the resulting glob matches nothing and
+    the job dies pages later. Asking for everything is spelled ``all_projects``.
     """
     spec = DatasetSpec(hf_repo=REPO)
-    # Empty train_projects → whole split; data_files_for resolves to a glob.
-    assert data_files_for(spec) == {"train": ["data/train/*.parquet"]}
+    with pytest.raises(DatasetSelectionError, match="selects no train_projects"):
+        data_files_for(spec)
+
+
+def test_the_refusal_names_the_deliberate_way_to_ask_for_everything():
+    with pytest.raises(DatasetSelectionError) as exc:
+        data_files_for(DatasetSpec(hf_repo=REPO))
+    assert "all_projects" in str(exc.value) and "max_pages" in str(exc.value)
 
 
 def test_all_projects_without_max_pages_is_refused():
@@ -185,8 +195,17 @@ def test_a_decoded_image_cell_is_refused_with_the_reason():
 
 # ── verify_dataset_spec ─────────────────────────────────────────────────────
 class FakeSettings:
-    def __init__(self, min_free_disk_gb=50.0):
+    #: Defaults mirror TrainerSettings: streaming on, chunking off (#85).
+    def __init__(self, min_free_disk_gb=50.0, cache_datasets=False, chunk_pages=0):
         self.min_free_disk_gb = min_free_disk_gb
+        self.cache_datasets = cache_datasets
+        self.chunk_pages = chunk_pages
+
+
+
+def _small(repo, paths, revision=None, repo_type="dataset"):
+    """A selection well inside the disk floor, so the size check is a no-op."""
+    return 1024 ** 3
 
 
 class TestVerifyDatasetSpec:
@@ -238,7 +257,8 @@ class TestVerifyDatasetSpec:
                            train_projects=[THUN_TRAIN],
                            eval_projects=[THUN_TEST])
         errors = verify_dataset_spec(spec, FakeSettings(),
-                                     list_repo_files_fn=fake_list_ok)
+                                     list_repo_files_fn=fake_list_ok,
+                                     paths_size_fn=_small)
         assert errors == []
 
     def test_no_parquet_files_in_repo_is_an_error(self):
@@ -278,6 +298,84 @@ class TestVerifyDatasetSpec:
                                      list_repo_files_fn=fake_list_ok,
                                      paths_size_fn=fake_size)
         assert any("GB" in e and "50" in e for e in errors)
+
+    # ── how the oversize refusal depends on the configuration (#85) ─────────
+    #
+    # The run behind these: a 461 K-page selection was refused at ~1023 GB while
+    # ATR_TRAIN_CACHE_DATASETS was false, i.e. for a download that would never
+    # happen — and the message named the two remedies that do not help.
+
+    @staticmethod
+    def _oversized(settings, **spec_kwargs):
+        """A five-shard, 100 GB selection against whatever settings say."""
+        def fake_list(repo, **kwargs):
+            return [f"data/train/{THUN_TRAIN}/s{i}.parquet" for i in range(5)] + \
+                   [f"data/train/{THUN_TEST}/s.parquet"]
+
+        def fake_size(repo, paths, revision=None, repo_type="dataset"):
+            return 20 * 1024**3 * len(paths)
+
+        spec = DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN], **spec_kwargs)
+        return verify_dataset_spec(spec, settings,
+                                   list_repo_files_fn=fake_list,
+                                   paths_size_fn=fake_size)
+
+    def test_streaming_and_chunked_is_allowed_however_large(self):
+        """Peak page-disk is one chunk, so the selection's weight is irrelevant.
+
+        This is the case the old guard made unreachable: #39 built chunked
+        materialize -> compile -> discard precisely so a corpus-scale selection
+        could run, and the guard refused it anyway.
+        """
+        errors = self._oversized(
+            FakeSettings(chunk_pages=5000), eval_projects=[THUN_TEST])
+        assert errors == []
+
+    def test_streaming_unchunked_is_refused_and_names_chunking(self):
+        """The shards stay off disk; the pages they materialize do not."""
+        errors = self._oversized(FakeSettings(), eval_projects=[THUN_TEST])
+        assert len(errors) == 1
+        assert "ATR_TRAIN_CHUNK_PAGES" in errors[0]
+
+    def test_caching_is_refused_and_names_streaming(self):
+        errors = self._oversized(
+            FakeSettings(cache_datasets=True), eval_projects=[THUN_TEST])
+        assert len(errors) == 1
+        assert "ATR_TRAIN_CACHE_DATASETS=false" in errors[0]
+
+    def test_a_backend_that_cannot_chunk_is_refused_however_the_setting_reads(self):
+        """ATR_TRAIN_CHUNK_PAGES is global; chunked prepare is kraken-only (#85).
+
+        Reading the setting alone cleared a 293 GB vllm corpus that would have
+        materialized all 23,161 pages before compile ran.
+        """
+        errors = self._oversized(FakeSettings(chunk_pages=5000),
+                                 eval_projects=[THUN_TEST])
+        assert errors == []                       # kraken: allowed
+
+        errors = verify_dataset_spec(
+            DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN],
+                        eval_projects=[THUN_TEST]),
+            FakeSettings(chunk_pages=5000),
+            chunk_capable=False,
+            list_repo_files_fn=lambda repo, **kw: (
+                [f"data/train/{THUN_TRAIN}/s{i}.parquet" for i in range(5)]
+                + [f"data/train/{THUN_TEST}/s.parquet"]),
+            paths_size_fn=lambda repo, paths, revision=None, repo_type="dataset":
+                20 * 1024**3 * len(paths),
+        )
+        assert len(errors) == 1
+        assert "does not chunk" in errors[0] and "kraken" in errors[0]
+
+    def test_chunking_without_eval_projects_says_why_it_cannot_apply(self):
+        """_should_chunk needs eval_projects; without them the setting is inert.
+
+        Refusing with the real reason beats accepting and silently materializing
+        everything, which is what the runner would fall back to.
+        """
+        errors = self._oversized(FakeSettings(chunk_pages=5000))
+        assert len(errors) == 1
+        assert "eval_projects" in errors[0]
 
     def test_aggregates_all_four_kinds_of_problems(self):
         """Errors from every check stage are collected, not short-circuited."""
@@ -329,7 +427,8 @@ class TestVerifyDatasetSpec:
             return [f"data/train/{THUN_TRAIN}/s.parquet"]
 
         verify_dataset_spec(DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
-                            FakeSettings(), list_repo_files_fn=counting)
+                            FakeSettings(), list_repo_files_fn=counting,
+                            paths_size_fn=_small)
         assert len(calls) == 1
 
     # ── the size check measures the selection, not the corpus ───────────────
@@ -357,19 +456,31 @@ class TestVerifyDatasetSpec:
         assert errors == []
         assert sized == [[f"data/train/{THUN_TRAIN}/s.parquet"]]
 
-    def test_a_size_lookup_that_fails_does_not_invalidate_a_good_spec(self):
+    def test_a_size_lookup_that_fails_leaves_the_spec_unverified_not_valid(self):
+        """A hub hiccup must not make a good spec *invalid* — nor call it *valid*.
+
+        The failure used to be swallowed into ``needed_gb = 0.0``, which passes
+        every comparison: the guard was switched off exactly when it could not
+        measure. On the real catalogue that happened at the largest selection —
+        `koenigsfelden-charters-post-1500` asks about 1,189 shards and the API
+        answered 413 — so the biggest corpus was the least protected (#85).
+
+        VerificationUnavailable now propagates, and the route turns it into
+        ``{valid: true, checked: false}``: the question could not be answered,
+        which is neither a refusal nor a clean bill of health.
+        """
         def fake_list(repo, **kwargs):
             return [f"data/train/{THUN_TRAIN}/s.parquet"]
 
         def unreachable(repo, paths, revision=None, repo_type="dataset"):
             raise VerificationUnavailable("hub down")
 
-        errors = verify_dataset_spec(
-            DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
-            FakeSettings(min_free_disk_gb=50.0),
-            list_repo_files_fn=fake_list, paths_size_fn=unreachable,
-        )
-        assert errors == []
+        with pytest.raises(VerificationUnavailable, match="hub down"):
+            verify_dataset_spec(
+                DatasetSpec(hf_repo=REPO, train_projects=[THUN_TRAIN]),
+                FakeSettings(min_free_disk_gb=50.0),
+                list_repo_files_fn=fake_list, paths_size_fn=unreachable,
+            )
 
 
 # ── line-level support (#45) ──────────────────────────────────────────────────
@@ -536,3 +647,241 @@ class TestLineImagesAreWritten:
             assert written.exists(), f"{sample['image']} was recorded but never written"
             assert written.read_bytes().startswith(b"\xff\xd8")
             assert sample["page"] == "scan1.jpg"       # kept, so the split can group
+
+
+# ── sizing a large selection (#85) ──────────────────────────────────────────
+class TestPathsSizeBatching:
+    """`get_paths_info` 413s on a large path list, and the guard used to
+    silently read that as zero — no protection at the largest selection."""
+
+    def test_the_batch_size_is_well_under_what_the_api_refused(self):
+        from atr_serving.training.hf_source import PATHS_INFO_BATCH
+
+        # koenigsfelden-charters-post-1500 selects 1,189 shards and got
+        # "413 Payload Too Large" for the single call.
+        assert PATHS_INFO_BATCH < 1189 / 2
+
+    def test_a_large_selection_is_sized_in_batches_and_summed(self, monkeypatch):
+        from atr_serving.training import hf_source
+
+        seen = []
+
+        class FakeApi:
+            def get_paths_info(self, repo, paths, repo_type="dataset", revision=None):
+                seen.append(len(paths))
+                if len(paths) > hf_source.PATHS_INFO_BATCH:
+                    raise RuntimeError("413 Payload Too Large")
+                return [type("I", (), {"size": 1000})() for _ in paths]
+
+        module = type("M", (), {"HfApi": FakeApi})
+        monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", module)
+
+        total = hf_source._default_paths_size("o/r", [f"p{i}" for i in range(1189)],
+                                              None, "dataset")
+        assert total == 1189 * 1000
+        assert max(seen) <= hf_source.PATHS_INFO_BATCH
+        assert len(seen) == 6                      # 1189 / 200, rounded up
+
+    def test_a_failing_batch_names_the_repo_and_the_scale(self, monkeypatch):
+        from atr_serving.training import hf_source
+
+        class FakeApi:
+            def get_paths_info(self, *a, **kw):
+                raise RuntimeError("nope")
+
+        module = type("M", (), {"HfApi": FakeApi})
+        monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", module)
+
+        with pytest.raises(VerificationUnavailable, match="of 1189 paths"):
+            hf_source._default_paths_size("o/r", [f"p{i}" for i in range(1189)],
+                                          None, "dataset")
+
+
+# ── one glob instead of 1,185 (#89) ─────────────────────────────────────────
+class TestCollapsingACompleteSelection:
+    """`datasets` resolves each data_files entry with its own tree API call.
+
+    Both corpus runs died on `429: you hit the quota of 1000 api requests per 5
+    minutes period` while resolving 1,825 project directories across four
+    datasets. koenigsfelden-charters-post-1500 alone selects 1,185 of its ~1,190
+    projects — the whole dataset, paid for one request at a time.
+    """
+
+    def lister(self, *projects):
+        return lambda repo, split, revision=None: list(projects)
+
+    def test_selecting_every_project_collapses_to_one_glob(self):
+        globs = collapse_complete_selection(
+            "train", ["a", "b", "c"], "o/r", None, self.lister("a", "b", "c"))
+        assert globs == ["data/train/**/*.parquet"]
+
+    def test_a_partial_selection_is_left_alone(self):
+        """Collapsing would silently widen it to projects nobody asked for."""
+        assert collapse_complete_selection(
+            "train", ["a", "b"], "o/r", None, self.lister("a", "b", "c")) is None
+
+    def test_a_superset_still_collapses(self):
+        """A spec naming a project the repo no longer has still covers the repo."""
+        assert collapse_complete_selection(
+            "train", ["a", "b", "gone"], "o/r", None, self.lister("a", "b")) == [
+            "data/train/**/*.parquet"]
+
+    def test_an_unlistable_hub_keeps_the_explicit_globs(self):
+        """Falling back must not widen the selection — 'unknown' is not 'all'."""
+        def unreachable(repo, split, revision=None):
+            raise VerificationUnavailable("hub down")
+
+        assert collapse_complete_selection(
+            "train", ["a"], "o/r", None, unreachable) is None
+
+    def test_an_empty_repo_does_not_collapse(self):
+        assert collapse_complete_selection(
+            "train", ["a"], "o/r", None, self.lister()) is None
+
+    def test_the_whole_split_glob_matches_the_project_layout(self):
+        """`data/<split>/*.parquet` matches nothing on a repo laid out by project —
+        the trap TRAINING_PLAN §1 records."""
+        assert whole_split_glob("train") == "data/train/**/*.parquet"
+
+
+class TestResolvingToFiles:
+    """One listing instead of one tree call per project (#89).
+
+    koenigsfelden-charters-post-1500 selects 1,185 of ~1,190 projects: too few to
+    collapse to a whole-split glob, and 1,185 requests against a quota of 1,000
+    per five minutes. Listing the repo once describes the same files exactly.
+    """
+
+    FILES = [
+        "README.md",
+        "data/train/a/x-0000.parquet",
+        "data/train/a/x-0001.parquet",
+        "data/train/b/y.parquet",
+        "data/train/c/z.parquet",
+        "data/test/a/other.parquet",
+    ]
+
+    def lister(self, files=None):
+        return lambda repo, revision=None, repo_type="dataset": list(
+            self.FILES if files is None else files)
+
+    def test_only_the_selected_projects_shards_come_back(self):
+        got = resolve_to_files("train", ["a", "b"], "o/r", None, self.lister())
+        assert got == ["data/train/a/x-0000.parquet",
+                       "data/train/a/x-0001.parquet",
+                       "data/train/b/y.parquet"]
+
+    def test_every_shard_of_a_project_is_kept(self):
+        """A project is a directory, not a file — `a` has two."""
+        got = resolve_to_files("train", ["a"], "o/r", None, self.lister())
+        assert len(got) == 2
+
+    def test_another_split_is_not_picked_up(self):
+        got = resolve_to_files("train", ["a"], "o/r", None, self.lister())
+        assert not any("/test/" in f for f in got)
+
+    def test_non_parquet_files_are_ignored(self):
+        got = resolve_to_files("train", ["a", "b", "c"], "o/r", None, self.lister())
+        assert all(f.endswith(".parquet") for f in got)
+
+    def test_an_unlistable_repo_falls_back_to_the_globs(self):
+        def unreachable(repo, revision=None, repo_type="dataset"):
+            raise VerificationUnavailable("hub down")
+
+        assert resolve_to_files("train", ["a"], "o/r", None, unreachable) is None
+
+    def test_a_selection_matching_nothing_falls_back_rather_than_selecting_nothing(self):
+        """An empty data_files list would load the whole repo; the globs at least
+        fail with a name that is not there."""
+        assert resolve_to_files("train", ["nope"], "o/r", None, self.lister()) is None
+
+
+# ── how a selection is resolved, and what that costs (#89) ───────────────────
+
+class TestResolveByReading:
+    """Measured on 16.09.2026 against dh-unibe/image-text_aaeb-xiv-xvii (349
+    projects), counting the requests the hub client actually issued:
+
+        20 project entries in data_files   39 requests  (~2 per entry)
+        one whole-split glob               26 requests  (independent of it)
+
+    And the thing that measurement overturned: qualifying the entries as
+    hf://datasets/<repo>@<sha>/<path> — the fix this module's own docstring
+    proposed — costs a tree call per entry all the same. The lever is the number
+    of entries, nothing else.
+    """
+
+    def test_a_dense_selection_is_read_whole(self):
+        from atr_serving.training.hf_source import resolve_by_reading
+        read_all, why = resolve_by_reading(1185, 1202)
+        assert read_all
+        assert "1185/1202" in why and "99%" in why      # 1185/1202 = 98.6 %
+
+    def test_the_koenigsfelden_case_is_the_one_that_killed_v4(self):
+        """1,185 entries is ~2,370 requests against a quota of 1,000 per 5 min."""
+        from atr_serving.training.hf_source import resolve_by_reading
+        read_all, _ = resolve_by_reading(1185, 1202)
+        assert read_all
+
+    def test_a_sparse_selection_is_still_selected(self):
+        """20 of 349 reads seventeen times too much to save thirteen requests."""
+        from atr_serving.training.hf_source import resolve_by_reading
+        read_all, why = resolve_by_reading(20, 349)
+        assert not read_all and why == ""
+
+    def test_a_selection_too_large_to_resolve_is_read_whole_anyway(self):
+        """600 of 5,000 is sparse — and still cannot fit the quota.
+
+        Reading eight times too much is worse than reading what you need, and
+        better than not running.
+        """
+        from atr_serving.training.hf_source import resolve_by_reading
+        read_all, why = resolve_by_reading(600, 5000)
+        assert read_all and "quota" in why
+
+    def test_nothing_selected_is_not_a_reason_to_read_everything(self):
+        from atr_serving.training.hf_source import resolve_by_reading
+        assert resolve_by_reading(0, 349) == (False, "")
+        assert resolve_by_reading(5, 0) == (False, "")
+
+
+class TestOnlyProjects:
+    """The filter that makes reading the whole split equal to selecting it."""
+
+    ROWS = [
+        {"project_name": "Brugg_0014", "filename": "a.jpg"},
+        {"project_name": "Baden_0050", "filename": "b.jpg"},
+        {"project_name": "u-17_0455", "filename": "c.jpg"},
+    ]
+
+    def test_it_keeps_exactly_the_named_projects(self):
+        from atr_serving.training.hf_source import only_projects
+        kept = list(only_projects(iter(self.ROWS), frozenset({"Brugg_0014", "u-17_0455"})))
+        assert [r["filename"] for r in kept] == ["a.jpg", "c.jpg"]
+
+    def test_none_means_the_globs_were_already_exact(self):
+        from atr_serving.training.hf_source import only_projects
+        rows = iter(self.ROWS)
+        assert only_projects(rows, None) is rows      # not even wrapped
+
+    def test_a_row_without_a_project_name_is_dropped_not_guessed(self):
+        """A shard layout this filter cannot read must not silently widen the run."""
+        from atr_serving.training.hf_source import only_projects
+        rows = [{"filename": "x.jpg"}, {"project_name": "Brugg_0014", "filename": "y.jpg"}]
+        kept = list(only_projects(iter(rows), frozenset({"Brugg_0014"})))
+        assert [r["filename"] for r in kept] == ["y.jpg"]
+
+    def test_it_streams_rather_than_materializing(self):
+        """prepare reads 6.6 TB past this point; it cannot become a list."""
+        from atr_serving.training.hf_source import only_projects
+        seen = []
+
+        def rows():
+            for r in self.ROWS:
+                seen.append(r["filename"])
+                yield r
+
+        out = only_projects(rows(), frozenset({"Brugg_0014"}))
+        assert seen == []                              # nothing read yet
+        assert next(iter(out))["filename"] == "a.jpg"
+        assert seen == ["a.jpg"]                       # …and nothing read past it

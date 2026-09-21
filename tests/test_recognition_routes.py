@@ -64,7 +64,12 @@ def fake() -> FakeKrakenClient:
 
 @pytest.fixture
 def client(fake: FakeKrakenClient) -> TestClient:
-    settings = Settings(api_key="test-key", require_auth=True)
+    # party_second_opinion off by default here: it is on in production, but a
+    # test that does not exercise it should not pay a connection attempt to a
+    # party engine that is not running. The tests that DO exercise it build
+    # their own client below.
+    settings = Settings(api_key="test-key", require_auth=True,
+                        party_second_opinion=False)
     app = create_app(settings)
     app.state.kraken_client = fake
     return TestClient(app)
@@ -216,3 +221,90 @@ def test_engine_error_becomes_502(client: TestClient, fake: FakeKrakenClient):
         data={"model": "kraken-catmus-medieval"},
     )
     assert resp.status_code == 502
+
+
+# ── party as a second opinion on every image (config/models.yaml) ─────────────
+
+class FakePartyClient:
+    """Stands in for the party engine. ``fail`` makes it raise, which is the case
+    that must NOT take the request down with it."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[str] = []
+
+    async def recognize(self, raw, filename, ctype, model="party", **kw):
+        self.calls.append(model)
+        if self.fail:
+            raise EngineError("party engine unreachable")
+        return RecognitionResult(
+            model="10.5281/zenodo.20642057", engine="party", text="Raths buecher",
+            lines=[Line(order=0, text="Raths buecher", confidence=0.93)],
+            confidence=0.93, timing_ms=16518, segmented_by="kraken-blla",
+            version="0.1.0",
+        )
+
+
+def _client_with_party(fake: FakeKrakenClient, party: FakePartyClient) -> TestClient:
+    settings = Settings(api_key="test-key", require_auth=True, party_second_opinion=True)
+    app = create_app(settings)
+    app.state.kraken_client = fake
+    app.state.engine_clients = {"party": party}
+    return TestClient(app)
+
+
+def test_second_opinion_is_attached_to_a_kraken_result(fake: FakeKrakenClient):
+    party = FakePartyClient()
+    resp = _client_with_party(fake, party).post(
+        "/recognize", headers=HEADERS, files={"image": IMG},
+        data={"model": "10.5281/zenodo.7516057"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # The requested engine still owns the answer.
+    assert body["engine"] == "kraken"
+    assert body["text"] == "hello\nworld"
+    so = body["second_opinion"]
+    assert so["engine"] == "party"
+    assert so["text"] == "Raths buecher"
+    assert so["error"] is None
+    assert party.calls == ["party"]
+
+
+def test_a_failing_second_opinion_does_not_fail_the_request(fake: FakeKrakenClient):
+    """The whole point of a second opinion: it may not cost the first one."""
+    party = FakePartyClient(fail=True)
+    resp = _client_with_party(fake, party).post(
+        "/recognize", headers=HEADERS, files={"image": IMG},
+        data={"model": "10.5281/zenodo.7516057"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["text"] == "hello\nworld"        # the answer survived
+    assert body["second_opinion"]["error"]        # and says why the extra is missing
+    assert body["second_opinion"]["text"] == ""
+
+
+def test_party_as_the_engine_gets_no_second_opinion_of_itself(fake: FakeKrakenClient):
+    party = FakePartyClient()
+    resp = _client_with_party(fake, party).post(
+        "/recognize", headers=HEADERS, files={"image": IMG}, data={"model": "party"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["engine"] == "party"
+    assert body.get("second_opinion") is None
+    assert party.calls == ["party"]               # called once, as the engine
+
+
+def test_ocr_carries_the_second_opinion_but_stays_minimal_without_one(
+    fake: FakeKrakenClient,
+):
+    party = FakePartyClient()
+    body = _client_with_party(fake, party).post(
+        "/ocr", headers=HEADERS, files={"image": IMG},
+        data={"model": "10.5281/zenodo.7516057", "seg_mode": "baseline"},
+    ).json()
+    assert body["second_opinion"]["text"] == "Raths buecher"
+    # and without one, the legacy projection is unchanged — pinned by
+    # test_ocr_alias_projects_legacy_shape above, which runs with it switched off.

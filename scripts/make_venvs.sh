@@ -18,7 +18,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENVS="${ROOT}/.venvs"
-# asterAIx ships Python 3.12 only (no 3.11) — see docs/asteraix-environment.md
+# asterAIx ships Python 3.12 only (no 3.11) — see docs/idhefix-environment.md
 PY="${PYTHON:-python3.12}"
 
 # pip stages a package's EXISTING files into TMPDIR before overwriting them, so a
@@ -40,7 +40,7 @@ case "$(stat -f -c %T "${TMPDIR:-/tmp}" 2>/dev/null || echo unknown)" in
     echo "      TMPDIR=${TMPDIR}" >&2
     ;;
 esac
-ALL=(gateway kraken party trocr kraken-train vlm-train vllm)
+ALL=(gateway kraken party trocr kraken-train vlm-train trocr-train vllm)
 TARGETS=("$@")
 [ ${#TARGETS[@]} -eq 0 ] && TARGETS=("${ALL[@]}")
 
@@ -89,7 +89,13 @@ if wanted party; then
 fi
 
 if wanted trocr; then
+  # torch from the cu128 index FIRST, like every other GPU venv here. Without it
+  # pip takes the default index, which serves a wheel built against the newest
+  # CUDA — 2.12.1+cu130 on 2026-08-10, unusable on driver 12.7, and the service
+  # silently falls back to CPU rather than failing.
   new_venv trocr
+  "${VENVS}/trocr/bin/pip" install torch==2.8.0 torchvision==0.23.0 \
+    --index-url https://download.pytorch.org/whl/cu128
   "${VENVS}/trocr/bin/pip" install -r "${ROOT}/engines/trocr_svc/requirements.txt"
 fi
 
@@ -120,11 +126,22 @@ if wanted vlm-train; then
   "${VENVS}/vlm-train/bin/pip" install -r "${ROOT}/engines/vlm_train_svc/requirements.txt"
 fi
 
+if wanted trocr-train; then
+  # TrOCR fine-tuning (#44). Its own venv for the same reason as the others: the
+  # serving trocr engine and this one pin transformers differently, and the
+  # supervising service imports neither — it spawns each job with the right
+  # interpreter (src/atr_serving/training/backends.py).
+  new_venv trocr-train
+  "${VENVS}/trocr-train/bin/pip" install torch==2.8.0 torchvision==0.23.0 \
+    --index-url https://download.pytorch.org/whl/cu128
+  "${VENVS}/trocr-train/bin/pip" install -r "${ROOT}/engines/trocr_train_svc/requirements.txt"
+fi
+
 if wanted vllm; then
   # Driver 565 / CUDA 12.7: current vLLM (0.2x) is a CUDA-13 build (needs libcudart.so.13
   # / driver >=580) and fails on this box. vLLM 0.11.0 is the last CUDA-12.8 build that
   # still supports Qwen3-VL — it pins torch==2.8.0, which we install from the cu128 index
-  # first so pip keeps the CUDA-12.8 wheel. See docs/asteraix-environment.md.
+  # first so pip keeps the CUDA-12.8 wheel. See docs/idhefix-environment.md.
   new_venv vllm
   "${VENVS}/vllm/bin/pip" install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
   "${VENVS}/vllm/bin/pip" install -r "${ROOT}/engines/vllm/requirements.txt"

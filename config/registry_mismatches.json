@@ -1,0 +1,32 @@
+{
+ "mismatched_ids": [
+  "kraken-bohemian_19th",
+  "kraken-catmus_caroline",
+  "kraken-czech_historic",
+  "kraken-czech_historic_v2",
+  "kraken-early-modern-german",
+  "kraken-early_modern_german",
+  "kraken-early_modern_german_16",
+  "kraken-late-medieval-german",
+  "kraken-late_medieval_german",
+  "kraken-late_medieval_latin",
+  "kraken-mccatmus",
+  "kraken-medieval_12_14",
+  "kraken-medieval_15_16",
+  "kraken-medieval_charters",
+  "kraken-medieval_generic_a",
+  "kraken-medieval_generic_b",
+  "kraken-medieval_generic_c",
+  "kraken-medieval_generic_d",
+  "kraken-medieval_generic_e",
+  "kraken-openiti-arabic",
+  "kraken-openiti_arabic",
+  "kraken-openiti_arabic_v3",
+  "kraken-openiti_urdu",
+  "kraken-printed_arabic",
+  "kraken-printed_generic_v2",
+  "kraken-printed_urdu",
+  "kraken-printed_urdu_extended",
+  "kraken-printed_urdu_openiti"
+ ]
+}

@@ -1,0 +1,28 @@
+# One trained model per file: <registry_root>/trained/<id>.yaml (#138).
+#
+# - ONE mapping, the same fields as an entry under `models:` in models.yaml —
+#   not a list, and no `models:` key.
+# - The file name is the id. A file whose `id` differs is skipped.
+# - Written by the trainer (training-atr-models#14) as a tmp file in this
+#   directory and then os.replace'd. The gateway reads only `*.yaml` and
+#   ignores dotfiles and `*.tmp`, so a half-written file is never served.
+# - `local_path` is an absolute path under the shared mount, and it must name
+#   the weights on BOTH machines: the kraken engine beside the gateway opens it.
+#   A relative path is skipped; a path that does not exist on the gateway host
+#   is logged there, and a request for the model fails naming the path.
+# - `enabled: false` until the promotion gate has served it once. The gate's
+#   /ocr request carries `X-ATR-Promotion-Gate: 1`, the only way a disabled
+#   trained registration answers; the trainer then rewrites this file with
+#   `enabled: true`, and the gateway notices without a restart.
+id: example
+engine: kraken
+local_path: /mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/trained/example/example.mlmodel
+enabled: false
+task: htr
+level: page
+languages: [de]
+scripts: [Kurrent]
+centuries: [16, 17]
+vram_mb: 500
+residency: lazy
+gpu_affinity: 1

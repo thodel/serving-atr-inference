@@ -15,7 +15,7 @@ added later by pointing at the same gateway with the same `X-API-Key`.
 
 ## 1. Verified facts this plan rests on
 
-**Host** (`docs/asteraix-environment.md`, probe 2026-06-26): 2× A40 (~45 GB), GPU 0
+**Host** (`docs/idhefix-environment.md`, probe 2026-06-26): 2× A40 (~45 GB), GPU 0
 shared with a RAG service (~10 GB used), GPU 1 hosts our engines + vLLM. Python 3.12,
 no passwordless sudo, `systemctl --user` units, `/` **80 % full, ~356 GB free**.
 
@@ -192,12 +192,13 @@ parsable metric is `failed`, not `completed`.
 > recipe for the full `medieval-scripts` selection (~18 M lines), and applying them to
 > a small corpus does not merely train a worse model — it trains no model at all.
 >
-> `batch_size: 256` over 1,878 training lines is **7 steps per epoch**; at the default
-> 50 epochs that is **367 optimizer steps** for a 15.2 M-parameter network from random
-> weights, with `1cycle` ramping and annealing the learning rate across all of them.
+> `batch_size: 256` over 1,898 training lines is **8 batches per epoch**; at the default
+> 50 epochs that is **400 optimizer steps** for a 15.2 M-parameter network from random
+> weights, at a learning rate that (being `1cycle` on this kraken) sat frozen at
+> `lrate/25` = 4e-6 rather than ramping and annealing across them — §9c, #96.
 > That is what produced `kraken-thun-missiven-v1` at CER 0.98 with 11,191 insertions
-> and 2 deletions (§9): an unconverged CTC network has not learned blank-dominance and
-> emits a character at nearly every timestep.
+> and 2 deletions (§9): the hypothesis was nearly empty — CTC blank collapse. (In this
+> project `insertions` are characters *missing*; see §9a.)
 >
 > **Below ~100 K lines, fine-tune instead.** Set `base_model` to a registry id or a
 > Zenodo DOI and `resize: "union"`; `train_cmd` then emits `--load … --resize union`
@@ -211,14 +212,14 @@ The architecture and hyperparameters to use, as specified:
 spec        [256,64,0,1 Cr4,2,8,4,2 Cr4,2,32,1,1 Mp4,2,4,2 Cr3,3,64,1,1 Mp1,2,1,2
              S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]
 batch size  256
-schedule    1cycle (cyclical), lrate 1e-4
+schedule    cosine, lrate 1e-4      # 1cycle until 2026-09-15; see §9c
 ```
 
 ```bash
 ketos --device cuda:0 --workers 8 --seed 42 train \
   --format-type binary --training-data train_bin.lst --evaluation-data val_bin.lst \
   --output checkpoints --weights-format coreml \
-  --batch-size 256 --schedule 1cycle --lrate 0.0001 --quit fixed --epochs 50 \
+  --batch-size 256 --schedule cosine --lrate 0.0001 --quit fixed --epochs 50 \
   --spec '[256,64,0,1 Cr4,2,8,4,2 Cr4,2,32,1,1 Mp4,2,4,2 Cr3,3,64,1,1 Mp1,2,1,2 S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]' \
   --normalization NFD --normalize-whitespace --augment
 ```
@@ -246,10 +247,14 @@ Four things about how kraken 7.0.2 actually consumes this (read off
 3. **`--spec` is ignored when `--load` is given** (the loaded net's spec wins). This
    recipe therefore only applies to from-scratch runs; fine-tuning a Zenodo base model is
    a different job shape (`-i … --resize union`, no `-s`).
-4. **`1cycle` wants a fixed epoch count.** kraken derives the cycle length from
-   `--epochs` and steps `OneCycleLR` per batch, so `-q early` can cut the cycle in half
-   and leave the LR mid-ramp. Hence `-q fixed -N <n>`; if early stopping is wanted
-   anyway, pair it with `--min-epochs` ≈ `--epochs`.
+4. **`1cycle` cannot be used on kraken 7.0.2 at all.** It wants a fixed epoch count —
+   kraken derives the cycle length from `--epochs`, so `-q early` can cut the cycle in
+   half and leave the LR mid-ramp. That turned out to be the *smaller* problem: kraken
+   sizes the cycle in **samples**, so it is `batch_size` times too long, no run leaves
+   the warmup, and `--lrate` silently means `lrate/25` (§9c, #96). `train_cmd` refuses
+   to build a 1cycle run; `cosine` is the default and `constant` the other safe choice.
+   Both are stepped the same way but encode no total length that has to match
+   reality.
 
 **Preflight measured on the box (2026-08-07)** — `kraken_train_svc.vgsl_preflight`
 builds the network in seconds and prints its shapes. Actual output, which corrects two
@@ -324,18 +329,24 @@ Request for the first test case:
   "base_model": null,
   "params": {
     "spec": "[256,64,0,1 Cr4,2,8,4,2 Cr4,2,32,1,1 Mp4,2,4,2 Cr3,3,64,1,1 Mp1,2,1,2 S1(1x0)1,3 Lbx256 Do0.5 Lbx256 Do0.5 Lbx256 Do0.5 Cr255,1,85,1,1]",
-    "batch_size": 256, "schedule": "1cycle", "lrate": 0.0001,
+    "batch_size": 256, "schedule": "cosine", "lrate": 0.0001,
     "quit": "fixed", "epochs": 50, "augment": true, "normalization": "NFD",
     "weights_format": "coreml", "seed": 42
   }
 }
 ```
 
-The `kraken+` spec and `1cycle`/1e-4 above are the **defaults** the trainer fills in when
+The `kraken+` spec and `cosine`/1e-4 above are the **defaults** the trainer fills in when
 `params` omits them, so a minimal job body is just `model_id` + `dataset`.
 
-`base_model` accepts a registry id or a Zenodo DOI (resolved through `htrmopo`, the same
-path `kraken_svc` already uses) → `ketos train -i … --resize union`.
+`base_model` accepts a **local path**, a **registry id** from `config/models.yaml`, or a
+**Zenodo DOI** (bare record ids too), resolved by
+`atr_serving.training.base_models.resolve_base_model` → `ketos train -i … --resize union`.
+The reference is validated **at submit** (#76): it used to be handed straight to
+`htrmopo` in the train stage, so `kraken-medieval_generic_b` — a real registry id — cost
+a run before failing with "is not a valid DOI". `vllm` and `trocr` bases are HuggingFace
+repo ids instead, and the two namespaces are checked separately: a DOI happens to match
+`owner/name`, so pattern-matching alone would accept a kraken base for a VLM run.
 
 The **engine-agnostic envelope** (`engine` + `dataset` + `params`) is the extension
 point: a `trocr` or `vllm-lora` job reuses the store, the API, the prepare stage and the
@@ -436,8 +447,9 @@ things about it are worth knowing here, because they changed shared code:
    from the first run; the default flips after `kraken_svc` moves to
    `kraken.models.load_models`.
 4. **Auth: the existing shared `X-API-Key`.** No separate training key.
-5. **Default architecture + schedule:** the `kraken+` spec, batch 256, `1cycle` @ 1e-4
-   (§3a).
+5. **Default architecture + schedule:** the `kraken+` spec, batch 256, `cosine` @ 1e-4
+   (§3a). Decided as `1cycle` here; changed on 2026-09-15 because that schedule never
+   left its warmup on this kraken (§9c).
 
 ---
 
@@ -497,29 +509,142 @@ truth survives.
 | | |
 |---|---|
 | `base_model` | `null` — **from scratch** |
-| lines | 2,087 → ~1,878 training after `partition: 0.9` |
-| `batch_size` | 256 → **7 steps per epoch** |
-| `epochs` | 50 → **~367 optimizer steps total** |
+| lines | 2,087 transcribed; 189 in the eval projects → **1,898 training** |
+| `batch_size` | 256 → **8 batches per epoch** (7 full + 1 partial) |
+| `epochs` | 50 → **400 optimizer steps total** |
 | network | 15.2 M parameters, random initialisation |
-| schedule | `1cycle`, ramping and annealing across those 367 steps |
+| schedule | `1cycle` — which on this kraken never ramps: a frozen 4e-6 (§9c) |
 
-An unconverged CTC network has not yet learned blank-dominance: its per-timestep
-distribution is near-uniform, so greedy decoding emits a character at almost every
-timestep. The kraken+ spec downsamples width by 8, so the median 806 px line yields
-roughly 100 timesteps against a 66-character reference — a hypothesis about twice the
-reference length, which is exactly the 11,191-insertions/2-deletions signature. A
-*converged* CTC model cannot over-generate this way; a *collapsed* one emits blanks and
-scores deletions. Only the middle state does this.
+> **Read the edit counts in this project's convention, not the usual one.**
+> `insertions` are characters **missing** from the hypothesis; `deletions` are
+> characters the hypothesis **added**. Inverted from standard ASR usage, verified
+> against `kraken/ketos/recognition.py` and pinned by `tests/test_edit_convention.py`.
+> An earlier version of this section read them the standard way and described the
+> opposite mechanism.
+
+11,191 insertions against 2 deletions and 186 substitutions therefore means **11,191
+reference characters had nothing to match**: the hypothesis was very nearly empty. Not
+over-generation — **CTC blank collapse**. The substitution count settles it. A model
+emitting a character at every timestep would mismatch thousands of them; 186 is what you
+get when there is almost nothing there to mismatch.
+
+The mechanism is the ordinary failure of an under-trained CTC network. With 400
+optimizer steps from random weights the network cannot yet discriminate characters, and
+the fastest available loss reduction is to put mass on the blank label — which is
+correct at most timesteps in any case, since blanks outnumber characters. It settles
+there and never leaves. This paragraph used to end "because `1cycle` has already
+annealed the learning rate to nothing by the time it might have" — it had not annealed
+anything; the rate was frozen at 4e-6 from the first step (§9c). Either way it was far
+too small to climb back out, which is why the diagnosis held.
 
 `kraken-medieval-scripts-v1` sits on the same curve from the other side: more data, CER
-0.707 rather than 0.984, insertions still dominant. The VLM run is a different mechanism
-with the same surface symptom — an instruct model that does not stop at the line
+0.707 rather than 0.984, insertions still dominant — the same collapse, less complete.
+The VLM run is the opposite failure with a superficially similar CER: an instruct model
+that does not stop at the line, which scores *deletions* under this convention
 (`docs/VLM_TRAINING.md`).
+
+### 9b. Confirmed by a controlled re-run (2026-08-13)
+
+Same data, same eval projects, same pipeline. Two things changed: it started from
+trained weights (`kraken-late_medieval_german`, `10.5281/zenodo.15366732`) and it got
+~9× the optimizer steps (`batch_size: 16`, `epochs: 30` → 3,570).
+
+| | from scratch, 400 steps | fine-tune, 3,570 steps |
+|---|---:|---:|
+| CER | 0.9838 | **0.3921** |
+| insertions | 11,191 | 1,437 |
+| deletions | 2 | 546 |
+| substitutions | 186 | 2,552 |
+| insertions : deletions | **5,596 : 1** | **2.6 : 1** |
+
+**The error *shape* is the confirmation, not the CER.** A better score could have come
+from anywhere. What could not is the collapse of the insertion asymmetry: before,
+insertions dominated absolutely and substitutions were negligible — a model emitting a
+character at nearly every timestep without aligning to the text at all. After,
+insertions and deletions sit in the same order of magnitude and **substitutions are the
+largest category**, which is what a model that reads the line and gets characters wrong
+looks like. Those are different failures, and only the second belongs to a model that
+has converged.
+
+**What this does and does not establish.** Two variables moved together, so it confirms
+that the configuration was the problem, not which half of it. Isolating them would take
+one more run — batch 16 *from scratch*, same ~3,570 steps — and is worth doing before
+any of this is written up as a recipe.
+
+### 9c. The base matters more than the century (2026-08-13)
+
+A single-variable comparison: same 1,898 training lines, same eval projects, same
+`batch_size: 16`, `epochs: 30`, `resize: union`. Only `base_model` changed.
+
+| base | script class | century | CER | ins | del | sub |
+|---|---|---|---:|---:|---:|---:|
+| — (from scratch) | — | — | 0.9838 | 11,191 | 2 | 186 |
+| `kraken-late_medieval_german` | Textura (formal book hand) | 14–16 | 0.3921 | 1,437 | 546 | 2,552 |
+| **`kraken-early_modern_german`** | **Kurrent (chancery cursive)** | 16–17 | **0.2350** | 470 | 796 | 1,452 |
+
+**Script class beats period.** The Kurrent base is a century *later* than the Thuner
+Missiven and still cuts CER by 40 % relative against a Textura base of the right
+century. Substitutions falling 2,552 → 1,452 is the model reading better, not merely
+aligning better — a CTC network transfers letterform recognition, and Textura and
+cursive do not share letterforms however close the dates are.
+
+**The error profile flipped.** Deletions (796) now exceed insertions (470): the model
+has gone from over-generating, through balanced, to mildly conservative — dropping
+characters rather than inventing them. That is an under-trained but well-calibrated
+model, which argues for more training or more data rather than for yet another base.
+
+Practical rule for picking a base: **match the hand first, the century second.** The
+registry records `scripts` and `centuries` per entry; sorting candidates by script
+family would make this choice less of a guess than it currently is.
+
+### 9d. Epochs are spent; the lever is the data (2026-08-13)
+
+Third single-variable step: 30 → 90 epochs, 3,570 → 10,710 optimizer steps, everything
+else identical.
+
+| model | change | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|
+| `thun-missiven-v1` | from scratch, batch 256, 50 ep | 0.9838 | 11,191 | 2 | 186 |
+| `thun-finetune-v1` | + Textura base, batch 16, 30 ep | 0.3921 | 1,437 | 546 | 2,552 |
+| `thun-kurrent-v1` | Textura → Kurrent base | 0.2350 | 470 | 796 | 1,452 |
+| `thun-kurrent-v2` | 30 → 90 epochs | **0.2180** | 395 | 814 | 1,312 |
+
+The curve still reports `still_improving: true` at epoch 89 — the surviving top-ten
+checkpoints are 79–89 — and that flag is now misleading on its own. The **rate** is the
+number that matters:
+
+| stretch | epochs | val_metric gain | per epoch |
+|---|---|---:|---:|
+| v1, 20 → 29 | 9 | +0.0118 | 0.00131 |
+| v2, 30 → 89 | 60 | +0.0166 | **0.00028** |
+
+Tripling the compute bought **7 % relative**, at a per-epoch rate 4.7× lower than the
+stretch before it. Another 90 epochs projects to roughly +0.009 val_metric — about an
+hour of GPU per 0.003 CER. Technically still improving; practically finished.
+
+**Each lever bought less than the one before**: 0.59 CER from the configuration, 0.16
+from the base, 0.017 from the epochs. The distance still to cover — 0.218 down to a
+usable 0.05–0.10 — is larger than all three gains combined, and there is no fourth knob
+of that size. **1,898 lines from 139 pages is the ceiling.**
+
+*A calibration note, since it will happen again.* Before this run the projection here was
+CER 0.17–0.20, allowing explicitly for deceleration. The result was 0.218, outside that
+range. Extrapolating a learning curve by eye flatters it even when you think you have
+discounted for the flattening; the honest read is that only the measured per-epoch rate
+is worth quoting.
+
+**Next**: more Bernese material, fine-tuned from `kraken-early_modern_german` at these
+settings. When sizing a selection, remember that the Thun training project skipped
+**111 of 250 pages** as untranscribed — page counts overstate usable lines by roughly
+two.
+
+**0.218 is a real model, not a good one.** Usable HTR is 0.05–0.10, and §9d shows the
+remaining distance is a data question, not a tuning one.
 
 **What to do differently** is in §3a: fine-tune from a base below ~100 K lines, and
 scale `batch_size` to the corpus. **What to build** is a guard: `lines / batch_size ×
 epochs` is computable the moment prepare reports a line count, and refusing — or at
-least warning — at "this configuration will take 367 optimizer steps" would have saved
+least warning — at "this configuration will take 400 optimizer steps" would have saved
 two runs and two days. That is the remaining scope of #52.
 
 Until a run is configured to converge, no CER in this repo should be quoted, compared
@@ -539,6 +664,189 @@ Two further findings came out of the same runs:
   their values stripped. #38 must read the trainer's own output (`--logger`, or the
   metric embedded in `checkpoint_<NN>-<val_metric>.ckpt`), not the log.
 
+
+### 9e. The VLM path completes, and does not win (2026-08-21)
+
+`20260821T163926Z-qwen3vl-german-medieval-v1` is the first VLM run to pass all
+five stages. It trained a Qwen3-VL-8B QLoRA on **4,124 lines** of mixed German
+(Königsfelden charters, Basel HGB, Thun, `u-17_*`) and was scored on the same
+held-out `GT_Thun-Test` as the kraken chain — 189 samples for both, so the numbers
+are comparable. (Reference-character totals differ slightly: 11,502 measured for
+the VLM run, ~11,565 implied by `thun-kurrent-v2`'s error counts. Under 0.6 %, and
+it does not move the ranking, but they are not the identical denominator.)
+
+| model | engine | train lines | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|---:|
+| `thun-kurrent-v2` | kraken | 1,898 | **0.2180** | 395 | 814 | 1,312 |
+| `qwen3vl-german-medieval-v1` | vllm | 4,124 | **0.2324** | 232 | 866 | 1,575 |
+
+**More than twice the data, and still 6 % behind.** The error profile is the
+interesting part, not the total — read in this project's convention, where
+`insertions` are characters *missing* and `deletions` are characters *added*
+(§9a):
+
+- **41 % fewer omissions** (232 vs 395): the VLM leaves less of the line unread.
+- **6 % more added text** (866 vs 814), and `length_ratio` **1.055** — it runs
+  slightly past the line. A mild form of the failure #55 documents for instruct
+  models, nowhere near that severity, but the same direction.
+- **20 % more substitutions** (1,575 vs 1,312): it reads the wrong character more
+  often.
+
+So the VLM reads more of the line and gets more of it wrong. That is what a
+language model does where a CTC network maps visual evidence — it produces
+plausible German rather than abstaining — and four thousand lines are not enough
+to anchor that in the hands themselves.
+
+Two cautions on reading this as a verdict on the approach:
+
+- **4,124 lines is very little for an 8B adapter.** The comparison says the VLM
+  does not beat kraken *at this corpus size*, not that it will not.
+- **The selection was mixed and the eval was not.** Training spanned four
+  provenances; evaluation was Bernese Thun alone. Capacity spent on Königsfelden
+  and Basel hands cannot show up in this metric.
+
+Alongside it, a hand-run kraken job on one shard of the medieval corpus
+(`kraken-medieval-shard00-std`, outside the job API) reached **CER 0.177** on its
+own validation split after 66 epochs at ~77 min each. Different eval material, so
+not a row in the table above — but it is the best number the project has produced,
+and it came from more data rather than from a better configuration.
+
+**Which settles the direction.** §9d showed the epoch lever spent; §9c showed the
+base lever spent; this shows the engine lever is not where the gain is either. The
+remaining lever is the corpus, and §11 is about pulling it.
+
+### 9f. Breadth reaches what in-domain fine-tuning reached (2026-09-03)
+
+The corpus §11 planned was trained and scored. The result answers §9d's question —
+*is the data the lever?* — and the answer is more interesting than a yes.
+
+`kraken-medieval-german-v2` fine-tuned `kraken-early_modern_german` on **325,454
+lines** from four archives: Zurich council books, Bullinger's correspondence,
+Königsfelden charters, Basel protocols. It ran 44 epochs over three days and was
+**cancelled from outside** at `val_metric` 0.7741 while still improving at
++0.0009/epoch. `test` and `register` never ran, so the pipeline recorded no
+metrics; the best checkpoint survived on local disk.
+
+It was therefore scored by hand, with `ketos test` against **the same
+`val.arrow`** that produced `thun-kurrent-v2`'s number — identical 11,566
+characters, so the comparison is exact rather than approximate:
+
+| model | trained on | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|
+| `thun-kurrent-v2` | 1,898 Thun lines, fine-tuned **on this hand** | 0.2180 | 395 | 814 | 1,312 |
+| corpus `best_0.7741` | 325,454 lines, **never saw Thun** | **0.2138** | 497 | 686 | 1,290 |
+
+**171× the data for a 1.9 % relative gain** reads like a refutation of "the data
+is the lever". It is not, and the reason is the second column.
+
+`plan_corpus` rejected `medieval-scripts_xiv-xv-xvi` as Flemish (§11), and the
+Thun material lives inside it. The corpus model has therefore **never seen a page
+of Thun**, and it is being compared against a model fine-tuned on exactly that
+hand. A general model built from four unrelated archives matches — slightly beats
+— in-domain specialisation. That is a statement about transfer, not about volume,
+and it is the more useful finding: breadth now buys what specialisation used to
+require.
+
+Its error profile agrees. The corpus model **omits more** (497 against 395) and
+**adds less** (686 against 814), at `length_ratio` 1.016 — the caution of a model
+reading a hand it does not know.
+
+Two cautions on the number itself. It comes from the best checkpoint of an
+**interrupted** run whose curve was still rising, so it is a floor rather than
+that configuration's result. And the interruption came from outside this work —
+the box's GPU is shared with a parallel session — which is worth recording because
+nothing in the job record explains a `cancelled on request` that nobody here
+requested.
+
+The obvious next run follows from the table: fine-tune *this* model on Thun's
+1,898 lines. Breadth plus specialisation should beat both, and the data is long
+since compiled.
+
+### 9g. A halved CER that was a halved measurement (2026-09-07)
+
+Two runs finished from §9f's plan, and one of them recorded a number that was
+wrong by a factor of two.
+
+**`kraken-corpus-thun-ft-v1`** did what §9f predicted. Fine-tuning the corpus
+model on Thun's own 1,898 lines, 59 epochs, scored on the same 11,566 characters
+as everything else in this chain:
+
+| model | trained on | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|
+| `thun-kurrent-v2` | 1,898 Thun lines | 0.2180 | 395 | 814 | 1,312 |
+| corpus `best_0.7741` | 325,454 lines, never saw Thun | 0.2138 | 497 | 686 | 1,290 |
+| **`corpus-thun-ft-v1`** | **corpus + 1,898 Thun lines** | **0.2054** | 366 | 798 | 1,212 |
+
+Breadth *plus* specialisation beats either alone — 5.8 % relative over the Thun
+fine-tune, 3.9 % over the corpus model — and it cost hours, not days, because the
+Thun data was long since compiled. Auto-publish correctly declined at 79.46 %
+against the 80 % threshold.
+
+**`qwen3vl-sg-missiven-v1`** recorded **CER 0.5921**, and it was not the model.
+
+The `test` stage ran with `max_new_tokens: 256`, the default, which is the
+line-granularity value. A St. Gallen missive page averages 967 reference
+characters — roughly 500 tokens in this orthography — so every page stopped at
+about half. The report said so plainly and nobody read it that way:
+
+    chars 96,670 | hypothesis_chars 49,793 | length_ratio 0.515
+    insertions 48,188 | deletions 1,311 | substitutions 7,739
+
+48,188 "insertions" are, in this project's convention (§9a), 48,188 characters
+**missing**. The same adapter re-scored at `max_new_tokens: 1536`:
+
+| | at 256 | at 1536 |
+|---|---:|---:|
+| CER | 0.5921 | **0.2785** |
+| `length_ratio` | 0.515 | 1.027 |
+| ins / del / sub | 48,188 / 1,311 / 7,739 | 4,245 / 6,842 / 15,833 |
+
+Nothing about the model changed. The error profile turns over completely —
+omission-dominated becomes substitution-dominated — which is what a full
+transcription looks like next to a truncated one.
+
+**The defect was an inconsistency in the contract**: `VLM_MAX_SEQ_LEN` scaled with
+granularity and `max_new_tokens` did not. Fixed in #92 with
+`VLM_MAX_NEW_TOKENS = {"line": 256, "page": 1536}` and a `generation_budget()`
+resolver, plus a `truncated_at_cap` count in the report and a warning when any
+prediction runs to the cap — because the failure surfaces as a bad CER rather than
+an error, which is the dangerous kind.
+
+The job record was corrected in place, with the superseded values and the reason
+in `request.notes` and the original kept as `job.json.bak-precorrection`.
+
+**Read 0.2785 for what it is.** Page granularity, St. Gallen missives, scored
+against that edition's own `partition` split. It does not belong beside 0.2054 —
+different corpus, different eval set, and transcribing a whole page at once is a
+harder task than reading a cropped line.
+
+### 9h. The combined page-level corpus (2026-09-08, running)
+
+`qwen3vl-german-pages-v1` puts the four German medieval corpora and the St. Gallen
+missives into one page-level VLM run — ~13,950 pages, ~12,550 of them training.
+
+**Page granularity is forced, not chosen.** The missives come from a TEI edition
+(§11, #91) and have no coordinates, so line crops are impossible for them. Page is
+the only common denominator, which also settles the engine: kraken reads lines.
+
+Parameters, and the evidence behind each departure from the defaults:
+
+| | value | why |
+|---|---|---|
+| `epochs` / `max_epochs` | 1 / 3 | 8.4× the data of the SG-only run, but each epoch costs 8.4× more |
+| `patience` | **1** | §9g's curve turned after a single bad epoch; at ~10 h per epoch, waiting for a second costs half a day for information already in hand |
+| `batch_size` × accum | 1 × 16 | page samples carry 2048 visual tokens against a line's 256 |
+| `max_new_tokens` | **1536, explicit** | the box was ten commits behind and lacked `generation_budget()`; an omitted value would have resolved to the line default of 256 and reproduced §9g's halving over a 29-hour run |
+
+**What was deliberately left alone.** The adapter analysis showed `k_proj` and
+`v_proj` barely move — 28 % of the parameters for the least movement — and
+dropping them is the obvious next experiment. It is not this one. Changing the
+corpus *and* the adapter shape together would make the result uninterpretable,
+which is the rule the whole of §9 was built on.
+
+Estimated at ~9.7 h per epoch from the SG measurement of 44.3 s per step. Treat it
+as an estimate: those pages average 967 reference characters where this corpus
+spans 453 to 1,425.
 
 ## 10. The full-dataset run (2026-08-08)
 
@@ -580,3 +888,254 @@ keeps each chunk's directory bounded) is the fix rather than a restart.
 **What changed as a result:** streaming is now the default (`911dc1e`). Caching stays
 available because it is right at project scale — re-fetching a 116 MB dataset every run
 is the waste that made it the old default — and inverts at terabyte scale.
+
+---
+
+## 11. Choosing a corpus (2026-08-22, #87)
+
+Every lever in §9 is spent except the data, and the data question turned out to be
+a *selection* question rather than a volume question.
+
+### What was actually available
+
+dh-unibe publishes **32 datasets**. The runs in §9 all drew on one of them,
+`image-text_medieval-scripts_xiv-xv-xvi`, whose card reads:
+
+> Geographical scope: Belgium · Period: 1350–1550 · Languages: **Flemish** ·
+> Provenance: State Archives in Leuven
+
+Its 548,322 pages are Leuven aldermen's registers. The German inside it — Thun,
+Königsfelden `u-17_*`, Basel `HGB_FT_M4_*`, `charters` — came to **291 usable
+pages**. Meanwhile, unqueried:
+
+| dataset | pages | period | languages |
+|---|---:|---|---|
+| `rats-und-richtebuecher_xv-xvi` | 9,885 | 1400–1550 | Middle High / Early Modern German |
+| `bullinger-autoren` | 8,022 | 1530–1600 | Latin, Early Modern German |
+| `koenigsfelden-charters-post-1500` | 3,222 | 1291–1550 | Middle High German, Latin |
+| `aaeb-xiv-xvii` | 2,566 | 1400–1500 | Early Modern German |
+
+### Two traps that make hand-picking unsafe
+
+**Datasets republish each other's projects.** `koenigsfelden-charters-post-1500`
+and `koenigsfelden-adhr-colmar` publish the same `FRAD068_03G_SAINT_PIERRE_…`
+directories. `hgb-kf_mixture` republishes exactly the `u-17_*` and `HGB_FT_M4_*`
+that `medieval-scripts` carries — the ones §9e trained on. `aaeb-xiv-xvii-part-2`
+overlaps its parent in 5 of 8 projects. A naive union trains twice on the same
+pages and reports a corpus larger than it is.
+
+**One archive can dominate silently.** A corpus that is 70 % one hand is a model
+of that hand, and nothing in a page count says so.
+
+### The heuristic
+
+`atr_serving.training.corpus_plan` scores each dataset on **period overlap**,
+**language match** and **script class** (document type as proxy), then
+deduplicates, caps and emits a job request. Two decisions, both arrived at by
+running it and watching it fail:
+
+**A weighted geometric mean, not a sum.** With a sum the Flemish corpus scored
+0.69 — period 1.00, script 1.00, language **0.00** — and claimed 40 % of the
+planned corpus; a 19th-century land register scored 0.54 on a period of 0.00 and
+took another 31 %. A dimension that disqualifies must veto, not vote. Unknown
+values are 0.5, so a card that does not say is penalised, not excluded.
+
+**Near-ties fall through to size.** `koenigsfelden-adhr-colmar` (223 pages) scores
+1.000 against `koenigsfelden-charters-post-1500`'s 0.989 — a rounding difference
+in period overlap — and would claim the projects they share, handing the corpus
+its own much smaller per-project page estimate for the same material.
+
+Script class is weighted above period **because §9c measured that**: a Kurrent
+base a century too late beat a right-period Textura base by 40 % relative. So
+`parzival-part-1` — 1200–1500, Middle High German, and a book hand — is rejected
+at 0.56 for a documentary corpus.
+
+### What it plans
+
+Run against the real catalogue on the box (2026-08-22), not the cards summarised
+here:
+
+| dataset | pages | share |
+|---|---:|---:|
+| `rats-und-richtebuecher_xv-xvi` | 9,351 | 40 % |
+| `bullinger-autoren` | 8,022 | 35 % |
+| `koenigsfelden-charters-post-1500` | 3,222 | 14 % |
+| `aaeb-xiv-xvii` | 2,566 | 11 % |
+| **total** | **23,161** | |
+
+**~219,000 estimated lines against the 4,124 of §9e — 53×.** The estimate uses
+14.8 lines per usable page and a 64 % usable rate, both measured on that one run;
+treat it as an order of magnitude. Only `prepare` knows the real figure, and the
+plan says so in its own output.
+
+Four datasets, not seven. `koenigsfelden-adhr-colmar` and
+`koenigsfelden-charters-part-2` are wholly contained in
+`koenigsfelden-charters-post-1500`; `hgb-kf_mixture` keeps 3 of its 20 projects
+(the other 17 are its `u-17_*`, also in `kf-post-1500`) and `aaeb-xiv-xvii-part-2`
+keeps a similar remainder — 23 unique pages each, dropped by `--min-pages 100`
+rather than costing a prepare stream apiece for 0.2 % of the corpus.
+
+### What the first real run caught
+
+The heuristic was written against a hand-built catalogue and only met the true one
+on the box. It failed there, silently, in the way this whole section is about.
+
+`fetch_catalogue` had collected project names with `line.startswith("- ")` — every
+bullet in the card, which is the YAML frontmatter and the Markdown feature list as
+well as the project list:
+
+```
+163 names appear in more than one dataset
+   config_name: default                           32
+   **image**: `Image(mode=None, decode=False)`    28
+   htr                                             9
+```
+
+`config_name: default` is in all 32 cards, so every dataset looked like a
+duplicate of every other. The run reported **153 duplicate projects** and dropped
+real material behind tag names it happened to collide with — `bullinger`,
+`aaeb-xiv-xvii` and `kf-post-1500` each lost exactly 5, the length of the standard
+tag list. `pages_per_project` was meanwhile divided by a count that was mostly
+Markdown.
+
+Fixed in `ffecc04`: `parse_projects` reads the bullets under "Projects Included"
+and stops at the next heading, and a real card is pinned in the tests. Worth
+recording because the failure was invisible in the output — a plausible corpus,
+plausible page counts, and a duplicate count nobody would question without knowing
+what the real overlaps are.
+
+### The cost of this, stated plainly
+
+Scoring is per **dataset**, so a heterogeneous one is judged by its majority.
+`medieval-scripts` is rejected as Flemish, which means **`GT_Thun-Test` is no
+longer reachable as an evaluation set** and the chain in §9–9e loses its common
+yardstick. Evaluation moves to held-out volumes of the planned corpus — in-domain
+and defensible, but a different measurement. Any CER from a planned corpus must
+not be put in the same table as §9e without saying so.
+
+Running it needs `ATR_TRAIN_CHUNK_PAGES` set: 23,428 pages is ~294 GB of parquet,
+far past the disk guard, and §8b of `TRAINING.md` explains why streaming alone is
+not enough.
+### 9c. The learning rate was never what we asked for (2026-08-31, #96)
+
+Read out of the checkpoints rather than inferred:
+
+| run | batch | epoch | `lr` in the optimizer | `--lrate` requested |
+|---|---|---:|---:|---:|
+| run 2 | 256 | 85 | **4.324e-05** | 1e-3 |
+| kraken+ | 256 | 41 | **4.079e-05** | 1e-3 |
+
+`OneCycleLR` is built with `steps_per_epoch=len_train_set`, and that is the **sample**
+count, not the batch count — so `total_steps` comes out `batch_size` times too large
+(24,951,540 against the 97,470 optimizer steps a 30-epoch run at batch 256 actually
+takes). The cycle's warmup alone would need 2,304 epochs.
+
+Every kraken run in this project has therefore trained at a **near-constant
+`lrate/25`**, the value `OneCycleLR` starts from. The annealing phase that gives
+1cycle its name has never been reached.
+
+Consequences for what is written above:
+
+* §9a's account of run 1 is right about the step count and incomplete about the rate:
+  `--lrate 1e-4` meant an actual **4e-6**, held flat. Both explanations point the same
+  way, which is why the fix worked.
+* The comparison "1e-3 learns, 1e-4 collapses" was in truth **4e-5 against 4e-6**.
+* run 2's long tail after epoch 30 was *not* annealed-to-zero creeping. The rate was
+  rising the whole time — from 4.000e-05 to 4.324e-05 across 50 epochs.
+
+It does **not** confound the architecture comparison: run 2 and run 3 both sat at
+~4e-5 despite different batch sizes, because the warmup is far too long for the batch
+size to matter over the epochs they ran.
+
+**Resolved 2026-09-15.** The default schedule is now `cosine`, and `train_cmd` refuses
+to build a run with `1cycle` at all — on kraken 7.0.2 there is no batch size at which
+it works, so an option that can only produce a wrong answer should not be reachable by
+accident. `cosine` and `constant` are stepped identically but encode no total length
+that has to match reality. The literal stays in `KrakenTrainParams` so the job records
+that produced every number above still load.
+
+What this does **not** do is fix the numbers already measured. Every kraken CER in this
+document and in `ARCHITECTURE_SEARCH.md` was measured at a frozen `lrate/25`, so the
+*requested* rates in those tables are not the rates that were compared. The next sweep
+is the first one where `--lrate` means what it says — worth remembering before reading
+an old and a new CER side by side. Upstream is worth telling: `steps_per_epoch` should
+be `ceil(len_train_set / batch_size)`.
+
+### 9d. The German hold-out, and what it took to keep it held out (#98)
+
+`german-medieval-v1`, built by `scripts/make_split.py` from the four German corpora
+(seed 20260810, job `20260905T190759Z-kraken-german-eval-pool-v1`):
+
+| | documents | pages |
+|---|---:|---:|
+| test | 200 | 695 |
+| val | 150 | 769 |
+
+Compiled to `~/atr-cache/arrows/german_{val,test}.arrow`. It gave
+`kraken-medieval-german-v2` its first CER on material of its own language —
+**0.2131** over 882,255 characters — where the number on its card before that had
+been 0.3471 on ~96 % Flemish pages.
+
+**And then it was trained on.** Measured on 2026-09-15, comparing document ids:
+
+| | of 200 test documents | of 150 val documents |
+|---|---:|---:|
+| in the training set of `…-qwen3vl-german-pages-v3` | **198** | **146** |
+
+The split record said `leak_documents_into_train: 0` and was right about itself.
+Nothing carried that fact from the split into the *next* run's selection: the VLM
+runs select by project and take all of them, and the hold-out is by document, so the
+two never met. A CER from v3 against this set would have described hands it trained
+on — the failure this issue predicted in its own last paragraph.
+
+**Now enforced in the pipeline, not in the selection.** `config/heldout_eval_documents.json`
+lists the reserved document ids; `_prepare` drops their pages from the training
+manifest of every backend and every prepare path, writes them to `pages_reserved.lst`,
+and records the count as `progress.reserved_pages`. Dropping rather than refusing,
+because the reserved documents live inside the corpora a run is supposed to train on —
+refusing would make the eval set unusable for the training it exists to measure. A
+selection that is *entirely* reserved documents is refused: that is not a training
+corpus.
+
+Retiring a set is deleting its block from that file. Nothing else reads it, which is
+the point: spending an eval set should take an edit somebody reviews.
+
+### 10a. shard_00 experiment series (2026-08-10 … 31)
+
+All on `shard_00.arrow` (24,744 pages / 831,718 lines, compiled before #89/#90) with
+the document-grouped `val_clean.arrow`; held-out test on `test.arrow` (6,186 pages,
+35 unseen documents).
+
+| run | architecture | val acc | test CER | note |
+|---|---|---|---|---|
+| run 1 | kraken+ wortgetreu, `--lrate 1e-4` | 0.0000 | — | Blank-Collapse, 11 Epochen; effektiv 4e-6 |
+| run 2 | kraken+ ohne `Cr255,1,85` | 0.7809 (Ep. 80) | **0.181** | 84 Epochen, `--lag 15` |
+| run 3 | kraken-Default, 120 px | **0.8226** (Ep. 60) | **0.1335** | 4.5× weniger FLOPs, 4× langsamere Epoche |
+| kraken+ | wie run 2, plus `Cr1,1,85` | 0.7927 (Ep. 130) | **0.1655** | 134 Epochen / 44,7 h |
+
+Zwei Vorbehalte, die beim Lesen dieser Tabelle gelten:
+
+* **Die ungleichen Abbruchregeln (`--lag 8` gegen `--lag 15`) haben sich erledigt.**
+  kraken+ verbesserte sich fast durchgehend, setzte den Zähler damit ständig zurück
+  und lief 134 Epochen — 50 mehr als run 2. Beide erreichten ihr eigenes Plateau, der
+  Vergleich ist also gültig. Ergebnis: die 85-Kanal-Schicht schadet nicht, sie hilft
+  leicht (siehe `docs/KRAKEN_PLUS.md`).
+* **`shard_00.arrow` ist vor #89/#90 kompiliert** und enthält noch Zeilen, die diese
+  Fixes heute verwerfen. Die Reihenfolge der Läufe untereinander ist davon unberührt,
+  die absoluten Werte nicht.
+
+### 10b. Betriebsnotizen
+
+* **`kraken-medieval-german-v2`** (Feintuning auf `kraken-early_modern_german`, 12.286
+  Seiten / 325.454 Zeilen aus vier Datensätzen) wurde in Epoche 44 bei val 0.7741 von
+  Hand gestoppt und als privates Repo `dh-unibe/kraken-medieval-german-v2` publiziert.
+  Die `test`-Stufe lief nie, deshalb trägt die Model-Card **keinen CER** — nur die
+  Validierungszahl, mit dem Vermerk, dass `prepare` seitenweise splittet und Dokumente
+  nicht trennt. Ein Transfer-Test gegen `test.arrow` läuft nach.
+* **Ein Abbruch schreibt keine `best_*.mlmodel`.** kraken konvertiert den besten
+  Checkpoint erst am regulären Ende; nach `cancel` oder `SIGTERM` bleibt nur
+  `checkpoint_*.ckpt` plus `checkpoint_abort.ckpt`. `ketos convert -o … --weights-format
+  coreml <ckpt>` holt das nach.
+* **Der CIFS-Share war am 31.08. über Stunden weg** (`Errno 112: Host is down`). Das
+  laufende Training blieb unberührt, weil Arrows, Checkpoints und TMPDIR auf lokaler
+  Platte liegen — die Regel aus `docs/DEPLOY.md`, in der Praxis bestätigt.
