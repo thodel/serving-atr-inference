@@ -25,6 +25,8 @@ reason, rather than crash-looping.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from importlib.metadata import version as _pkg_version
 from io import BytesIO
@@ -57,6 +59,10 @@ _model = None
 _config = None
 _loaded = False
 _error: str | None = None
+#: Serialises inference on the GPU. Party holds one model on one card; two pages
+#: generating tokens through it at once is how a card OOMs, and the loss is both
+#: requests rather than the second one queueing.
+_model_lock = threading.Lock()
 
 
 def _model_file() -> Path:
@@ -104,6 +110,24 @@ async def health():
     })
 
 
+def _segment_and_recognize(img: Image.Image):
+    """Segment and recognise one page, **off the event loop** (#149).
+
+    Both calls are blocking and long: ``blla.segment`` is a forward pass, and
+    party generates tokens for every line it found. Awaiting them on the event
+    loop froze the whole service for the duration — ``/health`` included, so a
+    busy engine was indistinguishable from a dead one to anything watching it.
+
+    The lock is not about the loop but about the card: party holds one model on
+    one GPU, and two pages generating through it at once is how that card OOMs —
+    losing both requests rather than queueing the second.
+    """
+    seg = blla.segment(img, device=DEVICE)
+    with _model_lock:
+        records = list(_model.predict(im=img, segmentation=seg, config=_config))
+    return seg, records
+
+
 @app.post("/recognize", response_model=RecognitionResult)
 async def recognize(file: UploadFile = File(...), model: str = Form(default="party")):
     if not _loaded or _model is None:
@@ -114,8 +138,7 @@ async def recognize(file: UploadFile = File(...), model: str = Form(default="par
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"invalid image: {exc}") from exc
     try:
-        seg = blla.segment(img, device=DEVICE)
-        records = list(_model.predict(im=img, segmentation=seg, config=_config))
+        seg, records = await asyncio.to_thread(_segment_and_recognize, img)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"recognition failed: {exc}") from exc
 
