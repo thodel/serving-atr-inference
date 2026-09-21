@@ -161,10 +161,23 @@ models:
   # the default cu130 build does not (#132, measured 2026-09-21). Every other vLLM
   # model stays on .venvs/vllm.
   #
-  # level: page like qwen3vl-german-xix-v2, so a corpus run compares the two bases
-  # and nothing else. The same caveat applies: 0.0680 is a LINE-level number on
-  # line crops at 262144 pixels, the reason to expect good page readings, not
-  # evidence of them.
+  # `level: line`, and that is a measurement rather than a preference. It was
+  # registered `level: page` like qwen3vl-german-xix-v2, so that a corpus run
+  # would compare the two bases and nothing else, with the standing caveat that
+  # 0.0680 is a LINE-level number on line crops at 262144 pixels — the reason to
+  # expect good page readings, not evidence of them.
+  #
+  # The evidence arrived on 2026-09-21. Whole-page over 27 Lassberg letters it
+  # averaged 335 characters against trocr-kurrent's 844 on the same collection,
+  # and the readings are fragments: "1841" (4 chars), "den 14. April 1849."
+  # (19), "der Böhne, der von der Hrn. Prof. von Hrn. Prof." — correct German,
+  # one line of a full page. One page degenerated into "1000000000…" for the
+  # whole 4096-token ceiling. That is not a resolution problem that a larger
+  # `max_pixels` would fix; it is a model outside the distribution it was
+  # trained on, and it is the same way qwen3vl-german-xix-v1 failed here.
+  #
+  # So it is served the way it was measured: kraken segments, the model reads one
+  # line per call. The cost is one request per line instead of per page.
   - id: qwen3.5-4b-german-xix-v2
     engine: vllm
     vllm_venv: vllm-next
@@ -172,7 +185,7 @@ models:
     hf_repo: dh-unibe/qwen3.5-4b-german-xix-v2
     base_model: Qwen/Qwen3.5-4B
     task: htr
-    level: page          # one call per page; its CER was measured per line
+    level: line          # the configuration its 0.0680 was measured in
     prompt: Transcribe the handwritten text in this image exactly as written.
     languages: [de]
     scripts: [Kurrent]

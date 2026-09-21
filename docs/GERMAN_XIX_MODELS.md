@@ -6,6 +6,7 @@ same instruction, differing in their base and in the corpus fix between v1 and v
 | model id | base | adapter | own split CER¹ | benchmark CER² | registered |
 |---|---|---|---|---|---|
 | **`qwen3.5-4b-german-xix-v2`** | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v2` | 4.78 % | **6.80 %** | yes³ |
+| **`qwen3.5-4b-german-xix-v2`** | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v2` | — | **6.80 %** |
 | **`qwen3vl-german-xix-v2`** | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v2` | 5.33 % | **7.65 %** | yes |
 | `qwen3.5-2b-german-xix-v2` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v2` | 5.49 % | 8.95 % | no³ |
 | `qwen3.5-0.8b-german-xix-v2` | `Qwen/Qwen3.5-0.8B` | `dh-unibe/qwen3.5-0.8b-german-xix-v2` | 7.04 % | 11.15 % | no³ |
@@ -51,6 +52,29 @@ and merge with **that** venv, the only one here whose transformers knows `qwen3_
 ```bash
 .venvs/vllm-next/bin/python scripts/merge_loras.py --only qwen3.5-4b-german-xix-v2
 ```
+
+## Serving level: measured, not assumed
+
+`qwen3.5-4b-german-xix-v2` is served **`level: line`**. It was registered
+`level: page` so a corpus run would compare the two bases and nothing else, with
+the standing caveat that 6.80 % is a *line*-level number. On 2026-09-21 that
+caveat was tested on 27 pages of Lassberg correspondence and the model failed it:
+
+```
+"1841"                                             (4 chars)
+"den 14. April 1849."                             (19 chars)
+"der Böhne, der von der Hrn. Prof. von Hrn. Prof." (48 chars)
+"1000000000000000…"            (4096 chars — the whole token ceiling)
+```
+
+335 characters a page against `trocr-kurrent`'s 844 on the same collection.
+Correct German, one line of a full page — the way `qwen3vl-german-xix-v1` failed
+here too. The digit loop is what a model outside its distribution looks like, and
+no `max_pixels` fixes that.
+
+`qwen3vl-german-xix-v2` keeps `level: page`: its page readings have not been
+tested on this corpus, so there is nothing to act on yet. Both caveats stand —
+**a page-level number for either model does not exist until someone measures it.**
 
 ## v1 → v2, and what it settles
 
