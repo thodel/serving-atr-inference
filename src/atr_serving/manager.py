@@ -22,13 +22,14 @@ import subprocess
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import httpx
 from loguru import logger
 
 from atr_serving import gpu as gpu_probe
-from atr_serving.config import Settings
+from atr_serving.config import REPO_ROOT, Settings
 from atr_serving.registry import ModelSpec, Registry
 
 
@@ -304,6 +305,23 @@ def vram_budget(settings: Settings, cards: list | None = None,
                           f"- {engines} MiB engines - {reserve} MiB reserve")
 
 
+def vllm_executable(spec: ModelSpec, settings: Settings) -> Path:
+    """The ``vllm`` that serves ``spec``: its own venv if it names one, else the default.
+
+    Raises ``FileNotFoundError`` naming the venv when it is not built, rather than
+    letting ``Popen`` fail on a path the caller never wrote down.
+    """
+    if spec.vllm_venv is None:
+        return settings.vllm_python
+    exe = REPO_ROOT / ".venvs" / spec.vllm_venv / "bin" / "vllm"
+    if not exe.exists():
+        raise FileNotFoundError(
+            f"model '{spec.id}' is served by .venvs/{spec.vllm_venv}, which has no "
+            f"{exe.name} ({exe}); build it with scripts/make_venvs.sh {spec.vllm_venv}"
+        )
+    return exe
+
+
 class VllmLauncher:
     """Default launcher: spawn ``vllm serve`` pinned to one GPU."""
 
@@ -311,7 +329,7 @@ class VllmLauncher:
         budget = gpu_budget(spec, gpu, settings)
         logger.info("vLLM {} gpu budget: {}", spec.id, budget.reason)
         cmd = [
-            str(settings.vllm_python), "serve", resolve_model_path(spec, settings),
+            str(vllm_executable(spec, settings)), "serve", resolve_model_path(spec, settings),
             "--host", "127.0.0.1", "--port", str(port),
             "--served-model-name", spec.id,
             "--gpu-memory-utilization", str(budget.utilisation),

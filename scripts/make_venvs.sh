@@ -40,7 +40,7 @@ case "$(stat -f -c %T "${TMPDIR:-/tmp}" 2>/dev/null || echo unknown)" in
     echo "      TMPDIR=${TMPDIR}" >&2
     ;;
 esac
-ALL=(gateway kraken party trocr kraken-train vlm-train trocr-train vllm)
+ALL=(gateway kraken party trocr kraken-train vlm-train trocr-train vllm vllm-next)
 TARGETS=("$@")
 [ ${#TARGETS[@]} -eq 0 ] && TARGETS=("${ALL[@]}")
 
@@ -138,13 +138,29 @@ if wanted trocr-train; then
 fi
 
 if wanted vllm; then
-  # Driver 565 / CUDA 12.7: current vLLM (0.2x) is a CUDA-13 build (needs libcudart.so.13
-  # / driver >=580) and fails on this box. vLLM 0.11.0 is the last CUDA-12.8 build that
+  # Driver 565 / CUDA 12.7: current vLLM's *default* wheel (0.2x) is a CUDA-13 build
+  # (needs libcudart.so.13 / driver >=580) and fails on this box; its cu129 build does
+  # not — see vllm-next below. vLLM 0.11.0 is the last CUDA-12.8 build that
   # still supports Qwen3-VL — it pins torch==2.8.0, which we install from the cu128 index
   # first so pip keeps the CUDA-12.8 wheel. See docs/idhefix-environment.md.
   new_venv vllm
   "${VENVS}/vllm/bin/pip" install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
   "${VENVS}/vllm/bin/pip" install -r "${ROOT}/engines/vllm/requirements.txt"
+fi
+
+if wanted vllm-next; then
+  # A second vLLM for architectures 0.11 cannot serve (Qwen3.5: #132). The default
+  # PyPI wheel of vLLM 0.29 is a CUDA-13 build and fails on driver 565 ("driver too
+  # old"); its cu129 build runs, through CUDA 12 minor-version compatibility —
+  # measured 2026-09-21: torch sees the GPU, a matmul runs, vLLM's kernels load.
+  # Only models with `vllm_venv: vllm-next` use it; also the venv that can merge
+  # their adapters (transformers 5 knows `qwen3_5`, peft 0.21 reads UBELIX's 0.20).
+  new_venv vllm-next
+  "${VENVS}/vllm-next/bin/pip" install torch==2.13.0 torchvision==0.28.0 \
+    --index-url https://download.pytorch.org/whl/cu129
+  "${VENVS}/vllm-next/bin/pip" install -r "${ROOT}/engines/vllm-next/requirements.txt" \
+    --extra-index-url https://wheels.vllm.ai/0.29.0/cu129 \
+    --extra-index-url https://download.pytorch.org/whl/cu129
 fi
 
 echo "Done: ${TARGETS[*]}"
@@ -155,4 +171,5 @@ wanted trocr && echo "  TrOCR:   ${VENVS}/trocr/bin/python -m uvicorn trocr_svc.
 wanted kraken-train && echo "  Train:   ${VENVS}/kraken-train/bin/python -m uvicorn kraken_train_svc.app:app --host 127.0.0.1 --port 8204"
 wanted vlm-train && echo "  VLM train: no service of its own — atr-train (:8204) spawns jobs into this venv"
 wanted vllm && echo "  vLLM:    spawned on demand by the gateway's ModelManager (ports 8210+)"
+wanted vllm-next && echo "  vLLM-next: same, for models with vllm_venv: vllm-next"
 exit 0
