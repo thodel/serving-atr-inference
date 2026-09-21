@@ -444,6 +444,10 @@ adding LoRA to language model"), and an HTR fine-tune certainly does. So:
 .venvs/vllm/bin/python scripts/merge_loras.py --only qwen3vl-thun-missiven-v1
 ```
 
+For a **Qwen3.5** base, merge and serve with `.venvs/vllm-next` instead — it is the
+only venv here whose transformers knows `qwen3_5` — and give the registry entry
+`vllm_venv: vllm-next` and `max_num_seqs: 64` (`engines/vllm/README.md`, #157).
+
 This bakes the adapter into its base and writes a normal full model to
 `~/atr-cache/vllm-merged/<model_id>/`, which the ModelManager serves without any
 LoRA machinery. Only after that, and after one real recognition through

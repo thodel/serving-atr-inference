@@ -2301,6 +2301,19 @@ the upload:
   carried the umask, not the siblings' `drwxr-sr-x`, so the group — i.e. asteraix —
   could not have read them. Now `2755`.
 
+### Serving: `qwen3.5-4b-german-xix-v2` is live on idhefix (2026-09-21)
+
+The best of the four is served through `/recognize` since 07:28 CEST (#157). It
+needed a second vLLM on idhefix — vLLM 0.29.0 in its **cu129** build, which runs on
+the box's driver 565 where the default cu130 wheel does not; #132 had concluded a
+driver upgrade was required, from a version table rather than a test, and is
+closed. Two launch failures surfaced only on the box and are fixed in the launcher
+(`ninja` not on `PATH`; Qwen3.5's per-sequence Mamba state at vLLM's default of 256
+sequences). Checked before going live: 50 benchmark lines through the merged model,
+CER 0.0473, no collapse. Details and the go-live record: `docs/GERMAN_XIX_MODELS.md`,
+`engines/vllm/README.md`. The 2B and 0.8B v2 models remain published but
+unregistered.
+
 ### Copying a model to the share and publishing it — the steps that worked
 
 The job record's `registration` text says "copy that directory to the share". Done

@@ -100,6 +100,21 @@ Qwen3-VL (Qwen3-VL requires vLLM ≥ 0.11.0). Verified on the box: `vllm 0.11.0`
 cuda-compat (fiddly). **Caveat:** LightOnOCR-2 (Jan 2026) may be too new for vLLM
 0.11.0 — revisit (driver upgrade / cuda-compat) if that model is required.
 
+**A second vLLM, since 2026-09-21 (#157).** The paragraph above is right about the
+*default* wheel and wrong as a general statement: vLLM also publishes **cu129** builds
+(`https://wheels.vllm.ai/<version>/cu129`), and those run on driver 565 through CUDA 12
+minor-version compatibility. Measured on this box with vLLM 0.29.0+cu129 and
+torch 2.13.0+cu129: `cuda.is_available()`, a matmul on GPU 1, `vllm._custom_ops`
+imports, `Qwen3_5ForConditionalGeneration` listed; the same vLLM from PyPI (cu130)
+stops with "The NVIDIA driver on your system is too old (found version 12070)".
+It lives in **`.venvs/vllm-next`** (`bash scripts/make_venvs.sh vllm-next`, pins in
+`engines/vllm-next/requirements.txt`), beside — not instead of — `.venvs/vllm`. A
+model opts in with `vllm_venv: vllm-next` in `config/models.yaml`; today only
+`qwen3.5-4b-german-xix-v2` does, and a test pins that. Moving a proven model to the
+newer vLLM is a decision to take with a measurement, not a side effect of a build.
+So neither the driver upgrade nor cuda-compat is needed for a model newer than 0.11
+supports; check for a cu12x wheel first.
+
 ## Open confirmations (need admin / info)
 - Two-server topology: **asterAIx** (`srv`, `130.92.59.240`) runs this stack; the
   client is **agentic_historian on `tei.dh.unibe.ch`**. Confirm `ufw status` and the

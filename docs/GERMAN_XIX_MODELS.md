@@ -279,9 +279,23 @@ midway leaves a partial merged directory that `resolve_model_path` will happily
 serve if it contains a `config.json` — delete any partial directory rather than
 retrying on top of it.
 
-## What is servable on asterAIx — verified 2026-09-14
+## What is servable on idhefix
 
-One of the three. This is a property of the box, not of the models.
+**Update 2026-09-21 (#157, #132 closed):** everything below the table was true on
+2026-09-14 and its conclusion — "serving them is a driver upgrade" — was not. The
+driver bound only the *default* vLLM wheel; the cu129 build runs on driver 565, in
+`.venvs/vllm-next`. Qwen3.5 is servable here now, and `qwen3.5-4b-german-xix-v2` is
+served. The text below is kept as the record of why it looked otherwise.
+
+| model | merge | served by | state (2026-09-21) |
+|---|---|---|---|
+| `qwen3.5-4b-german-xix-v2` | ✅ `.venvs/vllm-next` | vLLM 0.29.0+cu129 | **enabled, served** |
+| `qwen3vl-german-xix-v2` | ✅ `.venvs/vlm-train` | vLLM 0.11.0 | enabled, served |
+| `qwen3vl-german-xix-v1` | ✅ `.venvs/vlm-train` (peft 0.20.0) | vLLM 0.11.0 | enabled (superseded) |
+| `qwen3.5-4b-german-xix-v1` | possible with `vllm-next`, not done | — | disabled: superseded |
+| `qwen3.5-2b-german-xix-v1` | possible with `vllm-next`, not done | — | disabled: superseded |
+
+### As measured on 2026-09-14 (asterAIx was the wrong name for this box)
 
 | model | merge | vLLM 0.11.0 can serve it |
 |---|---|---|
@@ -334,7 +348,7 @@ Then one real page through each, which is the only check that distinguishes
 "registered" from "servable":
 
 ```bash
-for m in qwen3vl-german-xix-v2 qwen3vl-german-xix-v1 qwen3.5-4b-german-xix-v1 qwen3.5-2b-german-xix-v1; do
+for m in qwen3.5-4b-german-xix-v2 qwen3vl-german-xix-v2 qwen3vl-german-xix-v1; do
   echo "── $m"
   curl -sH "X-API-Key: $ATR_API_KEY" -F "image=@/path/to/page.jpg" -F "model=$m" \
        http://127.0.0.1:8200/recognize \
@@ -352,6 +366,27 @@ The first call to each pays a cold vLLM start (weights load + CUDA graphs, a
 minute or more). A 404 means the id is not in the registry the running gateway
 read; a 502 means the model manager could not bring it up — check the gateway's
 journal for the `Launching vLLM:` line and what the subprocess printed after it.
+
+### `qwen3.5-4b-german-xix-v2` going live — 2026-09-21
+
+What was checked, in order, and what each step found:
+
+1. **Merge** with `.venvs/vllm-next` from the private hub repo: 8.5 GB, weights,
+   tokenizer and processor complete. The "could not set the permissions" warnings
+   come from the CIFS-mounted `HF_HOME` on the share and are harmless.
+2. **The merged model on 50 random benchmark lines** (a separate `vllm serve` on
+   port 8299, line crops at 262 144 pixels, the benchmark's prompt): CER **0.0473**
+   (0.0680 over all 2,751), every answer `finish_reason: stop`, no `<think>` block,
+   no first-word collapse, 0.4 s a line. The first two launches failed — `max_num_seqs`
+   and `ninja`, see `engines/vllm/README.md` — and both are fixed in the launcher.
+3. **The gateway's own launcher** from the branch, live budget: `0.41 = 19200 of
+   46068 MiB`, `.venvs/vllm-next/bin/vllm … --max-num-seqs 64`, ready after 65 s.
+4. **Production** after merging #157, pulling `main` and restarting `atr-gateway`
+   and `atr-trocr` (the latter for #156): `/models` lists it; `/recognize` returned
+   the reference line with one abbreviation dot missing, 557 ms warm, about 70 s
+   cold.
+
+The first production request failed, and the reason belongs in the next section.
 
 ### A 502 that is about memory
 
@@ -385,6 +420,30 @@ When it does, the memory is genuinely gone: `GET /gpu` says who has it. Twice th
 has been an orphaned training process — a `[Not Found]` row holding 8 766 MiB
 belonging to a python that had already exited — which `kill -9` on its pid
 releases.
+
+**A stale reading right after a restart (2026-09-21).** The budget is computed from
+`nvidia-smi` at launch, and vLLM checks free memory again when its engine starts,
+~25 s later. Right after `atr-trocr` and `atr-gateway` had been restarted, the first
+request for `qwen3.5-4b-german-xix-v2` read 23 995 MiB free and was granted 0.41; by
+the time the engine started, TrOCR had loaded its model again and only 15.56 GiB
+were free:
+
+```
+ValueError: Free memory on device cuda:0 (15.56/44.45 GiB) on startup is less
+  than desired GPU memory utilization (0.41, 18.22 GiB).
+```
+
+The next request, 20 s later, read the settled card and launched at 0.30. Any vLLM
+model can hit this in the first minute after an engine restart; retrying once is
+the whole fix. It is not worth code as long as engine restarts are deploys done by
+hand.
+
+**Card 1 is fuller than the table in `docs/INFRASTRUCTURE.md` says.** On
+2026-09-21 at 08:05 it held 43.1 of 46.1 GB: kraken 23.0 GB, the Qwen3.5 vLLM
+12.4 GB, party 6.1 GB, TrOCR 1.6 GB. Kraken's share grows within one process
+(3.1 GB on 16.09., 11.0 GB and 23.0 GB on 21.09., same pid since 17.09.) — #158.
+A restart at 08:09 reset it without explaining it. With 2.9 GB left, any second VLM
+evicts the first, so a run over several VLMs should go model-major (next section).
 
 ## Residency: why callers should iterate model-major
 

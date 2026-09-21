@@ -154,9 +154,14 @@ How a request is recognized depends on the model's engine and level:
   on by default), except when party is the engine that was asked for. Its text comes
   back in `second_opinion`; a failed second opinion never fails the request.
 - `/ocr` accepts only kraken and TrOCR; a VLM goes through `/recognize`.
-- **Card 1 is the only card serving uses.** The engines hold about 15.8 GB of it, and
-  the vLLM budget is what is left after them and a 2048 MiB reserve (see
-  [Two GPU views](#two-gpu-views)). Card 0 belongs to a neighbouring service.
+- **Card 1 is the only card serving uses.** The engines held about 15.8 GB of it on
+  16.09. and more since (#158), and the vLLM budget is what is left after them and a
+  2048 MiB reserve (see [Two GPU views](#two-gpu-views)). Card 0 belongs to a
+  neighbouring service.
+- **Two vLLMs since 21.09. (#157):** `.venvs/vllm` (0.11) for every model, and
+  `.venvs/vllm-next` (0.29.0+cu129) for the ones whose registry entry says
+  `vllm_venv: vllm-next` — today only `qwen3.5-4b-german-xix-v2`. See
+  `engines/vllm/README.md`.
 - A trained model is opened from `local_path` on the share; a curated one from its
   Zenodo DOI (kraken, party) or its Hugging Face repository (TrOCR, vLLM).
 
@@ -172,7 +177,7 @@ How a request is recognized depends on the model's engine and level:
 | OS / kernel | Ubuntu 24.04.3 / 6.8.0-87 | Ubuntu 24.04.3 / 6.14.0-37 |
 | CPU / RAM | Threadripper PRO 5965WX, 48 threads / 251 GB | the same |
 | GPUs | 2× A40, 46068 MiB each, NVLink (NV4); driver 565.57.01 | 2× A40, 46068 MiB each, NVLink (NV4), P2P ok; driver 580.95.05 |
-| GPU use | card 0: the neighbours' RAG service (`gunicorn.service`, 4 workers, ~10.4 GB), **not ours**. Card 1: our engines (15.8 GB: party 8.9, trocr 3.8, kraken 3.1) plus the gateway's vLLM children | both cards free for training; jobs run on `ATR_TRAIN_GPU=1` until training-atr-models#12 |
+| GPU use | card 0: the neighbours' RAG service (`gunicorn.service`, 4 workers, ~10.4 GB), **not ours**. Card 1: our engines plus the gateway's vLLM children. 16.09.: engines 15.8 GB (party 8.9, trocr 3.8, kraken 3.1). 21.09. 08:05: **43.1 of 46.1 GB** — kraken 23.0 (grows within one process, #158), Qwen3.5 vLLM 12.4, party 6.1, trocr 1.6 | both cards free for training; jobs run on `ATR_TRAIN_GPU=1` until training-atr-models#12 |
 | disk `/` | 1.8 T, 71 % used after the cleanup in #143 | 1.8 T, 74 % used |
 | Python | 3.12.3 | 3.12.3 |
 | sudo / linger | no passwordless sudo / linger on | no passwordless sudo / linger on |
