@@ -276,7 +276,7 @@ async def recognize_batch(
 
     return BatchResult(
         texts=texts,
-        lines=sorted(lines, key=lambda l: l.index),
+        lines=sorted(lines, key=lambda ln: ln.index),
         model=model,
         count=len(texts),
     )
