@@ -6,7 +6,7 @@ from PIL import Image
 
 from atr_serving.app import create_app
 from atr_serving.api.schemas import Line, RecognitionResult, SegmentResponse
-from atr_serving.clients import coerce_result
+from atr_serving.clients import EngineHTTPClient, coerce_result, get_engine_client
 from atr_serving.config import Settings
 
 KEY = "test-key"
@@ -33,7 +33,6 @@ class FakeEngineClient:
         self.engine = engine
         self.text = text
         self.calls = 0
-        self.batch_calls = 0
 
     async def recognize(self, image, filename, content_type, model, lines=None) -> RecognitionResult:
         self.calls += 1
@@ -42,13 +41,17 @@ class FakeEngineClient:
             lines=[Line(order=0, text=self.text)], version="x",
         )
 
-    async def recognize_batch(self, images, filenames, content_type, model):
-        """Batched fallback for FakeEngineClient (#95)."""
-        self.batch_calls += 1
-        texts = [self.text] * len(images)
-        lines = [Line(order=i, text=self.text) for i in range(len(images))]
-        return texts, lines
 
+
+def test_the_fake_engine_client_offers_nothing_the_real_one_lacks():
+    """A route that calls a method only the fake has passes every test here and
+    500s in production — #151 did exactly that with ``recognize_batch``. The
+    fake may simplify the real client, never extend it."""
+    public = {name for name in vars(FakeEngineClient) if not name.startswith("_")}
+    real = get_engine_client("trocr", Settings(api_key=KEY))
+    assert type(real) is EngineHTTPClient
+    missing = {name for name in public if not callable(getattr(real, name, None))}
+    assert not missing, f"only the fake has {sorted(missing)}"
 
 @pytest.fixture
 def client() -> TestClient:
@@ -86,10 +89,8 @@ def test_trocr_line_pipeline(client: TestClient):
     assert body["segmented_by"] == "kraken-blla"
     assert len(body["lines"]) == 2          # one per segmented line
     assert body["text"] == "T\nT"
-    # With line_concurrency=6 (default), gateway sends crops in one batched call
-    # instead of N sequential /recognize calls (#95 step 2).
-    # Old sequential path: calls=2. New batched path: batch_calls=1.
-    assert client.app.state.engine_clients["trocr"].batch_calls == 1
+    # engine called once per line
+    assert client.app.state.engine_clients["trocr"].calls == 2
 
 
 def _ocr(client, model):
@@ -110,9 +111,7 @@ def test_ocr_trocr_auto_segments_to_page_text(client: TestClient):
     assert body["text"] == "T\nT"                       # one line per segmented baseline
     assert body["model"] == "trocr-kurrent-xvi-xvii"
     assert "version" in body and "confidence" in body
-    # With line_concurrency=6 (default), gateway uses batched /recognize_batch
-    # instead of N sequential /recognize calls (#95 step 2).
-    assert client.app.state.engine_clients["trocr"].batch_calls == 1
+    assert client.app.state.engine_clients["trocr"].calls == 2   # one call per line
 
 
 def test_ocr_rejects_non_kraken_non_trocr_engine(client: TestClient):

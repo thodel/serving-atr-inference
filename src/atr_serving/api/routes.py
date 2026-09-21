@@ -92,75 +92,22 @@ def _parse_lines(lines: str | None) -> list[Line] | None:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"invalid lines JSON: {exc}") from exc
 
+
 async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
                                 ctype: str, model: str, trocr_ref: str) -> RecognitionResult:
     """Full-page TrOCR (#25): TrOCR is line-level, so the gateway auto-segments —
     kraken baseline segmentation → per-line crops → TrOCR per line → reassembled
-    top-to-bottom. Shared by /recognize and the /ocr convenience alias.
-
-    When line_concurrency > 1, sends all crops in one /recognize_batch GPU-batched
-    call instead of N sequential /recognize calls. The batched forward pass is the
-    real fix for #95: ~linear in GPU terms rather than N separate calls."""
-    from atr_serving.pipeline import decode_image as _decode_image, _png_bytes, order_lines as _order_lines
-    from atr_serving import __version__
-    from atr_serving.api.schemas import RecognitionResult as _APIResult
-
-    tro = _engine_client(request, 'trocr')
-    concurrency = getattr(_settings(request), 'line_concurrency', 1)
+    top-to-bottom. Shared by /recognize and the /ocr convenience alias."""
+    tro = _engine_client(request, "trocr")
 
     async def _trocr_line(line_img: bytes, line_ct: str) -> str:
-        res = await tro.recognize(line_img, 'line.png', line_ct, model=trocr_ref)
+        res = await tro.recognize(line_img, "line.png", line_ct, model=trocr_ref)
         return res.text
 
-    if concurrency <= 1:
-        return await recognize_lines(
-            raw, filename, ctype, model, 'trocr', _kraken_client(request), _trocr_line,
-            concurrency=1,
-        )
-
-    # Batched path: segment, crop, one /recognize_batch call (#95 step 2)
-    seg = await _kraken_client(request).segment(raw, filename, ctype, mode='baseline')
-    pil = _decode_image(raw)
-    crops = []
-    for position in _order_lines(seg):
-        ln = seg.lines[position]
-        box = _bbox_from_line(ln, *pil.size)
-        if box is not None:
-            crop = pil.crop(box)
-            crops.append((len(crops), ln, _png_bytes(crop)))
-
-    if not crops:
-        return _APIResult(model=trocr_ref, engine="trocr", text="", lines=[],
-                          segmented_by=seg.segmented_by, version=__version__)
-
-    images = [png for _, _, png in crops]
-    fnames = ['line.png'] * len(images)
-    texts, out_lines = await tro.recognize_batch(images, fnames, 'image/png', trocr_ref)
-
-    return _APIResult(
-        model=trocr_ref, engine="trocr", text="\n".join(texts), lines=out_lines,
-        segmented_by=seg.segmented_by, version=__version__,
+    return await recognize_lines(
+        raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line,
+        concurrency=_settings(request).line_concurrency,
     )
-
-
-def _bbox_from_line(ln, w: int, h: int):
-    """Pixel bbox for a segmented line: prefer explicit bbox, else from baseline."""
-    if hasattr(ln, 'bbox') and ln.bbox and len(ln.bbox) == 4:
-        x0, y0, x1, y1 = ln.bbox
-    elif hasattr(ln, 'baseline') and ln.baseline:
-        xs = [p[0] for p in ln.baseline]
-        ys = [p[1] for p in ln.baseline]
-        x0, x1 = min(xs), max(xs)
-        y_base = max(ys)
-        height = max(16.0, (x1 - x0) * 0.04)
-        y0, y1 = min(ys) - height, y_base + height * 0.4
-    else:
-        return None
-    x0, y0 = max(0, int(x0)), max(0, int(y0))
-    x1, y1 = min(w, int(x1)), min(h, int(y1))
-    if x1 <= x0 or y1 <= y0:
-        return None
-    return x0, y0, x1, y1
 
 
 @router.get("/health", response_model=HealthResponse, tags=["meta"])

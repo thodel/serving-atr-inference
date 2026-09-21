@@ -181,10 +181,8 @@ def test_the_routes_pass_the_configured_concurrency():
     A helper that is never reached with the real setting is a helper nobody uses.
     """
     src = (ROOT / "src/atr_serving/api/routes.py").read_text(encoding="utf-8")
-    # vllm passes the setting directly; trocr reads it internally via getattr
-    # (#95 step 2: gateway-side concurrency routing to batched path)
-    assert src.count("concurrency=_settings(request).line_concurrency") == 1, (
-        "vllm line pipeline must pass the setting; trocr reads it via getattr")
+    assert src.count("concurrency=_settings(request).line_concurrency") == 2, (
+        "both line-pipeline routes (trocr, vllm) must pass the setting")
 
 
 def test_the_default_is_bounded_and_greater_than_one():

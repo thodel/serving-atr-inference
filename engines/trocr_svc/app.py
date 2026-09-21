@@ -1,6 +1,7 @@
 """
 ATR TrOCR Engine — FastAPI service for medieval/Kurrent/Latin OCR via TrOCR.
 """
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -23,6 +24,12 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _resident_model_id: str | None = None
 _resident_model: VisionEncoderDecoderModel | None = None
 _processor: Any = None
+# One inference at a time, model swap included. The handler hands the work to
+# the threadpool (#95), so two requests can now reach _recognize_one together;
+# without the lock one could swap the resident model out from under the
+# other, or two models could sit on the card at once. The one GPU serialises
+# inference anyway — the lock only makes that explicit and safe.
+_model_lock = threading.Lock()
 
 # Available model IDs
 TROCR_MODELS = [
@@ -143,12 +150,14 @@ class RecognitionResult(BaseModel):
 def _recognize_one(model_id: str, image: Image.Image) -> str:
     """Synchronous single-image inference. Runs on the threadpool so it never
     blocks the ASGI event loop — a blocking call in an ``async def`` handler
-    serialises every request on that loop, which is the whole bug in #95."""
+    serialises every request on that loop, which is the whole bug in #95.
+    Holds :data:`_model_lock` from the model check to the end of inference."""
     global _resident_model_id, _resident_model, _processor
-    if model_id != _resident_model_id or _resident_model is None:
-        _resident_model, _processor = _resolve_model(model_id)
-        _resident_model_id = model_id
-    return _run_recognition(_resident_model, _processor, image)
+    with _model_lock:
+        if model_id != _resident_model_id or _resident_model is None:
+            _resident_model, _processor = _resolve_model(model_id)
+            _resident_model_id = model_id
+        return _run_recognition(_resident_model, _processor, image)
 
 
 @app.post("/recognize")
@@ -196,90 +205,6 @@ async def ocr(
 ):
     """Alias for /recognize."""
     return await recognize(model=model, file=file)
-
-
-# ── Batch endpoint — GPU-batched inference, the real fix (#95, step 2) ───────
-
-class BatchLine(BaseModel):
-    index: int
-    text: str
-    confidence: float
-
-
-class BatchResult(BaseModel):
-    texts: list[str]
-    lines: list[BatchLine]
-    model: str
-    engine: str = "trocr"
-    count: int
-
-
-@app.post("/recognize_batch")
-async def recognize_batch(
-    model: str = Form(...),
-    files: list[UploadFile] = File(...),
-):
-    """
-    Recognise N images in a single GPU batched forward pass.
-
-    ``model.generate`` over a batch of N images is close to linear in GPU terms —
-    one matrix multiply per token position per image, all done in one kernel launch.
-    This is the real fix for #95: the 79-line page that cost ~52 s with sequential
-    per-line calls now completes in a handful of GPU forward passes.
-
-    Order is preserved by the ``index`` field so the caller can reassemble without
-    relying on completion order (``asyncio.gather`` does not guarantee it).
-
-    Returns 200 even when some images fail: a partial result is better than nothing.
-    """
-    if model not in TROCR_MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown model '{model}'. Available: {TROCR_MODELS}",
-        )
-    if not files:
-        raise HTTPException(status_code=400, detail="no images provided")
-
-    images: list[tuple[int, Image.Image]] = []
-    for i, f in enumerate(files):
-        try:
-            contents = await f.read()
-            img = Image.open(BytesIO(contents)).convert("RGB")
-            images.append((i, img))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("/recognize_batch image {} decode failed: {}", i, exc)
-
-    if not images:
-        raise HTTPException(status_code=400, detail="no valid images provided")
-
-    logger.info("/recognize_batch: {} images, model={}", len(images), model)
-
-    global _resident_model_id, _resident_model, _processor
-    if model != _resident_model_id or _resident_model is None:
-        _resident_model, _processor = _resolve_model(model)
-        _resident_model_id = model
-
-    pil_images = [img for _, img in images]
-    inputs = _processor(images=pil_images, return_tensors="pt")
-    inputs = {k: v.cuda() if torch.cuda.is_available() else v for k, v in inputs.items()}
-
-    with torch.no_grad():
-        outputs = _resident_model.generate(**inputs)
-
-    all_texts = _processor.batch_decode(outputs, skip_special_tokens=True)
-
-    texts: list[str] = [""] * len(images)
-    lines: list[BatchLine] = []
-    for idx, (_, _img), txt in zip(range(len(images)), images, all_texts):
-        texts[idx] = txt
-        lines.append(BatchLine(index=idx, text=txt, confidence=0.95))
-
-    return BatchResult(
-        texts=texts,
-        lines=sorted(lines, key=lambda ln: ln.index),
-        model=model,
-        count=len(texts),
-    )
 
 
 # ---------------------------------------------------------------------------
