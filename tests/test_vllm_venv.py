@@ -62,8 +62,53 @@ def test_launcher_puts_the_models_vllm_in_the_command(tmp_path, monkeypatch):
 
     monkeypatch.setattr(manager.subprocess, "Popen",
                         lambda cmd, **kw: launched.append(cmd) or FakeProc())
-    manager.VllmLauncher().start(_spec(vllm_venv="vllm-next"), 8210, 1, Settings())
-    assert launched[0][:3] == [str(exe), "serve", "/merged/m"]
+    manager.VllmLauncher().start(_spec(vllm_venv="vllm-next", max_num_seqs=64), 8210, 1,
+                                 Settings())
+    cmd = launched[0]
+    assert cmd[:3] == [str(exe), "serve", "/merged/m"]
+    assert cmd[cmd.index("--max-num-seqs") + 1] == "64"
+
+
+def test_no_max_num_seqs_leaves_vllms_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(manager, "gpu_budget",
+                        lambda spec, gpu, settings: manager.Budget(0.5, "test"))
+    monkeypatch.setattr(manager, "resolve_model_path", lambda spec, settings: "/merged/m")
+    launched = []
+    monkeypatch.setattr(manager.subprocess, "Popen",
+                        lambda cmd, **kw: launched.append(cmd) or object())
+    manager.VllmLauncher().start(_spec(), 8210, 1, Settings())
+    assert "--max-num-seqs" not in launched[0]
+
+
+def test_vllm_env_puts_its_venv_first_on_path(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = manager.vllm_env(Path("/r/.venvs/vllm-next/bin/vllm"), 1)
+    assert env["PATH"].split(":")[0] == "/r/.venvs/vllm-next/bin"
+    assert env["PATH"].endswith("/usr/bin:/bin")
+    assert env["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_launcher_passes_that_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(manager, "gpu_budget",
+                        lambda spec, gpu, settings: manager.Budget(0.5, "test"))
+    monkeypatch.setattr(manager, "resolve_model_path", lambda spec, settings: "/merged/m")
+    envs = []
+    monkeypatch.setattr(manager.subprocess, "Popen",
+                        lambda cmd, **kw: envs.append(kw["env"]) or object())
+    settings = Settings()
+    manager.VllmLauncher().start(_spec(), 8210, 1, settings)
+    assert envs[0]["PATH"].startswith(str(settings.vllm_python.parent))
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_max_num_seqs_must_be_positive(bad):
+    with pytest.raises(ValidationError):
+        _spec(max_num_seqs=bad)
+
+
+def test_max_num_seqs_only_for_vllm_models():
+    with pytest.raises(ValidationError, match="max_num_seqs is only meaningful"):
+        ModelSpec(id="t", engine="trocr", hf_repo="org/t", max_num_seqs=8)
 
 
 def test_registry_only_qwen35_v2_uses_the_second_vllm():

@@ -322,14 +322,32 @@ def vllm_executable(spec: ModelSpec, settings: Settings) -> Path:
     return exe
 
 
+def vllm_env(exe: Path, gpu: int) -> dict[str, str]:
+    """The environment for a ``vllm serve``: one GPU, and its own venv first on PATH.
+
+    The venv is never activated — the gateway calls ``.venvs/<name>/bin/vllm`` by
+    path — so tools vLLM shells out to resolve against the gateway's PATH. vLLM
+    0.29 compiles kernels at start-up and runs ``ninja`` for it, which lives in
+    the venv's ``bin/``; without this the engine dies with
+    ``FileNotFoundError: 'ninja'`` after loading the weights (2026-09-21).
+    """
+    path = os.environ.get("PATH", "")
+    return {
+        **os.environ,
+        "CUDA_VISIBLE_DEVICES": str(gpu),
+        "PATH": f"{exe.parent}{os.pathsep}{path}" if path else str(exe.parent),
+    }
+
+
 class VllmLauncher:
     """Default launcher: spawn ``vllm serve`` pinned to one GPU."""
 
     def start(self, spec: ModelSpec, port: int, gpu: int, settings: Settings) -> VllmHandle:
         budget = gpu_budget(spec, gpu, settings)
         logger.info("vLLM {} gpu budget: {}", spec.id, budget.reason)
+        exe = vllm_executable(spec, settings)
         cmd = [
-            str(vllm_executable(spec, settings)), "serve", resolve_model_path(spec, settings),
+            str(exe), "serve", resolve_model_path(spec, settings),
             "--host", "127.0.0.1", "--port", str(port),
             "--served-model-name", spec.id,
             "--gpu-memory-utilization", str(budget.utilisation),
@@ -338,7 +356,9 @@ class VllmLauncher:
             cmd.append("--trust-remote-code")
         if settings.vllm_max_model_len:
             cmd += ["--max-model-len", str(settings.vllm_max_model_len)]
-        env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu)}
+        if spec.max_num_seqs:
+            cmd += ["--max-num-seqs", str(spec.max_num_seqs)]
+        env = vllm_env(exe, gpu)
         logger.info("Launching vLLM: {}", " ".join(cmd))
         proc = subprocess.Popen(cmd, env=env)  # noqa: S603
         return SubprocessHandle(port=port, proc=proc)
