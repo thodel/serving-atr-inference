@@ -2295,6 +2295,8 @@ the upload:
   (A first version of this paragraph said the upload had created it public and
   that the read-back had printed `private=False`. Both were wrong: the first was
   inferred from `lastModified`, which a visibility change does not touch.)
+  **Update 2026-09-21:** set public again at the user's request. It is the one
+  19th-century model that is deliberately public; the others stay private.
 * The three new directories landed on the share as `drwxr-----`: `rsync --no-perms`
   carried the umask, not the siblings' `drwxr-sr-x`, so the group — i.e. asteraix —
   could not have read them. Now `2755`.
@@ -2326,7 +2328,8 @@ apptainer exec --bind /scratch --bind /rs_scratch --bind /storage/research \
   --trained-root "$T" --only "$m" [--dry-run]
 ```
 
-Finally read back from the hub — `private`, file count, and the card's
+Finally read back from the hub — `private` (new repos: `True`; an existing public
+repo must still read `False`), file count, and the card's
 `HELD-OUT RESULT` / DOI — rather than trusting the upload's `ok`, and re-run
 `rsync` so the card that `publish_to_hub.py` wrote into the directory reaches the
 share too.
@@ -2340,10 +2343,18 @@ share too.
 * **Share permissions — no code issue.** No code in this repo copies to the share;
   the procedure above is the fix, and it now lives where the next copy will be
   done from.
-* **The repo that turned public — no code issue.** `publish_to_hub.py` created it
-  private, and the read-back proved it. What changed it is outside this code. The
-  useful guard is a periodic visibility check of `dh-unibe/*-xix-*` and
-  `*-medieval-*`, which is an operations task, not a defect.
+* **The repo that turned public — no issue.** `publish_to_hub.py` created it
+  private, and the read-back proved it; it was then made public on purpose, by
+  hand, and is public again since 2026-09-21. My privatising it on 2026-09-20 broke
+  the rule below, which was not written down anywhere until now.
+
+**Visibility rule (2026-09-21).** Switching a repo from private to public is done
+**by hand, in the Hugging Face web interface**, by a person — never by a script or
+an agent (`--public` is not used). **Once public, a repo is never set back to
+private** — not when a new version is pushed into it, not when its card is
+rewritten. The private default of `publish_to_hub.py` applies only to creating a
+new repo; `create_repo(..., exist_ok=True)` leaves an existing repo's visibility as
+it is, so re-publishing into a public repo keeps it public.
 * **WER 0.23–0.31 — not yet.** It is real, but nobody has asked for word-level
   search on this material, and an issue without a consumer tends to become a
   research project. Revisit when a corpus run needs exact-word retrieval.

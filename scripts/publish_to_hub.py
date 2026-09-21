@@ -26,6 +26,12 @@ run it with the trainer venv, and authenticate first:
 Repos are **private** unless ``--public`` is passed, and no licence is invented:
 making a trained model public, and under which terms, is a decision this script
 will not take for you.
+
+House rule for dh-unibe: making a repo public is done by hand in the Hugging Face
+web interface, not with ``--public``. Once a repo is public it is never set back to
+private, also not when a new version is pushed into it. This script only sets
+visibility when it *creates* a repo; publishing into an existing public repo keeps
+it public.
 """
 
 from __future__ import annotations

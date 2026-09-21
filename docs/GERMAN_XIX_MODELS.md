@@ -140,9 +140,18 @@ is the symptom, and the fix is a larger ceiling, not a better prompt.
 
 Two things are required, and neither is automatic.
 
-### 1. `HF_TOKEN` — the repos are private
+### 1. `HF_TOKEN` — the repos are private (all but one)
 
-The weights cannot be pulled at all without it. Put a token with read access to
+`dh-unibe/qwen3vl-german-xix-v2` is public; every other repo in the table is
+private, and their weights cannot be pulled at all without a token.
+
+**Visibility rule (2026-09-21).** Switching a repo from private to public is done
+**by hand, in the Hugging Face web interface**, by a person — never by a script or
+an agent (`--public` is not used). **Once public, a repo is never set back to
+private** — not when a new version is pushed into it, not when its card is
+rewritten. The private default of `publish_to_hub.py` applies only to creating a
+new repo; `create_repo(..., exist_ok=True)` leaves an existing repo's visibility as
+it is, so re-publishing into a public repo keeps it public. Put a token with read access to
 the `dh-unibe` org in the environment the merge and the vLLM subprocess inherit
 (`~/Repo/serving-atr-inference/.env`, which `scripts/*` and the units source).
 
