@@ -84,6 +84,13 @@ class Settings(BaseSettings):
     #: switch rather than a constant: a slow second opinion must be removable
     #: without a redeploy.
     party_second_opinion: bool = True
+    #: How long the requested engine's result may wait for party once it is ready
+    #: (#149). Counted from the primary result, not from the request: the two run
+    #: concurrently, so a party page that finishes inside the primary's own time
+    #: costs nothing, and this only bounds how long a finished answer is held.
+    #: Measured on 17.09.: one party page takes 30-80 s, and with pages queued
+    #: behind each other the n-th request of a burst waited for n-1 of them.
+    party_second_opinion_grace_s: float = 30.0
     # The training service (#34). Not a recognition engine — it is reached only by
     # the /train/* proxy (#35), and callers (the Discord bot, the ATR-MCP) know
     # nothing but :8200: ufw opens that port alone to tei.
