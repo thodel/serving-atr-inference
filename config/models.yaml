@@ -102,6 +102,54 @@ models:
       - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
       - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
 
+  # v2 replaces v1, and the reason is worth keeping: v1 was trained on a corpus
+  # whose PageXML converter had truncated lines to their first word — 6.35x the
+  # characters of nr-sr-vereinigte-bundesversammlung-xix and 4.54x of
+  # parlamentsdienste-protokolle — so it learned to write the first word and
+  # stop. On the published federal-minutes benchmark it wrote little more than
+  # that on 507 of 2751 lines (18.4%) and scored CER 0.2551. v2 is the same four
+  # repositories, the same seed and the same split after the converter fix, and
+  # collapses on none of them: **CER 0.0765 on 2751 held-out lines**, no document
+  # shared with training (Hodel & Schoch 2021, doi:10.5281/zenodo.4746342).
+  #
+  # Served `level: page`, like the v1-era entries, and for the same reasons: one
+  # call per page instead of one per line, and no dependency on the kraken
+  # segmenter being right about this material. It is a deployment decision, not a
+  # property of the weights.
+  #
+  # What that decision costs is knowing the accuracy. 0.0765 is a LINE-level
+  # number, measured on line crops at 262144 pixels; page-level serving asks this
+  # model for something its training never showed it, at eight times the pixel
+  # budget, and nothing here measures that. Do not quote 0.0765 for page-level
+  # readings of a new corpus — it is the reason to expect them to be good, not
+  # evidence that they are. `level: line` is one word away if a comparison on the
+  # same pages says the page shape is worse.
+  #
+  # `max_pixels` is left at the default so page-level serving gets
+  # VLM_PIXEL_BUDGET["page"] (2048*32*32), not the 262144 it trained at: a whole
+  # page squeezed into one line's budget is unreadable, and the budget that suits
+  # the input is the one the page has to be legible at. That is a second
+  # unmeasured knob on top of the first — if the smoke run comes back short, this
+  # is the thing to raise.
+  - id: qwen3vl-german-xix-v2
+    engine: vllm
+    hf_repo: dh-unibe/qwen3vl-german-xix-v2
+    base_model: Qwen/Qwen3-VL-4B-Instruct
+    task: htr
+    level: page          # one call per page; its CER was measured per line
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 12000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
   - id: qwen3.5-4b-german-xix-v1
     engine: vllm
     # Not servable on asterAIx (verified 2026-09-14): transformers 4.57.6 has no

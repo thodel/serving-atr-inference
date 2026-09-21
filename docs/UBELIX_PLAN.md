@@ -2188,3 +2188,167 @@ One manual repair, with the failed record kept beside it, is acceptable.
 *For, later:* if environmental failures before any training become common (D would
 make them rarer), a guarded `failed → training` for jobs with no checkpoint and an
 intact corpus would replace hand-edited JSON.
+
+---
+
+## 23. `qwen3vl-german-xix-v2`: the retrained model settles §21
+
+§21 said the first-word collapse *fit* the truncated federal-protocol sources but
+was not proven by them, and that the proof would be a retrained model scored on
+the same benchmark. It was retrained on the corpus rebuilt with the fixed reader
+(#125) — same four repositories, same seed, same page split — and scored on the
+same 2,751 lines of the Federal Council test set.
+
+| | v1 | **v2** |
+|---|---:|---:|
+| CER | 0.2551 | **0.0765** |
+| WER | 0.3917 | **0.2458** |
+| `length_ratio` | 0.815 | **1.0019** |
+| missing characters | 22,831 | **1,538** |
+| **collapsed lines** (under a third of the reference) | **507 (18.4 %)** | **0 (0.0 %)** |
+
+The CER is 3.3× better, but the last row is the finding: the collapse does not
+shrink, it **disappears**. Nothing in the run addressed it except the corpus, so
+the truncated transcriptions in `nr-sr-vereinigte-bundesversammlung-xix` (6.35×
+the characters after the fix) and `parlamentsdienste-protokolle` (4.54×) were the
+cause. Those two are 0.8 % of the corpus and the material closest to the
+benchmark; the model had learned "on this kind of page, write the first word".
+
+The remaining errors are 5,499 substitutions against 1,538 missing characters —
+misreadings, which is the profile §18 arrived at for medieval v3.
+
+**Do not compare v2's own split CER (0.0533) with v1's 0.0100.** v2 was scored by
+the stratified draw (#120, fixed after v1 ran); v1's figure is five in-domain
+pages from the head of `val.jsonl` (§20). The benchmark row above is the
+comparison.
+
+Trained in 10 h 11 on one H100 (`gpu`, `job_gratis`, 12 CPUs × 15 h — see §21a
+for why not 16 × 24 h), from job `20260916T090417Z-qwen3vl-german-xix-v2`.
+
+### What the UBELIX tooling did during this
+
+`ubelix/` moved to `thodel/training-atr-models` (#7 there), together with the
+part-2 pinning of #147: `submit.sh` records the commit and every batch file runs
+a git worktree of it. A peer session's review found two defects in that work — a
+Slurm job still wrote the registry through the disable-before-replace and the
+promotion gate, and `pin_code` accepted a half-made worktree — both fixed before
+the merge, and the acceptance smoke on UBELIX then ran end to end from the merged
+tree: `completed`, registry untouched, the commit recorded in every stage and in
+`metadata.json`.
+
+## 24. The other three sizes: what four retrained models say together
+
+§23 proved the collapse on one model. The remaining three arms of the 19th-century
+grid — Qwen3.5 at 4B, 2B and 0.8B — were retrained on the same corrected corpus
+(UBELIX `15560727/28/29`) and scored on the same 2,751 benchmark lines on
+2026-09-19 (`15696149/50/51`).
+
+| model | base | CER v1 | **CER v2** | WER v2 | `length_ratio` v2 | collapsed v1 → v2 |
+|---|---|---:|---:|---:|---:|---|
+| `qwen3.5-4b-german-xix-v2` | Qwen3.5-4B | 0.3596 | **0.0680** | 0.2342 | 0.9996 | 807 (29.3 %) → **0** |
+| `qwen3vl-german-xix-v2` | Qwen3-VL-4B | 0.2551 | **0.0765** | 0.2458 | 1.0019 | 507 (18.4 %) → **0** |
+| `qwen3.5-2b-german-xix-v2` | Qwen3.5-2B | 0.2937 | **0.0895** | 0.2624 | 1.0005 | 611 (22.2 %) → **0** |
+| `qwen3.5-0.8b-german-xix-v2` | Qwen3.5-0.8B | — | **0.1115** | 0.3065 | 0.9975 | — → **0** |
+
+Three things this adds to §23, none of which one model could have shown:
+
+**The collapse was never architectural.** It disappears in all four models, across
+two different model families and a 5× spread in parameters, with nothing changed
+but the corpus. A single model going from 507 collapses to 0 left room for a lucky
+run; four independent runs going to exactly 0 do not.
+
+**v1 inverted the ranking.** Qwen3.5-4B was the *worst* of the three v1 models
+(0.3596, and 29.3 % collapsed — the highest of any arm) and is the *best* v2 model
+(0.0680, ahead of Qwen3-VL's 0.0765). The truncated corpus hurt it hardest, so its
+v1 number was a statement about the data and not about the architecture. Any
+model-selection decision taken on the v1 grid would have picked the wrong family.
+This is the concrete cost of §21's defect, and the reason the v1 cards name their
+successor rather than merely carrying a warning.
+
+**Scaling is monotone again**: 0.8B 0.1115 → 2B 0.0895 → 4B 0.0680. On the v1 grid
+it was not (4B worse than 2B worse than Qwen3-VL), which in hindsight was a second,
+quieter symptom of the same defect — a corpus that truncates a third of its
+characters rewards a model for stopping early, and the larger the model, the more
+reliably it learns to. The 0.8B size, left out in 2026-09 because it lost on the
+medieval corpus, beats every v1 model by a wide margin and is the cheap option for
+bulk runs.
+
+**What is not solved.** WER stays at 0.23–0.31 against CERs of 0.07–0.11.
+`convention_normalized` moves it by about 0.005, so this is not the
+whitespace/convention question of §20 — it is genuine word-level error spread thin
+across many lines (4B: 4,995 substitutions against 1,437 missing characters). For
+reading and for semantic search that is fine; for word-level search on these
+transcriptions it is not, and nothing in this grid addresses it.
+
+All four are on the share and published privately to `dh-unibe/…`. Two corrections
+made while publishing, both found by reading the result back rather than trusting
+the upload:
+
+* `dh-unibe/qwen3vl-german-xix-v2` was found **public** on 2026-09-20, against the
+  standing rule that these repos are private (and against
+  `docs/GERMAN_XIX_MODELS.md` §1, which serves them with `HF_TOKEN` because they
+  are). It was *not* created that way: the upload of 2026-09-18 ran without
+  `--public`, and the read-back that morning printed `private=True`. It became
+  public some time between then and 2026-09-20; a visibility change leaves no
+  commit, so the hub's history does not say when or by whom. Now private again —
+  serving is unaffected, since v1 is served from private repos the same way.
+  (A first version of this paragraph said the upload had created it public and
+  that the read-back had printed `private=False`. Both were wrong: the first was
+  inferred from `lastModified`, which a visibility change does not touch.)
+* The three new directories landed on the share as `drwxr-----`: `rsync --no-perms`
+  carried the umask, not the siblings' `drwxr-sr-x`, so the group — i.e. asteraix —
+  could not have read them. Now `2755`.
+
+### Copying a model to the share and publishing it — the steps that worked
+
+The job record's `registration` text says "copy that directory to the share". Done
+naively, that is the permission defect above. What worked, on UBELIX:
+
+```bash
+S=/storage/research/wbkolleg_dh_1/Textrecognition_Training/trained-ubelix
+T=/scratch/network/users/$USER/runs/trained
+# --perms (implied by -a) is required: with --no-perms, --chmod is silently
+# ignored and the umask wins (tested 2026-09-21: drwxr----- again)
+rsync -a --no-group --chmod=D2755,F644 "$T/$m/" "$S/$m/"
+# verify: same file list and sizes on both sides
+diff <(cd "$T/$m" && find . -type f -printf '%s %P\n' | sort) \
+     <(cd "$S/$m" && find . -type f -printf '%s %P\n' | sort)
+```
+
+Then write the benchmark result into `metadata.json` → `notes` **before**
+publishing (the card is generated from it), and publish from the container with
+all three binds — `/scratch/network/…` resolves through `/rs_scratch`:
+
+```bash
+apptainer exec --bind /scratch --bind /rs_scratch --bind /storage/research \
+  --env HF_TOKEN="$(tr -d '[:space:]' < ~/.hf_token)" ~/ubelix/vlm-train.sif \
+  python ~/serving-atr-inference/scripts/publish_to_hub.py \
+  --trained-root "$T" --only "$m" [--dry-run]
+```
+
+Finally read back from the hub — `private`, file count, and the card's
+`HELD-OUT RESULT` / DOI — rather than trusting the upload's `ok`, and re-run
+`rsync` so the card that `publish_to_hub.py` wrote into the directory reaches the
+share too.
+
+### Does any of this need an issue?
+
+* **`scan_trained` returning an empty scan on a missing root — yes.** A publish
+  that uploads nothing and exits 0 is the failure mode that is hardest to notice,
+  and the fix is small (raise, or at least exit non-zero, when the root does not
+  exist and nothing was asked for). Filed as #155.
+* **Share permissions — no code issue.** No code in this repo copies to the share;
+  the procedure above is the fix, and it now lives where the next copy will be
+  done from.
+* **The repo that turned public — no code issue.** `publish_to_hub.py` created it
+  private, and the read-back proved it. What changed it is outside this code. The
+  useful guard is a periodic visibility check of `dh-unibe/*-xix-*` and
+  `*-medieval-*`, which is an operations task, not a defect.
+* **WER 0.23–0.31 — not yet.** It is real, but nobody has asked for word-level
+  search on this material, and an issue without a consumer tends to become a
+  research project. Revisit when a corpus run needs exact-word retrieval.
+
+`scan_trained` returns an empty scan, not an error, when its root is not a
+directory, and in the container `/scratch/network/…` needs the `/rs_scratch` bind
+to resolve. Publishing without that bind therefore reports "0 models" and exits 0.
+With `--only` it raises instead; without it, it succeeds silently.

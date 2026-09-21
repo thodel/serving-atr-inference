@@ -279,6 +279,13 @@ def discover_hf_models(session: requests.Session) -> tuple[list[HFModel], str | 
 
 ZENODO_API = "https://zenodo.org/api/records"
 ZENODO_COMMUNITIES = ["scribes", "scriboco", "ocr", "digitaalregion", "handwritten-ocr"]
+# Zenodo's anonymous cap on the page size, in results per page. Verified
+# 2026-09-17: size=25 → 200, size=26 → 400 ("Page size cannot be greater than
+# 25. Please use authenticated requests to increase the limit to 100."). This
+# script sends no Zenodo credentials, so 25 is the maximum that works
+# anonymously. The previous 200 made every query 400 and the weekly report
+# silently lost all Zenodo candidates (#66).
+ZENODO_PAGE_SIZE = 25
 
 
 def _search_zenodo(session: requests.Session, params: dict) -> dict:
@@ -298,15 +305,15 @@ def discover_zenodo_models(session: requests.Session) -> tuple[list[ZenodoRecord
 
     # Build list of (q, community) query pairs
     queries = [
-        ({"q": "kraken", "communities": c, "type": "dataset", "size": 200, "allversions": "false"}, c)
+        ({"q": "kraken", "communities": c, "type": "dataset", "size": ZENODO_PAGE_SIZE, "allversions": "false"}, c)
         for c in ZENODO_COMMUNITIES
     ]
     # Also a general HTR search
     queries.append(
-        ({"q": "handwritten text recognition", "type": "dataset", "size": 200, "allversions": "false"}, "htr")
+        ({"q": "handwritten text recognition", "type": "dataset", "size": ZENODO_PAGE_SIZE, "allversions": "false"}, "htr")
     )
     queries.append(
-        ({"q": "HTR model", "type": "dataset", "size": 200, "allversions": "false"}, "htr-model")
+        ({"q": "HTR model", "type": "dataset", "size": ZENODO_PAGE_SIZE, "allversions": "false"}, "htr-model")
     )
 
     for params, community in queries:

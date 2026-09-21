@@ -103,11 +103,24 @@ def visual_budget(spec, settings) -> int | None:
     **16384 tokens an image**. Eight times the training scale, and more than the
     whole 16384-token context this gateway serves with.
 
-    The symptom is not an error. ``qwen3vl-german-xix-v1`` read ten pages of
-    Lassberg correspondence and returned 3 to 36 characters each — correct
-    German every time, always the largest writing on the page, ``finish_reason``
-    ``stop`` rather than ``length`` (agentic_historian#435). A model given an
-    image at a scale it never trained on does not fail, it answers briefly.
+    The symptom is not an error. A model given an image at a scale it never
+    trained on does not fail, it answers briefly.
+
+    **That is a real asymmetry and it was not the cause of the case that found
+    it.** ``qwen3vl-german-xix-v1`` read ten pages of Lassberg correspondence and
+    returned 3 to 36 characters each — correct German every time, always the
+    largest writing on the page, ``finish_reason`` ``stop`` rather than ``length``
+    (agentic_historian#435). Applying the budget did not change those readings,
+    and the reason came out later, from ``qwen3vl-german-xix-v2``'s model card:
+    v1 was trained on a corpus whose PageXML converter had truncated lines to
+    their first word, so it had learned to write the first word and stop. On the
+    published federal-minutes benchmark it did exactly that on 507 of 2751 lines;
+    v2, the same data after the fix, on none.
+
+    Two lessons, and the second is the one that keeps this docstring honest. A
+    scale mismatch is worth fixing on its own terms. And a plausible mechanism
+    that explains a symptom is not the same as the mechanism that caused it —
+    what separated them here was a benchmark, not an argument.
 
     The same three-source shape as ``generation_budget``: the model's own
     ``max_pixels``, then its level's training budget, and a setting that turns the
