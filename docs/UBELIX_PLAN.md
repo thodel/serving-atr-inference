@@ -2284,13 +2284,69 @@ All four are on the share and published privately to `dh-unibe/…`. Two correct
 made while publishing, both found by reading the result back rather than trusting
 the upload:
 
-* `dh-unibe/qwen3vl-german-xix-v2` had been **public** since 2026-09-18 — created
-  that way by the upload, not flipped afterwards — against the standing rule that
-  these repos are private. The check I ran at the time printed `private=False` and
-  I did not act on it. Now private.
+* `dh-unibe/qwen3vl-german-xix-v2` was found **public** on 2026-09-20, against the
+  standing rule that these repos are private (and against
+  `docs/GERMAN_XIX_MODELS.md` §1, which serves them with `HF_TOKEN` because they
+  are). It was *not* created that way: the upload of 2026-09-18 ran without
+  `--public`, and the read-back that morning printed `private=True`. It became
+  public some time between then and 2026-09-20; a visibility change leaves no
+  commit, so the hub's history does not say when or by whom. Now private again —
+  serving is unaffected, since v1 is served from private repos the same way.
+  (A first version of this paragraph said the upload had created it public and
+  that the read-back had printed `private=False`. Both were wrong: the first was
+  inferred from `lastModified`, which a visibility change does not touch.)
 * The three new directories landed on the share as `drwxr-----`: `rsync --no-perms`
   carried the umask, not the siblings' `drwxr-sr-x`, so the group — i.e. asteraix —
   could not have read them. Now `2755`.
+
+### Copying a model to the share and publishing it — the steps that worked
+
+The job record's `registration` text says "copy that directory to the share". Done
+naively, that is the permission defect above. What worked, on UBELIX:
+
+```bash
+S=/storage/research/wbkolleg_dh_1/Textrecognition_Training/trained-ubelix
+T=/scratch/network/users/$USER/runs/trained
+# --perms (implied by -a) is required: with --no-perms, --chmod is silently
+# ignored and the umask wins (tested 2026-09-21: drwxr----- again)
+rsync -a --no-group --chmod=D2755,F644 "$T/$m/" "$S/$m/"
+# verify: same file list and sizes on both sides
+diff <(cd "$T/$m" && find . -type f -printf '%s %P\n' | sort) \
+     <(cd "$S/$m" && find . -type f -printf '%s %P\n' | sort)
+```
+
+Then write the benchmark result into `metadata.json` → `notes` **before**
+publishing (the card is generated from it), and publish from the container with
+all three binds — `/scratch/network/…` resolves through `/rs_scratch`:
+
+```bash
+apptainer exec --bind /scratch --bind /rs_scratch --bind /storage/research \
+  --env HF_TOKEN="$(tr -d '[:space:]' < ~/.hf_token)" ~/ubelix/vlm-train.sif \
+  python ~/serving-atr-inference/scripts/publish_to_hub.py \
+  --trained-root "$T" --only "$m" [--dry-run]
+```
+
+Finally read back from the hub — `private`, file count, and the card's
+`HELD-OUT RESULT` / DOI — rather than trusting the upload's `ok`, and re-run
+`rsync` so the card that `publish_to_hub.py` wrote into the directory reaches the
+share too.
+
+### Does any of this need an issue?
+
+* **`scan_trained` returning an empty scan on a missing root — yes.** A publish
+  that uploads nothing and exits 0 is the failure mode that is hardest to notice,
+  and the fix is small (raise, or at least exit non-zero, when the root does not
+  exist and nothing was asked for). Filed as #155.
+* **Share permissions — no code issue.** No code in this repo copies to the share;
+  the procedure above is the fix, and it now lives where the next copy will be
+  done from.
+* **The repo that turned public — no code issue.** `publish_to_hub.py` created it
+  private, and the read-back proved it. What changed it is outside this code. The
+  useful guard is a periodic visibility check of `dh-unibe/*-xix-*` and
+  `*-medieval-*`, which is an operations task, not a defect.
+* **WER 0.23–0.31 — not yet.** It is real, but nobody has asked for word-level
+  search on this material, and an issue without a consumer tends to become a
+  research project. Revisit when a corpus run needs exact-word retrieval.
 
 `scan_trained` returns an empty scan, not an error, when its root is not a
 directory, and in the container `/scratch/network/…` needs the `/rs_scratch` bind

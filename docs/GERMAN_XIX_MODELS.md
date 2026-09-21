@@ -3,12 +3,15 @@
 Models trained by this repo's training service on the same four corpora and the
 same instruction, differing in their base and in the corpus fix between v1 and v2:
 
-| registry id | base | adapter | own split CER¹ | benchmark CER² |
-|---|---|---|---|---|
-| **`qwen3vl-german-xix-v2`** | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v2` | 5.33 % | **7.65 %** |
-| `qwen3vl-german-xix-v1` | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v1` | 1.00 % | 25.51 % |
-| `qwen3.5-4b-german-xix-v1` | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v1` | 1.07 % | — |
-| `qwen3.5-2b-german-xix-v1` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v1` | — | — |
+| model id | base | adapter | own split CER¹ | benchmark CER² | registered |
+|---|---|---|---|---|---|
+| **`qwen3.5-4b-german-xix-v2`** | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v2` | 4.78 % | **6.80 %** | no³ |
+| **`qwen3vl-german-xix-v2`** | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v2` | 5.33 % | **7.65 %** | yes |
+| `qwen3.5-2b-german-xix-v2` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v2` | 5.49 % | 8.95 % | no³ |
+| `qwen3.5-0.8b-german-xix-v2` | `Qwen/Qwen3.5-0.8B` | `dh-unibe/qwen3.5-0.8b-german-xix-v2` | 7.04 % | 11.15 % | no³ |
+| `qwen3vl-german-xix-v1` | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v1` | 1.00 % | 25.51 % | yes |
+| `qwen3.5-2b-german-xix-v1` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v1` | 1.41 % | 29.37 % | yes |
+| `qwen3.5-4b-german-xix-v1` | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v1` | 1.07 % | 35.96 % | yes |
 
 ¹ Each on **its own run's held-out validation split**, not a shared benchmark. The
 numbers say the training converged; they do not predict what these models do on a
@@ -21,6 +24,14 @@ in-domain pages — and v2 on the stratified draw introduced in #120.
 document shared with training. This column is the one to quote, and the one that
 makes the first column's ordering look like what it is.
 
+³ Trained, scored and published (privately) on 2026-09-19/20, but **not in
+`config/models.yaml`**: registering them is a separate decision, and the Qwen3.5
+bases need transformers 5.x (UBELIX trained them in `vlm-train-tf5.sif`), which the
+merge and serving venvs here have not been checked against. The adapters are also on
+the research share under `Textrecognition_Training/trained-ubelix/`.
+`qwen3.5-4b-german-xix-v2` is the most accurate of the seven on the benchmark and
+the obvious candidate if one of them is registered. See `docs/UBELIX_PLAN.md` §24.
+
 ## v1 → v2, and what it settles
 
 v1 was built before the PageXML converter fix (33f55fc, #125), which had been
@@ -29,7 +40,8 @@ truncating lines to their first word: 6.35× the characters of
 `parlamentsdienste-protokolle`. v1 learned to write the first word and stop — on
 the benchmark above it did so on **507 of 2751 lines (18.4 %)**. v2 is the same
 four repositories, the same seed and the same page-level split after the fix, and
-collapses on **none**. Its remaining errors are 5 499 substitutions against 1 538
+collapses on **none** — and neither do the three Qwen3.5 sizes retrained the same way
+(v1: 611 and 807 collapsed lines for 2B and 4B; v2: 0 for all of them). Its remaining errors are 5 499 substitutions against 1 538
 missing characters: misreadings rather than lost text.
 
 This also closes the Lassberg question below. v1's 3-to-36-character page readings
