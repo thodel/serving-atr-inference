@@ -29,5 +29,6 @@
       "min_free_vram_mb": 12000
     }
   },
-  "jobs": {"total": 49, "running": 1, "queued": 0}
+  "jobs": {"total": 49, "running": 1, "queued": 0},
+  "gateway_auth_configured": true
 }
