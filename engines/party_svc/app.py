@@ -65,6 +65,34 @@ _error: str | None = None
 _model_lock = threading.Lock()
 
 
+#: What party's own default asks for, and what it asked for before #149.
+REQUESTED_TOKENS = 512
+
+
+def _decoder_limit(model) -> int | None:
+    """The decoder's ``max_seq_len`` — the most tokens a line can generate.
+
+    party clamps ``max_generated_tokens`` to it anyway and logs a warning on
+    every page (#149). Read from the model rather than written down: on
+    2026-09-21 the loaded party model answered 384 at
+    ``_model.net.nn["decoder"].max_seq_len``, but that is a property of these
+    weights, and the next model can differ.
+    """
+    try:
+        return int(model.net.nn["decoder"].max_seq_len)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def _generation_budget(model) -> int:
+    limit = _decoder_limit(model)
+    if limit is None:
+        logger.warning("Party: decoder max_seq_len not found; asking for {} tokens "
+                       "and leaving the clamp to party", REQUESTED_TOKENS)
+        return REQUESTED_TOKENS
+    return min(REQUESTED_TOKENS, limit)
+
+
 def _model_file() -> Path:
     p = Path(htrmopo.get_model(MODEL_ID, path=str(CACHE_DIR)))
     if p.is_dir():
@@ -91,7 +119,7 @@ async def _startup():
             num_threads=1, batch_size=1,
             # prompt_mode None: derived from the segmentation type, and blla
             # produces baselines, so party uses curve prompts.
-            prompt_mode=None, max_generated_tokens=512,
+            prompt_mode=None, max_generated_tokens=_generation_budget(_model),
             add_lang_token=True, raise_on_error=False,
         )
         _loaded = True

@@ -110,6 +110,28 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
     )
 
 
+#: How long an engine's own /health may take before the probe gives up.
+HEALTH_PROBE_TIMEOUT_S = 5.0
+
+
+async def _probe_engine(client: httpx.AsyncClient, name: str, url: str) -> EngineStatus:
+    """One engine's /health, telling **busy** from **down** (#149).
+
+    A read timeout means the engine accepted the connection and did not answer
+    in time — the process is alive and working. On 17.09. party answered nothing
+    for the length of each page it read (30-80 s), so every probe timed out and
+    the gateway reported a working engine as ``reachable: false``. A refused or
+    unanswered *connection* is the other case, and that one is down.
+    """
+    try:
+        r = await client.get(f"{url}/health")
+    except httpx.ReadTimeout:
+        return EngineStatus(name=name, url=url, reachable=True, busy=True)
+    except Exception:  # noqa: BLE001 - refused, reset, DNS: all mean "not there"
+        return EngineStatus(name=name, url=url, reachable=False)
+    return EngineStatus(name=name, url=url, reachable=r.status_code < 500)
+
+
 @router.get("/health", response_model=HealthResponse, tags=["meta"])
 async def health(request: Request) -> HealthResponse:
     registry = _registry(request)
@@ -119,13 +141,9 @@ async def health(request: Request) -> HealthResponse:
     # on engines that are down (#30). vLLM instances are transient (one per
     # resident model) and are not probed here — they are tracked via
     # ``resident_model_ids()`` instead.
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=HEALTH_PROBE_TIMEOUT_S) as client:
         async def _probe(name: str, url: str) -> EngineStatus:
-            try:
-                r = await client.get(f"{url}/health")
-                return EngineStatus(name=name, url=url, reachable=r.status_code < 500)
-            except Exception:
-                return EngineStatus(name=name, url=url, reachable=False)
+            return await _probe_engine(client, name, url)
 
         # service_urls(), not engine_urls(): the trainer (:8204) is a service the
         # gateway fronts and #35 put it in /health on purpose. Training is
@@ -371,6 +389,32 @@ async def _party_second_opinion(request: Request, engine: str, raw: bytes,
                          timing_ms=res.timing_ms or int((time.perf_counter() - started) * 1000))
 
 
+async def _second_opinion_within(task: asyncio.Future,
+                                 grace_s: float) -> SecondOpinion | None:
+    """The second opinion, or the reason it is missing — never a held answer.
+
+    Called once the requested engine has its result. Party has been running
+    alongside it the whole time, so a page it finishes in the primary's own time
+    costs nothing; this bounds only the wait *after* that (#149). Before, the
+    answer waited for party unconditionally, and in a burst the n-th request
+    waited for n-1 party pages at 30-80 s each.
+
+    On the deadline the party call is **cancelled** rather than left to finish in
+    the background. Neither choice frees party: it reads the page in a worker
+    thread, which a cancelled request cannot interrupt, so the page is read
+    either way. Letting the gateway's task run on would only hold a connection
+    open to receive a result no response can still carry.
+    """
+    try:
+        return await asyncio.wait_for(task, timeout=grace_s)
+    except asyncio.TimeoutError:
+        logger.warning("party second opinion dropped: no answer within {:.0f}s "
+                       "of the primary result", grace_s)
+        return SecondOpinion(
+            engine="party", model="party",
+            error=f"timed out: no answer within {grace_s:.0f}s of the primary result")
+
+
 @router.post(
     "/recognize",
     response_model=RecognitionResult,
@@ -409,8 +453,10 @@ async def recognize(
         _party_second_opinion(request, engine, raw, filename, ctype)
     )
 
+    grace_s = _settings(request).party_second_opinion_grace_s
+
     async def _with_second_opinion(result: RecognitionResult) -> RecognitionResult:
-        result.second_opinion = await party_task
+        result.second_opinion = await _second_opinion_within(party_task, grace_s)
         return result
 
     try:
@@ -524,7 +570,8 @@ async def ocr(
                 status_code=400,
                 detail=f"/ocr supports kraken + trocr (auto-segment); use /recognize for '{engine}'",
             )
-        second = await party_task
+        second = await _second_opinion_within(
+            party_task, _settings(request).party_second_opinion_grace_s)
     except EngineError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     finally:

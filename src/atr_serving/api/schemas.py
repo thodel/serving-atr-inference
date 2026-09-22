@@ -31,6 +31,12 @@ class EngineStatus(BaseModel):
     name: str
     url: str
     reachable: bool | None = None  # None = not probed yet
+    #: The engine accepted the connection but did not answer ``/health`` in time
+    #: (#149). Such an engine is **reachable**: it is working, not down. Before
+    #: this field a busy party read as ``reachable: false``, and anything that
+    #: plans around unreachable engines (#30) skipped party exactly while it was
+    #: in use. ``None`` when the probe answered or never connected.
+    busy: bool | None = None
 
 
 class HealthResponse(BaseModel):
