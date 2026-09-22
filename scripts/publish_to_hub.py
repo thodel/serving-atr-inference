@@ -101,10 +101,20 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     trained_root = args.trained_root or TrainerSettings().trained_root
+    explicit_root = args.trained_root is not None
     try:
         scan = scan_trained(trained_root, only=args.only, engines=args.engine)
     except PublishError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # An explicitly-passed --trained-root that does not exist is always an error:
+    # the caller pointed at a path that cannot be read (wrong mount, typo, stale
+    # symlink).  A missing default root on a box that never ran a training is a
+    # no-op for --list; for --publish it means "nothing to do yet".  We only raise
+    # when an explicit path does not exist and produced no models (serving#155).
+    if explicit_root and not trained_root.exists() and not scan.models:
+        print(f"error: --trained-root {trained_root} does not exist", file=sys.stderr)
         return 2
 
     print(f"trained models under {trained_root}: {len(scan.models)}")
