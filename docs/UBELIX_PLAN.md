@@ -2376,3 +2376,37 @@ it is, so re-publishing into a public repo keeps it public.
 directory, and in the container `/scratch/network/…` needs the `/rs_scratch` bind
 to resolve. Publishing without that bind therefore reports "0 models" and exits 0.
 With `--only` it raises instead; without it, it succeeds silently.
+
+## 25. Medieval v3 reads lines only — measured on pages, paragraphs and lines
+
+Asked whether the medieval model shares the 19th-century models' inability to read
+a whole page (#159), `qwen3vl-medieval-german-v3` was merged into a temporary
+directory on idhefix, served on a test port (vLLM 0.11, not registered) and asked
+four ways over its 14 held-out pages (`val_heldout.jsonl`, 594 lines) with
+`scripts/eval_granularity.py`:
+
+| input | n | CER | length ratio |
+|---|---:|---:|---:|
+| line crops | 594 | 0.111 | 1.00 |
+| paragraphs, page budget | 91 | 1.96 | 1.24 (two loops of 14 335 characters) |
+| paragraphs, line budget | 91 | 0.94 | 0.07 |
+| whole pages | 14 | 1.00 | 0.001 — every page read as "de" or "te" |
+
+It is worse than the 19th-century failure: those gave one correct line of a page;
+this gives two letters. The model was trained only on line crops
+(`granularity: line`, 262 144 px) and learned to stop after one line, so a page is
+out of distribution, and neither a larger nor a smaller pixel budget changes that.
+Served per line (kraken segments, one call per line) it performs as measured. It
+is not registered anywhere today; if it is, it must be `level: line`. What a page
+model would score on this corpus is unmeasured — nothing has been trained at
+`granularity: page` on it. Rule and table: `docs/VLM_TRAINING.md`, "A model
+trained on lines reads lines".
+
+The same test for `qwen3vl-german-xix-v2`, on 15 in-domain validation pages of its
+own run (five per source group), gave lines 0.052 and whole pages 0.98 with a
+length ratio of 0.02: each page read as one plausible line of 17–60 characters,
+often not on the page at all. It was run on asteraix with a temporary vLLM after a
+first attempt through the production gateway evicted the model tei was using at the
+time and cost it three 502s and a 503. All three 19th-century and medieval models
+measured so far are line readers; `qwen3vl-german-xix-v2` is served
+`level: line` since #171, like `qwen3.5-4b-german-xix-v2` since #159.

@@ -444,6 +444,60 @@ adding LoRA to language model"), and an HTR fine-tune certainly does. So:
 .venvs/vllm/bin/python scripts/merge_loras.py --only qwen3vl-thun-missiven-v1
 ```
 
+### A model trained on lines reads lines — not paragraphs, not pages
+
+A fine-tune trained at `granularity: line` has only ever seen one line crop at
+262 144 pixels, and it has learned to stop after one line. Registering it
+`level: page` asks it for something it cannot do, and no pixel budget fixes that.
+Measured on 2026-09-22 with `scripts/eval_granularity.py` on the 14 held-out
+pages of `qwen3vl-medieval-german-v3` (the same pages behind its CER 0.111),
+against their ground truth:
+
+| input | n | CER | length ratio | what came back |
+|---|---:|---:|---:|---|
+| line crops | 594 | **0.111** | 1.00 | the benchmark, reproduced; 1 collapse |
+| paragraphs (TextRegions), page budget | 91 | 1.96 | 1.24 | 26 collapses, 2 loops ("und er und er …" to the token limit) |
+| paragraphs, line budget | 91 | 0.94 | 0.07 | 7 % of the text |
+| whole pages, page budget | 14 | **1.00** | **0.001** | every page: "de" (13×) or "te" |
+
+By paragraph length (share of the reference text returned, page budget): one
+line 1.03, two to three lines 0.54, four to ten 0.15, more than ten lines 0.01 at
+the line budget — at the page budget the same regions either return a fragment or
+loop. Of 41 multi-line paragraphs that did not loop, the output matched the
+*first* line in only 9: it is not "line 1 and stop", it is a short fragment.
+
+The same measurement for **`qwen3vl-german-xix-v2`** — registered `level: page` in
+production (#154) until this measurement moved it to `level: line` (#171) — on 15 validation pages of its own
+training run (5 each from the Zurich Regierungsratsprotokolle, the federal
+protocols and kurrent-xix; unseen in training, but in-domain), served on asteraix
+with the production vLLM (0.11.0):
+
+| input | n | CER | length ratio | what came back |
+|---|---:|---:|---:|---|
+| line crops | 653 | **0.052** | 1.00 | Zurich 0.014, federal 0.054, kurrent 0.095 |
+| paragraphs, page budget | 36 | 0.95 | 0.05 | 25 collapses |
+| paragraphs, line budget | 36 | 0.96 | 0.05 | 24 collapses |
+| whole pages, page budget | 15 | **0.98** | **0.02** | 17–60 characters for pages of 376–5 674 |
+
+It fails more quietly than the medieval model, and that makes it more dangerous: a
+page comes back as one plausible German line, and often not one that is on the
+page. For a Zurich page beginning "thur, zu einer Zuchthaus-Korrektion …" it wrote
+"der Zuchthaus, die Hause"; for another, "Hochzeitlich in der Stadt", which the
+page does not contain; for the first Nationalrat protocol, "Hochgeehrter Herrn
+Nationalrathes." A caller who does not compare lengths sees a short, fluent,
+wrong transcription and no error.
+
+`qwen3.5-4b-german-xix-v2` failed the same way (#165) on 27 Lassberg pages without ground
+truth (#159: one line of a page, or a digit loop) and is served `level: line`
+since. So:
+
+- **Register a line-trained model `level: line`.** kraken segments, the model
+  reads one line per call, and it performs as measured.
+- **Want one call per page or paragraph? Train at `granularity: page`** — and
+  measure that model the same way before quoting its CER for pages.
+- **Before registering any VLM `level: page`, run `scripts/eval_granularity.py`**
+  on held-out PageXML pages. A line CER says nothing about a page.
+
 For a **Qwen3.5** base, merge and serve with `.venvs/vllm-next` instead — it is the
 only venv here whose transformers knows `qwen3_5` — and give the registry entry
 `vllm_venv: vllm-next` and `max_num_seqs: 64` (`engines/vllm/README.md`, #157).
