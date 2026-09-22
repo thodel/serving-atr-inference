@@ -22,13 +22,21 @@ Ground truth and geometry come from the training code (`line_boxes`,
 stored CER. Texts are compared with whitespace collapsed, so a paragraph read as
 one long line is not penalised for its missing line breaks.
 
-    # against the gateway (starts the model if needed; ATR_API_KEY from .env)
+    # against a vLLM you started yourself — the normal case
     .venvs/gateway/bin/python scripts/eval_granularity.py \\
         --root <job dir with data/<jsonl> and data/pages/> --jsonl val_heldout.jsonl \\
-        --model qwen3vl-medieval-german-v3 --out report.json [--recognize]
+        --model qwen3vl-medieval-german-v3 --out report.json \\
+        --base-url http://127.0.0.1:8299 --no-auth
 
-    # against a vLLM you started yourself
-    ... --base-url http://127.0.0.1:8299 --no-auth
+    # against the production gateway (ATR_API_KEY from .env) — only when it is idle
+    ... --base-url http://127.0.0.1:8200 [--recognize]
+
+**Do not point this at the production gateway while it serves anyone.** Card 1 of
+idhefix holds the engines and one VLM; asking for a second model evicts the one a
+caller is using, and two launches racing for the same free memory both fail. On
+2026-09-22 a run for `qwen3vl-german-xix-v2` cost tei's live requests to
+`qwen3.5-4b-german-xix-v2` three 502s and a 503 within one minute. Serve the model
+on a spare card instead — asteraix when it is not training — bound to 127.0.0.1.
 
 `--jsonl` rows need `image` (a line crop, relative to --root), `text` and `page`
 (the PageXML beside its .jpg). `--max-pages` draws that many pages, spread over the
@@ -190,7 +198,8 @@ def main() -> int:
     ap.add_argument("--jsonl", default="val_heldout.jsonl")
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--base-url", default="http://127.0.0.1:8200")
+    ap.add_argument("--base-url", required=True,
+                    help="a vLLM of your own (normal), or the gateway only when it is idle")
     ap.add_argument("--no-auth", action="store_true", help="no X-API-Key (a bare vLLM)")
     ap.add_argument("--max-pages", type=int, default=None)
     ap.add_argument("--recognize", action="store_true",

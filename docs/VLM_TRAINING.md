@@ -466,6 +466,27 @@ the line budget — at the page budget the same regions either return a fragment
 loop. Of 41 multi-line paragraphs that did not loop, the output matched the
 *first* line in only 9: it is not "line 1 and stop", it is a short fragment.
 
+The same measurement for **`qwen3vl-german-xix-v2`** — the model that is still
+registered `level: page` in production (#154) — on 15 validation pages of its own
+training run (5 each from the Zurich Regierungsratsprotokolle, the federal
+protocols and kurrent-xix; unseen in training, but in-domain), served on asteraix
+with the production vLLM (0.11.0):
+
+| input | n | CER | length ratio | what came back |
+|---|---:|---:|---:|---|
+| line crops | 653 | **0.052** | 1.00 | Zurich 0.014, federal 0.054, kurrent 0.095 |
+| paragraphs, page budget | 36 | 0.95 | 0.05 | 25 collapses |
+| paragraphs, line budget | 36 | 0.96 | 0.05 | 24 collapses |
+| whole pages, page budget | 15 | **0.98** | **0.02** | 17–60 characters for pages of 376–5 674 |
+
+It fails more quietly than the medieval model, and that makes it more dangerous: a
+page comes back as one plausible German line, and often not one that is on the
+page. For a Zurich page beginning "thur, zu einer Zuchthaus-Korrektion …" it wrote
+"der Zuchthaus, die Hause"; for another, "Hochzeitlich in der Stadt", which the
+page does not contain; for the first Nationalrat protocol, "Hochgeehrter Herrn
+Nationalrathes." A caller who does not compare lengths sees a short, fluent,
+wrong transcription and no error.
+
 `qwen3.5-4b-german-xix-v2` failed the same way (#165) on 27 Lassberg pages without ground
 truth (#159: one line of a page, or a digit loop) and is served `level: line`
 since. So:

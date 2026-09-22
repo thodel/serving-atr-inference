@@ -7,7 +7,7 @@ same instruction, differing in their base and in the corpus fix between v1 and v
 |---|---|---|---|---|---|
 | **`qwen3.5-4b-german-xix-v2`** | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v2` | 4.78 % | **6.80 %** | yes³ |
 | **`qwen3.5-4b-german-xix-v2`** | `Qwen/Qwen3.5-4B` | `dh-unibe/qwen3.5-4b-german-xix-v2` | — | **6.80 %** |
-| **`qwen3vl-german-xix-v2`** | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v2` | 5.33 % | **7.65 %** | yes |
+| **`qwen3vl-german-xix-v2`** | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v2` | 5.33 % | **7.65 %** | yes — `level: page`, which it cannot do (⁴) |
 | `qwen3.5-2b-german-xix-v2` | `Qwen/Qwen3.5-2B` | `dh-unibe/qwen3.5-2b-german-xix-v2` | 5.49 % | 8.95 % | no³ |
 | `qwen3.5-0.8b-german-xix-v2` | `Qwen/Qwen3.5-0.8B` | `dh-unibe/qwen3.5-0.8b-german-xix-v2` | 7.04 % | 11.15 % | no³ |
 | `qwen3vl-german-xix-v1` | `Qwen/Qwen3-VL-4B-Instruct` | `dh-unibe/qwen3vl-german-xix-v1` | 1.00 % | 25.51 % | yes |
@@ -24,6 +24,12 @@ in-domain pages — and v2 on the stratified draw introduced in #120.
 2021, [doi:10.5281/zenodo.4746342](https://doi.org/10.5281/zenodo.4746342)), no
 document shared with training. This column is the one to quote, and the one that
 makes the first column's ordering look like what it is.
+
+⁴ **Measured 2026-09-22 (#165):** on 15 validation pages of its own run it reads
+lines at CER 0.052 and whole pages at 0.98, returning 17–60 characters — one
+plausible line, often not on the page — for pages of 376–5 674. It is registered
+`level: page` (#154), so every `/recognize` call for it today gets that. Details:
+`docs/VLM_TRAINING.md`, "A model trained on lines reads lines".
 
 ³ `qwen3.5-4b-german-xix-v2` is registered and served from a **second vLLM**,
 `.venvs/vllm-next` (vLLM 0.29.0 cu129, transformers 5.17), selected per model by
