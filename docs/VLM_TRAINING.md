@@ -466,8 +466,8 @@ the line budget — at the page budget the same regions either return a fragment
 loop. Of 41 multi-line paragraphs that did not loop, the output matched the
 *first* line in only 9: it is not "line 1 and stop", it is a short fragment.
 
-The same measurement for **`qwen3vl-german-xix-v2`** — the model that is still
-registered `level: page` in production (#154) — on 15 validation pages of its own
+The same measurement for **`qwen3vl-german-xix-v2`** — registered `level: page` in
+production (#154) until this measurement moved it to `level: line` (#171) — on 15 validation pages of its own
 training run (5 each from the Zurich Regierungsratsprotokolle, the federal
 protocols and kurrent-xix; unseen in training, but in-domain), served on asteraix
 with the production vLLM (0.11.0):

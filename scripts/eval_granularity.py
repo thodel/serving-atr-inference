@@ -60,10 +60,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from atr_serving.training.contracts import VLM_PIXEL_BUDGET
-from atr_serving.training.pagexml import _localname, line_boxes
-from atr_serving.training.textmetrics import score_pairs
-from atr_serving.training.vlm_dataset import page_sample
+from atr_serving.training.contracts import VLM_PIXEL_BUDGET  # noqa: E402
+from atr_serving.training.pagexml import _localname, line_boxes  # noqa: E402
+from atr_serving.training.textmetrics import score_pairs  # noqa: E402
+from atr_serving.training.vlm_dataset import page_sample  # noqa: E402
 
 PROMPT = "Transcribe the handwritten text in this image exactly as written."
 LINE_PX, PAGE_PX = VLM_PIXEL_BUDGET["line"], VLM_PIXEL_BUDGET["page"]

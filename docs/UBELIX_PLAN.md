@@ -2408,5 +2408,5 @@ length ratio of 0.02: each page read as one plausible line of 17–60 characters
 often not on the page at all. It was run on asteraix with a temporary vLLM after a
 first attempt through the production gateway evicted the model tei was using at the
 time and cost it three 502s and a 503. All three 19th-century and medieval models
-measured so far are line readers; `qwen3vl-german-xix-v2` is still served
-`level: page` (#165).
+measured so far are line readers; `qwen3vl-german-xix-v2` is served
+`level: line` since #171, like `qwen3.5-4b-german-xix-v2` since #159.
