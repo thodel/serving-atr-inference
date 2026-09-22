@@ -252,6 +252,48 @@ def test_ocr_is_an_alias_for_recognize(kraken_svc, monkeypatch):
     assert "hello" in response.json()["text"]
 
 
+
+# ── /health reports the allocator, and never fails on it (#158) ────────────
+def _health(module) -> httpx.Response:
+    async def scenario():
+        async with _client(module) as client:
+            return await client.get("/health")
+    return asyncio.run(scenario())
+
+
+def test_health_reports_cuda_memory_in_mib(kraken_svc, monkeypatch):
+    mib = 1024 * 1024
+    monkeypatch.setattr(kraken_svc.torch, "cuda", types.SimpleNamespace(
+        is_available=lambda: True,
+        memory_allocated=lambda device: 3 * mib + 17,
+        memory_reserved=lambda device: 11 * mib,
+        max_memory_reserved=lambda device: 23 * mib))
+    response = _health(kraken_svc)
+    assert response.status_code == 200
+    assert response.json()["cuda"] == {"allocated_mib": 3, "reserved_mib": 11,
+                                       "max_reserved_mib": 23}
+
+
+def test_health_reports_cuda_as_null_on_cpu(kraken_svc):
+    """Same shape on every machine: the key is there, its value is null."""
+    body = _health(kraken_svc).json()
+    assert "cuda" in body and body["cuda"] is None
+
+
+def test_a_torch_error_is_null_not_a_failed_health_check(kraken_svc, monkeypatch):
+    """A broken CUDA context must not turn /health into a 500: the gateway would
+    report a working kraken as down (#149 was that bug for party)."""
+    def broken(device):
+        raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    monkeypatch.setattr(kraken_svc.torch, "cuda", types.SimpleNamespace(
+        is_available=lambda: True, memory_allocated=broken,
+        memory_reserved=broken, max_memory_reserved=broken))
+    first, second = _health(kraken_svc), _health(kraken_svc)
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["cuda"] is None
+    assert first.json()["status"] == "ok"
+
 # ── the import the unit can actually resolve ────────────────────────────────
 def test_no_engine_imports_through_an_engines_package():
     """The units start ``python -m uvicorn <engine>_svc.app:app`` from

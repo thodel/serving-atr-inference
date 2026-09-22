@@ -291,28 +291,48 @@ def _record_conf(rec) -> float | None:
     return (sum(c) / len(c)) if c else None
 
 
+#: One warning per distinct failure, not one per /health poll.
+_cuda_stats_failure: str | None = None
+
+
+def _cuda_memory() -> dict | None:
+    """The CUDA caching allocator's view of this process, in MiB (#158).
+
+    ``allocated_mib`` is what live tensors hold, ``reserved_mib`` what the
+    allocator keeps cached for reuse, ``max_reserved_mib`` the peak since start.
+    Allocated growing means a leak; reserved growing while allocated stays flat
+    means the cache — the question #158 has to answer before anything is done
+    about it. Read-only: nothing here calls ``empty_cache``.
+
+    ``None`` on CPU, and ``None`` rather than an exception when torch cannot
+    answer: /health must always answer, or the gateway reports a working kraken
+    as down (#149 is that bug for party).
+    """
+    global _cuda_stats_failure
+    try:
+        if not torch.cuda.is_available():
+            return None
+        mib = 1024 * 1024
+        return {
+            "allocated_mib": torch.cuda.memory_allocated(DEVICE) // mib,
+            "reserved_mib": torch.cuda.memory_reserved(DEVICE) // mib,
+            "max_reserved_mib": torch.cuda.max_memory_reserved(DEVICE) // mib,
+        }
+    except Exception as exc:  # noqa: BLE001 — a statistic never costs the health check
+        message = f"{type(exc).__name__}: {exc}"
+        if message != _cuda_stats_failure:
+            logger.warning("CUDA memory statistics unavailable: {}", message)
+            _cuda_stats_failure = message
+        return None
+
+
 @app.get("/health")
 async def health():
-    # Per the measure-first rule in serving#158: torch.cuda.memory_allocated()
-    # is what is actually in use; memory_reserved() is what the allocator has
-    # cached and will reuse.  Watching both over time tells us whether growth
-    # is a genuine leak (allocated grows) or just allocator accumulation
-    # (reserved grows, allocated is stable).  empty_cache() is not called
-    # automatically — this endpoint reads the raw values so a monitoring cron
-    # can sample them without side effects.
-    memory_stats: dict = {}
-    if torch.cuda.is_available():
-        memory_stats = {
-            "cuda_allocated_mib": torch.cuda.memory_allocated(DEVICE) // (1024 * 1024),
-            "cuda_reserved_mib": torch.cuda.memory_reserved(DEVICE) // (1024 * 1024),
-            "cuda_max_reserved_mib": torch.cuda.max_memory_reserved(DEVICE) // (1024 * 1024),
-        }
-
     return JSONResponse({
         "status": "ok", "device": DEVICE, "kraken": KRAKEN_VERSION,
         "resident_models": list(_resident),
         "model_cache_size": MODEL_CACHE_SIZE,
-        **memory_stats,
+        "cuda": _cuda_memory(),
     })
 
 
