@@ -62,10 +62,10 @@ def test_the_prompt_is_still_the_trained_one(spec):
     assert spec.prompt == "Transcribe the handwritten text in this image exactly as written."
 
 
-def test_the_qwen3vl_sibling_is_untouched():
-    """Only the model that was measured changed. qwen3vl-german-xix-v2 keeps the
-    page level it was registered with — its page readings have not been tested
-    on this corpus, so there is nothing to act on yet."""
+def test_the_qwen3vl_sibling_followed_once_it_was_measured():
+    """When this model moved, qwen3vl-german-xix-v2 kept `level: page` because its
+    page readings had not been measured. They were on 2026-09-22 (#165) — whole
+    pages 0.98 — and it moved too; see test_qwen3vl_xix_v2_serving_level.py."""
     reg = load_registry(REPO_ROOT / "config" / "models.yaml")
 
-    assert reg.get("qwen3vl-german-xix-v2").level == "page"
+    assert reg.get("qwen3vl-german-xix-v2").level == "line"

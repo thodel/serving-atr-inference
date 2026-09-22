@@ -93,13 +93,13 @@ looked exactly like the pixel-budget mismatch that #136 fixed, and applying the
 budget did not change them. Two plausible mechanisms, one symptom; what separated
 them was a benchmark, not an argument.
 
-**v2 is registered at `level: page`**, like v1 and for the same reasons (below).
-The honest consequence: 7.65 % is a *line-level* number, measured on line crops at
-262 144 pixels, and page-level serving asks this model for something its training
-never showed it at eight times that budget. Nothing here measures the page shape.
-Quote 7.65 % as the reason to expect good page readings, never as evidence of
-them — `level: line` is one word away if a comparison on the same pages says the
-page shape is worse.
+**v2 is served at `level: line` since 2026-09-22 (#165).** It was registered at
+`level: page` like v1 (#154), on the caveat that 7.65 % is a *line-level* number.
+The page shape was then measured on 15 validation pages of its own run: lines
+0.052, whole pages 0.98, each page one plausible line of 17–60 characters, often
+not on the page. So kraken segments and the model reads one line per call, at the
+262 144 pixels it trained at. The v1-era reasoning for `level: page` below is kept
+as the record of why it was tried.
 
 All of them are registered in `config/models.yaml` as `engine: vllm`,
 `level: page`. Two properties of that registration are load-bearing:
