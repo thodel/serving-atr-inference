@@ -112,31 +112,22 @@ models:
   # collapses on none of them: **CER 0.0765 on 2751 held-out lines**, no document
   # shared with training (Hodel & Schoch 2021, doi:10.5281/zenodo.4746342).
   #
-  # Served `level: page`, like the v1-era entries, and for the same reasons: one
-  # call per page instead of one per line, and no dependency on the kraken
-  # segmenter being right about this material. It is a deployment decision, not a
-  # property of the weights.
-  #
-  # What that decision costs is knowing the accuracy. 0.0765 is a LINE-level
-  # number, measured on line crops at 262144 pixels; page-level serving asks this
-  # model for something its training never showed it, at eight times the pixel
-  # budget, and nothing here measures that. Do not quote 0.0765 for page-level
-  # readings of a new corpus — it is the reason to expect them to be good, not
-  # evidence that they are. `level: line` is one word away if a comparison on the
-  # same pages says the page shape is worse.
-  #
-  # `max_pixels` is left at the default so page-level serving gets
-  # VLM_PIXEL_BUDGET["page"] (2048*32*32), not the 262144 it trained at: a whole
-  # page squeezed into one line's budget is unreadable, and the budget that suits
-  # the input is the one the page has to be legible at. That is a second
-  # unmeasured knob on top of the first — if the smoke run comes back short, this
-  # is the thing to raise.
+  # Served `level: line` since 2026-09-22 (#165): kraken segments, the model reads
+  # one line per call, and it performs as measured. It was registered
+  # `level: page` (#154) — one call per page — on the caveat that 0.0765 is a
+  # LINE-level number. The page shape was then measured with
+  # scripts/eval_granularity.py on 15 validation pages of its own run: lines 0.052,
+  # whole pages 0.98 with a length ratio of 0.02 — each page came back as one
+  # plausible German line of 17-60 characters, often not on the page ("Hochzeitlich
+  # in der Stadt"). A model trained on line crops learned to stop after one line;
+  # no pixel budget changes that. At `level: line` the default visual budget is
+  # the 262144 it trained at, so no `max_pixels` override is needed.
   - id: qwen3vl-german-xix-v2
     engine: vllm
     hf_repo: dh-unibe/qwen3vl-german-xix-v2
     base_model: Qwen/Qwen3-VL-4B-Instruct
     task: htr
-    level: page          # one call per page; its CER was measured per line
+    level: line          # it reads lines, not pages (#165)
     prompt: Transcribe the handwritten text in this image exactly as written.
     languages: [de]
     scripts: [Kurrent]

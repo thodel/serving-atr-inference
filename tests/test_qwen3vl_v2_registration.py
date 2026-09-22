@@ -6,12 +6,11 @@ benchmark it wrote little more than the first word on 507 of 2751 lines (18.4 %)
 CER 0.2551. v2 is the same four repositories after the fix, CER 0.0765 on the same
 lines, collapsing on none of them.
 
-It is served `level: page` — one call per page, no dependency on the kraken
-segmenter — which is a deployment decision and not a property of the weights.
-The honest consequence is that 0.0765 is a **line-level** number and nothing
-measures the page shape: it is the reason to expect good readings, not evidence
-of them. These tests pin the parts of the entry that a reading depends on, so
-that changing one is a deliberate act.
+It was first served `level: page` (#154) on the caveat that 0.0765 is a
+line-level number. Measured on 2026-09-22 it reads whole pages at CER 0.98, so it
+is served `level: line` since (#165, test_qwen3vl_xix_v2_serving_level.py). These
+tests pin the parts of the entry that a reading depends on, so that changing one
+is a deliberate act.
 """
 
 import pytest
@@ -40,10 +39,9 @@ def test_it_is_a_vllm_htr_model_on_its_own_base(spec):
     assert spec.base_model == "Qwen/Qwen3-VL-4B-Instruct"
 
 
-def test_it_is_served_whole_page(spec):
-    """One call per page, and no dependency on the segmenter — the same
-    deployment decision the v1-era entries make."""
-    assert spec.level == "page"
+def test_it_is_served_per_line(spec):
+    """Whole pages were tried (#154) and measured at CER 0.98 (#165)."""
+    assert spec.level == "line"
 
 
 def test_the_prompt_is_the_instruction_it_was_trained_with(spec):
@@ -51,21 +49,19 @@ def test_the_prompt_is_the_instruction_it_was_trained_with(spec):
     assert spec.prompt == TRAINED_PROMPT
 
 
-def test_the_page_budget_is_used_rather_than_the_training_one(spec):
-    """A whole page squeezed into one line's budget is unreadable, so page-level
-    serving takes the page budget — deliberately eight times what this model
-    trained at, and the first knob to turn if the readings come back short."""
+def test_each_line_gets_the_budget_it_trained_at(spec):
+    """Per line, the default budget is the training one — no override needed.
+    (The page budget, eight times larger, did not help: #165.)"""
     class _Settings:
         vllm_visual_budget = True
 
     assert spec.max_pixels is None
-    assert visual_budget(spec, _Settings()) == VLM_PIXEL_BUDGET["page"]
-    assert VLM_PIXEL_BUDGET["page"] == 8 * TRAINED_PIXELS
+    assert visual_budget(spec, _Settings()) == VLM_PIXEL_BUDGET["line"] == TRAINED_PIXELS
 
 
-def test_a_page_may_generate_a_pages_worth_of_tokens(spec):
-    """The failure this rules out returns 200 and stops mid-sentence: the old
-    flat 512 was ample for a line and cut a page in half."""
+def test_a_line_gets_the_line_token_ceiling(spec):
+    """Per line, the flat 512 applies; the page ceiling of 4096 was for the page
+    shape this model turned out not to read (#165)."""
     from atr_serving.pipeline import generation_budget
 
     class _Settings:
@@ -74,7 +70,7 @@ def test_a_page_may_generate_a_pages_worth_of_tokens(spec):
         vllm_max_model_len = 16384
         vllm_prompt_reserve_tokens = 2048
 
-    assert generation_budget(spec, _Settings()) == 4096
+    assert generation_budget(spec, _Settings()) == 512
 
 
 def test_it_shares_gpu_1_with_the_other_lazy_fine_tunes(spec):
@@ -91,13 +87,13 @@ def test_its_training_corpora_are_recorded(spec):
     assert any("kurrent-xix" in d for d in spec.training_datasets)
 
 
-def test_v1_is_kept_and_served_the_same_way(spec):
-    """v2 replaces v1 for new work; v1 stays registered so its readings remain
-    explicable. Same base, same prompt, same level — so a run over one corpus
-    compares the two corpora they were trained on and nothing else."""
+def test_v1_is_kept_unchanged(spec):
+    """v2 replaces v1 for new work; v1 stays registered, unchanged, so its
+    readings remain explicable. Same base and prompt; v1 keeps the page level its
+    existing readings were made at, and v2 no longer shares it (#165)."""
     reg = load_registry(REPO_ROOT / "config" / "models.yaml")
     v1 = reg.get("qwen3vl-german-xix-v1")
 
-    assert v1.level == spec.level == "page"
+    assert v1.level == "page" and spec.level == "line"
     assert v1.prompt == spec.prompt == TRAINED_PROMPT
     assert v1.base_model == spec.base_model
