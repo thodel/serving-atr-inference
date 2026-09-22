@@ -1,0 +1,59 @@
+# A branch pushed without a pull request gets a draft PR, so no work lies
+# unseen on a branch. Bots and sessions are told to open one themselves; this
+# catches the times they do not.
+#
+# It waits first: an agent that pushes and then opens its PR must win the race,
+# or its own `gh pr create` would fail on the PR this workflow just made.
+# A branch that already has a PR in any state — open, merged or closed — is left
+# alone, so a rejected PR is not reopened under a new number.
+name: draft PR for a branch without one
+
+on:
+  push:
+    branches: ["dh-bot/**", "claude/**", "fix/**", "feat/**", "docs/**"]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  # One pending check per branch: a later push replaces the waiting run.
+  group: draft-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  draft-pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Give the pusher time to open its own PR
+        run: sleep 180
+
+      - name: Open a draft PR unless the branch has one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/$REPO/branches/$BRANCH" --silent 2>/dev/null; then
+            echo "branch $BRANCH is gone"; exit 0
+          fi
+          existing=$(gh pr list -R "$REPO" --head "$BRANCH" --state all --json number --jq 'length')
+          if [ "$existing" != "0" ]; then
+            echo "$BRANCH already has a PR"; exit 0
+          fi
+          ahead=$(gh api "repos/$REPO/compare/$BASE...$BRANCH" --jq '.ahead_by')
+          if [ "$ahead" = "0" ]; then
+            echo "$BRANCH has nothing that $BASE lacks"; exit 0
+          fi
+          title=$(gh api "repos/$REPO/commits/$BRANCH" --jq '.commit.message | split("\n")[0]')
+          commits=$(gh api "repos/$REPO/compare/$BASE...$BRANCH" \
+            --jq '.commits[] | "- `\(.sha[0:8])` \(.commit.message | split("\n")[0])"')
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            "Opened automatically: \`$BRANCH\` was pushed without a pull request. Not reviewed yet; whoever pushed it should replace this text with what the change does and how it was verified." \
+            "**Commits ($ahead ahead of \`$BASE\`):**" \
+            "$commits")
+          gh pr create -R "$REPO" --head "$BRANCH" --base "$BASE" --draft \
+            --title "$title" --body "$body"
