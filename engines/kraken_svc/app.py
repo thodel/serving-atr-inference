@@ -293,10 +293,26 @@ def _record_conf(rec) -> float | None:
 
 @app.get("/health")
 async def health():
+    # Per the measure-first rule in serving#158: torch.cuda.memory_allocated()
+    # is what is actually in use; memory_reserved() is what the allocator has
+    # cached and will reuse.  Watching both over time tells us whether growth
+    # is a genuine leak (allocated grows) or just allocator accumulation
+    # (reserved grows, allocated is stable).  empty_cache() is not called
+    # automatically — this endpoint reads the raw values so a monitoring cron
+    # can sample them without side effects.
+    memory_stats: dict = {}
+    if torch.cuda.is_available():
+        memory_stats = {
+            "cuda_allocated_mib": torch.cuda.memory_allocated(DEVICE) // (1024 * 1024),
+            "cuda_reserved_mib": torch.cuda.memory_reserved(DEVICE) // (1024 * 1024),
+            "cuda_max_reserved_mib": torch.cuda.max_memory_reserved(DEVICE) // (1024 * 1024),
+        }
+
     return JSONResponse({
         "status": "ok", "device": DEVICE, "kraken": KRAKEN_VERSION,
         "resident_models": list(_resident),
         "model_cache_size": MODEL_CACHE_SIZE,
+        **memory_stats,
     })
 
 
