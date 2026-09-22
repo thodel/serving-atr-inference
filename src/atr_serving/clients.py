@@ -22,7 +22,17 @@ from atr_serving.api.schemas import Line, RecognitionResult, SegmentResponse
 
 
 class EngineError(Exception):
-    """Raised when an engine service is unreachable or returns an error."""
+    """Raised when an engine service is unreachable or returns an error.
+
+    Carries the HTTP status code of the engine response (if any) as
+    ``.status_code`` so callers can distinguish 4xx (bad request, fixable)
+    from 5xx (server error, retryable) and propagate the correct code to the
+    gateway caller (serving#164).
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class KrakenEngineClient:
@@ -58,7 +68,8 @@ class KrakenEngineClient:
             raise EngineError(f"kraken engine unreachable at {url}: {exc}") from exc
         if resp.status_code >= 400:
             raise EngineError(
-                f"kraken engine error {resp.status_code} at {url}: {resp.text}"
+                f"kraken engine error {resp.status_code} at {url}: {resp.text}",
+                status_code=resp.status_code,
             )
         return resp.json()
 
@@ -161,7 +172,7 @@ class EngineHTTPClient:
         except httpx.RequestError as exc:
             raise EngineError(f"{self.engine} engine unreachable at {url}: {exc}") from exc
         if resp.status_code >= 400:
-            raise EngineError(f"{self.engine} engine error {resp.status_code} at {url}: {resp.text}")
+            raise EngineError(f"{self.engine} engine error {resp.status_code} at {url}: {resp.text}", status_code=resp.status_code)
         return coerce_result(resp.json(), self.engine, model)
 
 
@@ -201,7 +212,7 @@ class VllmClient:
         except httpx.RequestError as exc:
             raise EngineError(f"vLLM unreachable at {url}: {exc}") from exc
         if resp.status_code >= 400:
-            raise EngineError(f"vLLM error {resp.status_code} at {url}: {resp.text}")
+            raise EngineError(f"vLLM error {resp.status_code} at {url}: {resp.text}", status_code=resp.status_code)
         return resp.json()
 
     async def transcribe_image_detail(

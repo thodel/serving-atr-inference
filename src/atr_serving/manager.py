@@ -16,9 +16,11 @@ Everything that touches the OS (process launch, health poll) is behind the
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import subprocess
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -387,6 +389,63 @@ class _PortPool:
         self._used.discard(port)
 
 
+
+class _LaunchLock:
+    """Per-model lock: one thread launches a given model at a time.
+
+    When the first thread for a model enters acquire(), it holds the lock and
+    is responsible for calling release() exactly once (on success OR failure).
+    Subsequent threads for the same model block in wait_result() until the
+    first thread releases, at which point they receive the port the first thread
+    produced.  This prevents four simultaneous cold-start attempts from all
+    seeing the same free memory and then OOMing the card (serving#164).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        # map model_id -> (port, launched_ok); port=-1 means failure
+        self._results: dict[str, tuple[int, bool]] = {}
+
+    def acquire(self, model_id: str) -> bool:
+        """Enter the launch critical section for model_id.
+
+        Returns True if this thread must launch; False if another thread is
+        already launching and this thread should wait for its result.
+        """
+        with self._cond:
+            if model_id not in self._results:
+                return True  # first thread: it launches
+            # Another thread is already launching — wait.
+            while model_id in self._results:
+                self._cond.wait()
+            return False
+
+    def release(self, model_id: str, port: int | None, launched_ok: bool) -> None:
+        """Signal the launch result and unblock all waiters."""
+        with self._cond:
+            self._results[model_id] = (port if launched_ok else -1, launched_ok)
+            self._cond.notify_all()
+
+    def wait_result(self, model_id: str) -> int:
+        """Block until the launching thread has set a result; return the port.
+
+        Raises ManagerError if the launch failed.
+        """
+        with self._cond:
+            while model_id not in self._results:
+                self._cond.wait()
+            port, ok = self._results.pop(model_id)
+            self._cond.notify_all()
+        if not ok:
+            raise ManagerError(
+                f"vLLM {model_id!r} could not be launched in this round; "
+                "the card ran out of memory or the process exited during startup. "
+                "Check the gateway journal."
+            )
+        return port
+
+
 class ModelManager:
     """Resident-set manager for vLLM models. LRU within a VRAM budget."""
 
@@ -404,6 +463,7 @@ class ModelManager:
         # insertion/use order == LRU order (front = least recently used)
         self._resident: "OrderedDict[str, _Resident]" = OrderedDict()
         self._ports = _PortPool(settings.vllm_port_base)
+        self._launch_lock = _LaunchLock()
 
     # ── introspection ────────────────────────────────────────────────────────
     def resident_model_ids(self) -> list[str]:
@@ -416,7 +476,15 @@ class ModelManager:
     # ── core ─────────────────────────────────────────────────────────────────
     def ensure_resident(self, model_id: str) -> int:
         """Return the port of a healthy vLLM instance for ``model_id``, starting
-        (and evicting LRU lazy models) as needed."""
+        (and evicting LRU lazy models) as needed.
+
+        Cold-start race prevention (serving#164): when multiple requests for the
+        same not-yet-resident model arrive simultaneously, the first request
+        enters _LaunchLock.acquire() (returns True) and performs the launch;
+        subsequent requests receive False and wait in _LaunchLock.wait_result()
+        for the first thread's port.  If the launch fails, all waiters raise
+        ManagerError — no port is left half-allocated and no second launch runs.
+        """
         spec = self.registry.get(model_id)
         if spec is None or spec.engine != "vllm":
             raise ManagerError(f"{model_id!r} is not a vLLM model")
@@ -429,16 +497,34 @@ class ModelManager:
             logger.warning("vLLM {} unhealthy; relaunching", model_id)
             self._drop(model_id)
 
-        evicted = self._make_room_for(spec)
-        if evicted:
-            self._await_room(spec, evicted)
-        port = self._ports.acquire()
+        if not self._launch_lock.acquire(model_id):
+            # Another thread is already launching — wait for its result.
+            port = self._launch_lock.wait_result(model_id)
+            if port < 0:
+                raise ManagerError(
+                    f"vLLM {model_id!r} launch returned an invalid port"
+                )
+            return port
+
+        # This thread is responsible for launching.
+        launched_ok = False
+        port = -1
         try:
+            evicted = self._make_room_for(spec)
+            if evicted:
+                self._await_room(spec, evicted)
+            port = self._ports.acquire()
             handle = self.launcher.start(spec, port, self.settings.vllm_gpu, self.settings)
             self._wait_healthy(handle)
+            launched_ok = True
         except Exception:
             self._ports.release(port)
             raise
+        finally:
+            self._launch_lock.release(
+                model_id, port if launched_ok else None, launched_ok
+            )
+
         self._resident[model_id] = _Resident(spec, handle, port)
         logger.info("vLLM resident: {} on :{} (gpu {})", model_id, port, self.settings.vllm_gpu)
         return port

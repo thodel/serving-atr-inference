@@ -35,6 +35,7 @@ from atr_serving.api.schemas import (
 )
 from atr_serving.clients import EngineError, get_engine_client, get_kraken_client, get_vllm_client
 from atr_serving.config import Settings
+from atr_serving.image_io import validate_format, ValueError as ImageValueError
 from atr_serving.manager import GpuBusyError, ManagerError, vllm_pids, vram_budget
 from atr_serving.pipeline import (
     generation_budget, recognize_lines, recognize_page_vllm, visual_budget,
@@ -341,7 +342,11 @@ async def segment(
             mode=seg_mode or mode,
         )
     except EngineError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Propagate the engine's own status code (serving#164): a 4xx means the
+        # engine correctly rejected a bad request (415 for non-image, 400 for
+        # a malformed request); a 5xx becomes a 502 as before.
+        status = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 async def _party_second_opinion(request: Request, engine: str, raw: bytes,
@@ -387,6 +392,18 @@ async def recognize(
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
+
+    # Reject non-image uploads with 415 before they reach any engine (serving#164).
+    # PDFs and other unsupported types reach kraken as 400 then become a 502 from
+    # the gateway; catching them here gives the batch a 415 it can identify as a
+    # source problem, not an engine problem.
+    try:
+        validate_format(raw)
+    except (ValueError, ImageValueError) as exc:
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported image format: {exc}",
+        ) from exc
 
     # Each engine wants a different model reference: kraken/party download by
     # Zenodo DOI, trocr loads by HF repo, vllm uses the registry id (= its
@@ -505,6 +522,17 @@ async def ocr(
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
+
+    # Magic-byte check: PDFs and other non-image uploads get 415 immediately
+    # rather than becoming a 502 from the engine (serving#164).
+    try:
+        validate_format(raw)
+    except (ValueError, ImageValueError) as exc:
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported image format: {exc}",
+        ) from exc
+
     # Concurrent with the engine below — see /recognize for why it is a task.
     party_task = asyncio.ensure_future(
         _party_second_opinion(request, engine, raw, filename, ctype)
