@@ -97,8 +97,11 @@ def trained_dir(root: Path, metadata: dict, weights: str = "model.mlmodel") -> P
 
 
 # ── discovery ────────────────────────────────────────────────────────────────
-def test_an_absent_trained_root_is_not_an_error(tmp_path: Path):
-    assert scan_trained(tmp_path / "never-trained").models == []
+def test_a_missing_trained_root_raises_PublishError(tmp_path: Path):
+    """A missing trained_root directory is an error — not a silent empty scan."""
+    from atr_serving.training.publish import PublishError
+    with pytest.raises(PublishError, match="does not exist"):
+        scan_trained(tmp_path / "never-trained")
 
 
 def test_scan_finds_every_registered_model(tmp_path: Path):
