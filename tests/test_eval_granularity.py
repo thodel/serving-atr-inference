@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from scripts.eval_granularity import by_line_count, flat, region_boxes, spread_pages, summarise
+from scripts.eval_granularity import (
+    block_boxes,
+    by_line_count,
+    flat,
+    line_region_ids,
+    region_boxes,
+    spread_pages,
+    summarise,
+)
 
 NS = "http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15"
 
@@ -67,3 +75,37 @@ def test_spread_pages_takes_every_source_before_repeating_one():
     got = spread_pages(pages, 4)
     assert len(got) == 4 and {p.split("/")[-1].split("_")[0] for p in got} == {"aaa", "bbb", "ccc"}
     assert spread_pages(pages, None) == pages
+
+
+# ── block level (training-atr-models#57) ────────────────────────────────────
+def _block_page(*regions: str) -> str:
+    return _page(*regions)
+
+
+def test_line_region_ids_cover_every_textline_transcribed_or_not():
+    xml = _page(_region("r1", _line("l1", 0, 0, 100, 20, "eins"), _line("l2", 0, 30, 100, 50, "")),
+                _region("r2", _line("l3", 0, 60, 100, 80, "drei")))
+    assert line_region_ids(xml) == ["r1", "r1", "r2"]
+
+
+def test_blocks_are_runs_of_consecutive_lines_within_one_region():
+    lines = [_line(f"l{i}", 0, i * 30, 100, i * 30 + 20, f"z{i}") for i in range(5)]
+    xml = _page(_region("r1", *lines[:4]), _region("r2", lines[4]))
+    got = list(block_boxes(xml, (1000, 800), block_lines=3, pad=0))
+    assert [(n, text) for _, n, _, text in got] == [
+        (3, "z0\nz1\nz2"), (1, "z3"), (1, "z4")]
+    assert got[0][2] == (0, 0, 100, 80)                  # union of the first three
+
+
+def test_a_line_without_transcription_breaks_the_run():
+    """It is on the image; a target without it would teach the model to skip text."""
+    xml = _page(_region("r1",
+                        _line("l1", 0, 0, 100, 20, "eins"),
+                        _line("l2", 0, 30, 100, 50, ""),
+                        _line("l3", 0, 60, 100, 80, "drei")))
+    assert [t for _, _, _, t in block_boxes(xml, (1000, 800), block_lines=6)] == ["eins", "drei"]
+
+
+def test_one_line_blocks_are_the_lines():
+    xml = _page(_region("r1", _line("l1", 0, 0, 100, 20, "eins"), _line("l2", 0, 30, 100, 50, "zwei")))
+    assert [t for _, _, _, t in block_boxes(xml, (1000, 800), block_lines=1)] == ["eins", "zwei"]
