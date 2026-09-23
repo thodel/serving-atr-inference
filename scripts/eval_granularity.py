@@ -10,6 +10,9 @@ one of 14 whole pages as the two characters "de" (#159, docs/VLM_TRAINING.md).
 This script asks the model four ways over the same PageXML pages:
 
     line                  every transcribed line crop, at the line pixel budget
+    block@block_budget    runs of --block-lines consecutive lines, cropped as one
+                          image, the unit `granularity: block` trains on
+                          (training-atr-models#57)
     region@page_budget    every TextRegion (paragraph), cropped from the page,
                           at the page budget (never upscaled)
     region@line_budget    the same crops squeezed into the line budget
@@ -68,7 +71,10 @@ from atr_serving.training.vlm_dataset import page_sample  # noqa: E402
 PROMPT = "Transcribe the handwritten text in this image exactly as written."
 LINE_PX, PAGE_PX = VLM_PIXEL_BUDGET["line"], VLM_PIXEL_BUDGET["page"]
 REGION_PAD = 12
-LEVELS = ("line", "region@page_budget", "region@line_budget", "page@page_budget")
+BLOCK_PX = 1024 * 32 * 32          # VLM_PIXEL_BUDGET["block"] in training-atr-models
+DEFAULT_BLOCK_LINES = 6
+LEVELS = ("line", "block@block_budget", "region@page_budget", "region@line_budget",
+          "page@page_budget")
 
 
 def flat(text: str) -> str:
@@ -110,6 +116,68 @@ def region_boxes(xml_text: str, page_size: tuple[int, int], pad: int = REGION_PA
             min(max(b.bottom for b in boxes) + pad, height),
         )
         yield region.get("id"), len(boxes), box, "\n".join(b.text for b in boxes)
+
+
+def line_region_ids(xml_text: str) -> list[str | None]:
+    """The innermost TextRegion id per TextLine, in the order `line_boxes` counts.
+
+    A copy of `atr_training.pagexml.line_regions`, which lives in the training
+    repo: this script has to build exactly the blocks that
+    `granularity: block` trains on, or the number it reports is about a
+    different crop than the model saw.
+    """
+    root = ET.fromstring(xml_text)
+    out: list[str | None] = []
+    anonymous = 0
+
+    def walk(el, region):
+        nonlocal anonymous
+        name = _localname(el.tag)
+        if name == "TextRegion":
+            if el.get("id"):
+                region = el.get("id")
+            else:
+                anonymous += 1
+                region = f"#region{anonymous}"
+        elif name == "TextLine":
+            out.append(region)
+        for child in el:
+            walk(child, region)
+
+    walk(root, None)
+    return out
+
+
+def block_boxes(xml_text: str, page_size: tuple[int, int], block_lines: int = DEFAULT_BLOCK_LINES,
+                pad: int = REGION_PAD):
+    """``(index, n_lines, (l, t, r, b), text)`` per block of consecutive lines.
+
+    Same rule as training: a run never crosses a region boundary, and never a
+    line that is on the image without a usable transcription — that line would be
+    visible in the crop and missing from the target.
+    """
+    regions = line_region_ids(xml_text)
+    width, height = page_size
+    runs: list[list] = []
+    previous = None
+    for box in line_boxes(xml_text):
+        region = regions[box.index] if box.index < len(regions) else None
+        joins = previous is not None and box.index == previous[0] + 1 and region == previous[1]
+        if not joins:
+            runs.append([])
+        runs[-1].append(box)
+        previous = (box.index, region)
+
+    n = 0
+    for run in runs:
+        for start in range(0, len(run), block_lines):
+            block = run[start:start + block_lines]
+            box = (max(min(b.left for b in block) - pad, 0),
+                   max(min(b.top for b in block) - pad, 0),
+                   min(max(b.right for b in block) + pad, width),
+                   min(max(b.bottom for b in block) + pad, height))
+            yield n, len(block), box, "\n".join(b.text for b in block)
+            n += 1
 
 
 def summarise(level: str, items: list[dict]) -> dict:
@@ -202,6 +270,8 @@ def main() -> int:
                     help="a vLLM of your own (normal), or the gateway only when it is idle")
     ap.add_argument("--no-auth", action="store_true", help="no X-API-Key (a bare vLLM)")
     ap.add_argument("--max-pages", type=int, default=None)
+    ap.add_argument("--block-lines", type=int, default=DEFAULT_BLOCK_LINES,
+                    help="lines per block; must match the model's block_lines")
     ap.add_argument("--recognize", action="store_true",
                     help="also send each page through the gateway's /recognize")
     args = ap.parse_args()
@@ -226,7 +296,13 @@ def main() -> int:
         xml = args.root / p
         img = Image.open(xml.with_suffix(".jpg"))
         img.load()
-        for rid, nlines, box, ref in region_boxes(xml.read_text(encoding="utf-8"), img.size):
+        xml_text = xml.read_text(encoding="utf-8")
+        for bid, nlines, box, ref in block_boxes(xml_text, img.size, args.block_lines):
+            hyp, fin, sec = client.chat(fit(img.crop(box), BLOCK_PX), 1024)
+            results["block@block_budget"].append({"page": p, "block": bid, "lines": nlines,
+                                                  "size": (box[2] - box[0], box[3] - box[1]),
+                                                  "ref": ref, "hyp": hyp, "finish": fin, "sec": sec})
+        for rid, nlines, box, ref in region_boxes(xml_text, img.size):
             crop = img.crop(box)
             for level, budget in (("region@page_budget", PAGE_PX), ("region@line_budget", LINE_PX)):
                 hyp, fin, sec = client.chat(fit(crop, budget), 4096)
@@ -243,8 +319,10 @@ def main() -> int:
 
     summary = [summarise(k, v) for k, v in results.items()]
     report = {"model": args.model, "jsonl": args.jsonl, "pages": pages, "summary": summary,
+              "block_lines": args.block_lines,
               "regions_by_line_count": {k: by_line_count(results[k])
-                                        for k in ("region@page_budget", "region@line_budget")},
+                                        for k in ("block@block_budget", "region@page_budget",
+                                                  "region@line_budget")},
               "items": results}
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     for s in summary:
