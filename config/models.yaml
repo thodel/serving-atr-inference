@@ -63,12 +63,16 @@ models:
   # them with different wording is a silent distribution shift, and their own model
   # cards say so.
   #
-  # `level: page` is a deployment decision, not a property of the weights: they
-  # were trained on line crops (`granularity: line`), and page-level serving asks
-  # them to read a whole page in one call. It is the cheaper and simpler shape —
-  # one request per page instead of one per line, and no dependency on the kraken
-  # segmenter being right about this material — and it is a distribution shift the
-  # readings have to be judged on. Switching back is one word per entry.
+  # `level: page` was taken for a deployment decision here: they were trained on
+  # line crops (`granularity: line`), and page-level serving asks them to read a
+  # whole page in one call — the cheaper shape, one request per page, and no
+  # dependency on the kraken segmenter. **Measurement has since settled it the
+  # other way** (#165, docs/VLM_TRAINING.md): a line-trained model returns a
+  # fragment for a page, silently. qwen3vl-german-xix-v2 reads 15 of its own
+  # validation pages at CER 0.98 with a length ratio of 0.02; medieval-german-v3
+  # answered every one of 14 pages with "de". Both are served `level: line` now.
+  # v1 below is the one entry of this family still on `level: page`, and it has
+  # not been measured — see its own comment.
   #
   # It has one sharp edge: a page is many times more output than a line, and vLLM
   # stops at `ATR_VLLM_MAX_NEW_TOKENS` (512) without saying so. Raise it well above
@@ -88,7 +92,14 @@ models:
     hf_repo: dh-unibe/qwen3vl-german-xix-v1
     base_model: Qwen/Qwen3-VL-4B-Instruct
     task: htr
-    level: page          # trained on line crops; served whole-page on purpose
+    # NOT MEASURED at page level, and the only enabled entry of this family still
+    # asking for a page. Its v2 — same corpus, same base — reads lines only
+    # (#165). v1 carries the truncated corpus of #125 as well (line CER 0.2551
+    # against v2's 0.0765), so a bad page number would mix the two causes; that
+    # is why it is flagged rather than switched. Measure with
+    # scripts/eval_granularity.py on the validation pages of UBELIX job
+    # 20260911T114344Z-qwen3vl-german-xix-v1 before quoting any page reading.
+    level: page          # unverified: trained on line crops, never measured on pages
     prompt: Transcribe the handwritten text in this image exactly as written.
     languages: [de]
     scripts: [Kurrent]
@@ -204,7 +215,7 @@ models:
     hf_repo: dh-unibe/qwen3.5-4b-german-xix-v1
     base_model: Qwen/Qwen3.5-4B
     task: htr
-    level: page          # trained on line crops; served whole-page on purpose
+    level: page          # not measured on pages; disabled, and its v2 reads lines (#165)
     prompt: Transcribe the handwritten text in this image exactly as written.
     languages: [de]
     scripts: [Kurrent]
@@ -232,7 +243,7 @@ models:
     hf_repo: dh-unibe/qwen3.5-2b-german-xix-v1
     base_model: Qwen/Qwen3.5-2B
     task: htr
-    level: page          # trained on line crops; served whole-page on purpose
+    level: page          # not measured on pages; disabled, and its v2 reads lines (#165)
     prompt: Transcribe the handwritten text in this image exactly as written.
     languages: [de]
     scripts: [Kurrent]

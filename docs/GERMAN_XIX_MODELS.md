@@ -78,9 +78,21 @@ Correct German, one line of a full page — the way `qwen3vl-german-xix-v1` fail
 here too. The digit loop is what a model outside its distribution looks like, and
 no `max_pixels` fixes that.
 
-`qwen3vl-german-xix-v2` keeps `level: page`: its page readings have not been
-tested on this corpus, so there is nothing to act on yet. Both caveats stand —
-**a page-level number for either model does not exist until someone measures it.**
+`qwen3vl-german-xix-v2` was measured on 2026-09-22 and is served `level: line`
+since (#165): on 15 validation pages of its own run it reads lines at CER 0.052
+and whole pages at 0.98, returning 17-60 characters for pages that hold 376-5674.
+What comes back is a fluent German line that is often not on the page at all
+("Hochzeitlich in der Stadt" for a page beginning "s¬ Wyß, als dem Herrn Bezirks¬
+statthalter Steiner"), which is harder to notice than the medieval model's "de".
+
+`qwen3vl-german-xix-v1` is **still registered `level: page` and still enabled**,
+and it has not been measured that way. Its v2 sibling, same corpus and same base,
+reads lines only; v1 was additionally trained on the truncated corpus (#125),
+which is why its line CER is 0.2551 against v2's 0.0765. Treat its page readings
+as unverified until `scripts/eval_granularity.py` has run on its own validation
+pages (UBELIX job `20260911T114344Z-qwen3vl-german-xix-v1`).
+
+The per-model table is in [`VLM_TRAINING.md`](VLM_TRAINING.md#what-each-model-reads-per-model).
 
 ## v1 → v2, and what it settles
 
