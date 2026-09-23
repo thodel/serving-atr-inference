@@ -510,7 +510,7 @@ reference). A row without numbers has not been measured, and says why.
 | `qwen3vl-german-xix-v2` | line | **0.052** | 0.95 | **0.98** (LR 0.02) | line | 15 validation pages of its own run, 2026-09-22 (#165) |
 | `qwen3.5-4b-german-xix-v2` | line | 0.0680 (federal benchmark) | — | fragments, no ground truth | line | 27 Lassberg pages, 2026-09-21 (#159) |
 | `qwen3vl-german-pages-v5-asteraix` | **page** | 1.32 (LR 2.01) | **0.288** (LR 1.12) | 0.98, 0.444 over the 12 without a repetition loop | registered, disabled | 14 medieval held-out pages, 2026-09-22 (training-atr-models#56) |
-| `qwen3vl-german-xix-v1` | line | 0.2551 (federal benchmark) | — | not measured | **page** | its v2 sibling reads lines only; v1 also carries the truncated corpus (#125), so a page number would mix two causes |
+| `qwen3vl-german-xix-v1` | line | **0.0475** on its own split, 0.2551 on the federal benchmark | 0.976 | **1.24** (LR 0.37, 14 of 15 collapsed) | line | 15 validation pages of its own run, 2026-09-23 (#165) |
 | `qwen3.5-4b-german-xix-v1`, `qwen3.5-2b-german-xix-v1` | line | 0.36 / 0.29 (federal benchmark) | — | not measured | page, disabled | superseded by their v2; same two causes |
 | `qwen3vl-german-medieval-v1`, `qwen3vl-medieval-german-v1`, `qwen3vl-sg-missiven-v1`, `qwen3vl-german-pages-v3` | line / page | — | — | not measured on purpose | disabled | trained before the PageXML fix (#125): the number would mostly measure the truncated ground truth |
 | `lightonocr-catmus-caroline`, `qwen3vl-8b-old-church-slavonic`, `qwen3vl-8b-hebrew` | as published | — | — | — | line / line / page | third-party weights; the level follows what the publisher states, not our measurement |

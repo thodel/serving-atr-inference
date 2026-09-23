@@ -87,13 +87,14 @@ def test_its_training_corpora_are_recorded(spec):
     assert any("kurrent-xix" in d for d in spec.training_datasets)
 
 
-def test_v1_is_kept_unchanged(spec):
-    """v2 replaces v1 for new work; v1 stays registered, unchanged, so its
-    readings remain explicable. Same base and prompt; v1 keeps the page level its
-    existing readings were made at, and v2 no longer shares it (#165)."""
+def test_v1_stays_registered_and_reads_lines_too(spec):
+    """v2 replaces v1 for new work; v1 stays registered so its readings remain
+    explicable. Same base and prompt. Both are served `level: line`: v1 was
+    measured on 2026-09-23 like v2 before it, and reads pages at CER 1.24 with 14
+    of 15 collapsing to 1-20 characters (#165)."""
     reg = load_registry(REPO_ROOT / "config" / "models.yaml")
     v1 = reg.get("qwen3vl-german-xix-v1")
 
-    assert v1.level == "page" and spec.level == "line"
+    assert v1.level == spec.level == "line"
     assert v1.prompt == spec.prompt == TRAINED_PROMPT
     assert v1.base_model == spec.base_model
