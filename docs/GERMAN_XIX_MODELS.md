@@ -85,12 +85,17 @@ What comes back is a fluent German line that is often not on the page at all
 ("Hochzeitlich in der Stadt" for a page beginning "s¬ Wyß, als dem Herrn Bezirks¬
 statthalter Steiner"), which is harder to notice than the medieval model's "de".
 
-`qwen3vl-german-xix-v1` is **still registered `level: page` and still enabled**,
-and it has not been measured that way. Its v2 sibling, same corpus and same base,
-reads lines only; v1 was additionally trained on the truncated corpus (#125),
-which is why its line CER is 0.2551 against v2's 0.0765. Treat its page readings
-as unverified until `scripts/eval_granularity.py` has run on its own validation
-pages (UBELIX job `20260911T114344Z-qwen3vl-german-xix-v1`).
+`qwen3vl-german-xix-v1` was measured the same way on 2026-09-23, on 15
+validation pages of its own UBELIX run, and it is served `level: line` since:
+lines 0.0475, paragraphs 0.976, whole pages **1.24** with a length ratio of 0.37
+and 14 of 15 collapsed. A page holding 900-1500 characters comes back as one to
+twenty: "die", "dießmal die", "Zuschrift des", once a single quotation mark.
+
+Its line figure needs a caveat the page figure does not: 0.0475 is measured
+against its own validation split, which carries the truncated ground truth of
+\#125 — the same corpus bug that gives it 0.2551 on the federal benchmark, whose
+text is correct, against 0.0765 for v2. One to twenty characters for a page is
+not something a corpus bug produces.
 
 The per-model table is in [`VLM_TRAINING.md`](VLM_TRAINING.md#what-each-model-reads-per-model).
 

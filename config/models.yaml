@@ -92,14 +92,20 @@ models:
     hf_repo: dh-unibe/qwen3vl-german-xix-v1
     base_model: Qwen/Qwen3-VL-4B-Instruct
     task: htr
-    # NOT MEASURED at page level, and the only enabled entry of this family still
-    # asking for a page. Its v2 — same corpus, same base — reads lines only
-    # (#165). v1 carries the truncated corpus of #125 as well (line CER 0.2551
-    # against v2's 0.0765), so a bad page number would mix the two causes; that
-    # is why it is flagged rather than switched. Measure with
-    # scripts/eval_granularity.py on the validation pages of UBELIX job
-    # 20260911T114344Z-qwen3vl-german-xix-v1 before quoting any page reading.
-    level: page          # unverified: trained on line crops, never measured on pages
+    # Measured 2026-09-23 with scripts/eval_granularity.py on 15 validation pages
+    # of its own UBELIX run (20260911T114344Z, 542 lines; the same five-per-source
+    # selection used for v2, so the two are comparable): lines 0.0475 at length
+    # ratio 1.00, paragraphs 0.976, whole pages 1.24 at length ratio 0.37 with 14
+    # of 15 collapsed. A page of 900-1500 characters comes back as 1-20: "die",
+    # "dießmal die", once a single quotation mark. Same as its v2 and as
+    # medieval-german-v3 — a line-trained model stops after one line.
+    #
+    # Its 0.0475 on lines is NOT comparable to v2's 0.052: v1's own validation
+    # split carries the truncated ground truth of #125, which is also why the
+    # federal benchmark, whose text is correct, gives it 0.2551 against v2's
+    # 0.0765. The page result needs no such caveat: 1-20 characters for a page is
+    # not something a corpus bug produces.
+    level: line          # measured: it reads lines, not pages (#165)
     prompt: Transcribe the handwritten text in this image exactly as written.
     languages: [de]
     scripts: [Kurrent]
