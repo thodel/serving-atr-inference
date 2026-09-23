@@ -83,28 +83,33 @@ def test_fondue_records_the_corpora_it_was_trained_on():
 GERMAN_XIX_PROMPT = "Transcribe the handwritten text in this image exactly as written."
 
 GERMAN_XIX_MODELS = (
-    ("qwen3vl-german-xix-v1", "Qwen/Qwen3-VL-4B-Instruct"),
-    ("qwen3.5-4b-german-xix-v1", "Qwen/Qwen3.5-4B"),
-    ("qwen3.5-2b-german-xix-v1", "Qwen/Qwen3.5-2B"),
+    # (id, base, level) — the level is a measurement now, not a preference:
+    # qwen3vl-german-xix-v1 was measured on 2026-09-23 and reads lines (#165,
+    # whole pages CER 1.24, 14 of 15 pages collapsed to 1-20 characters). The two
+    # disabled Qwen3.5 v1s keep `page` because nobody has measured them and they
+    # are superseded; if one is ever enabled, it is measured first.
+    ("qwen3vl-german-xix-v1", "Qwen/Qwen3-VL-4B-Instruct", "line"),
+    ("qwen3.5-4b-german-xix-v1", "Qwen/Qwen3.5-4B", "page"),
+    ("qwen3.5-2b-german-xix-v1", "Qwen/Qwen3.5-2B", "page"),
 )
 
 
-@pytest.mark.parametrize("model_id,base", GERMAN_XIX_MODELS)
-def test_german_xix_models_are_registered_as_page_level_vllm(model_id: str, base: str):
-    """Registered, page-level, and pointing at the base each adapter needs.
+@pytest.mark.parametrize("model_id,base,level", GERMAN_XIX_MODELS)
+def test_german_xix_models_are_registered_with_the_level_they_were_measured_at(
+        model_id: str, base: str, level: str):
+    """Registered, at the measured level, pointing at the base each adapter needs.
 
     ``level`` decides the whole shape of a request: ``page`` sends the image in
     one call, ``line`` makes the gateway segment first and send one crop per line.
-    These were trained on line crops and are served whole-page deliberately — one
-    request per page instead of forty, and no dependence on the segmenter — so the
-    value is a decision somebody made, and a silent flip to ``line`` would change
-    what every reading is without changing anything visible.
+    A silent flip changes what every reading is without changing anything
+    visible, which is why the value is pinned here — and why it may only move
+    when a measurement moves it (docs/VLM_TRAINING.md).
     """
     reg = load_registry(REPO_ROOT / "config" / "models.yaml")
     spec = reg.get(model_id)
     assert spec is not None, f"{model_id} missing from config/models.yaml"
     assert spec.engine == "vllm"
-    assert spec.level == "page"
+    assert spec.level == level
     assert spec.base_model == base
     assert spec.hf_repo == f"dh-unibe/{model_id}"
     # lazy + GPU 1: GPU 0 is shared with the RAG service (docs/idhefix-environment.md)
@@ -112,15 +117,15 @@ def test_german_xix_models_are_registered_as_page_level_vllm(model_id: str, base
     assert spec.gpu_affinity == 1
 
 
-@pytest.mark.parametrize("model_id,_base", GERMAN_XIX_MODELS)
-def test_german_xix_models_carry_their_training_prompt(model_id: str, _base: str):
+@pytest.mark.parametrize("model_id,_base,_level", GERMAN_XIX_MODELS)
+def test_german_xix_models_carry_their_training_prompt(model_id: str, _base: str, _level: str):
     """See GERMAN_XIX_PROMPT — a reworded instruction is a silent regression."""
     reg = load_registry(REPO_ROOT / "config" / "models.yaml")
     assert reg.get(model_id).prompt == GERMAN_XIX_PROMPT
 
 
-@pytest.mark.parametrize("model_id,_base", GERMAN_XIX_MODELS)
-def test_german_xix_models_record_their_training_corpora(model_id: str, _base: str):
+@pytest.mark.parametrize("model_id,_base,_level", GERMAN_XIX_MODELS)
+def test_german_xix_models_record_their_training_corpora(model_id: str, _base: str, _level: str):
     """All three saw the same four corpora; an evaluation set drawn from any of
     them is contaminated, and only this list makes that checkable."""
     reg = load_registry(REPO_ROOT / "config" / "models.yaml")
