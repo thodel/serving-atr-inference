@@ -121,9 +121,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_only:
         return _list(scan, args.org, args.prefix)
     if not scan.models:
+        # An upload that uploads nothing and exits 0 is the hardest failure of
+        # this script to notice (#155): on 20.09. a missing bind mount made
+        # `/scratch/.../trained` resolve to an empty scan, and only a later
+        # IndexError revealed it. `--list` is the mode where "nothing here" is
+        # an answer; publishing is not.
         _report_skips(scan)
-        print("nothing to publish")
-        return 0
+        print(f"error: nothing to publish: no trained model under {trained_root}",
+              file=sys.stderr)
+        return 2
 
     publications = plan(scan.models, org=args.org, private=not args.public,
                         force=args.force, prefix=args.prefix)

@@ -233,18 +233,20 @@ def scan_trained(
 ) -> Scan:
     """Read every registered model directory under ``trained_root``.
 
-    A directory whose ``metadata.json`` is unreadable *is* an error for that
-    directory: absence means "never registered", corruption means something went
-    wrong that a silent skip would hide.
-
-    Raises ``PublishError`` if the root directory does not exist.
+    A missing root is not an error — it is the normal state of a box that has
+    never finished a training run. A directory whose ``metadata.json`` is
+    unreadable *is* an error for that directory: absence means "never
+    registered", corruption means something went wrong that a silent skip would
+    hide.
     """
     root = Path(trained_root)
     wanted = set(only) if only is not None else None
     engine_filter = set(engines) if engines is not None else None
     scan = Scan()
     if not root.is_dir():
-        raise PublishError(f"no trained models: {root} does not exist")
+        if wanted:
+            raise PublishError(f"no trained models: {root} does not exist")
+        return scan
 
     present: set[str] = set()
     for directory in sorted(p for p in root.iterdir() if p.is_dir()):
