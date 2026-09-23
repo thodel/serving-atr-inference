@@ -498,6 +498,32 @@ since. So:
 - **Before registering any VLM `level: page`, run `scripts/eval_granularity.py`**
   on held-out PageXML pages. A line CER says nothing about a page.
 
+### What each model reads, per model
+
+Measured with `scripts/eval_granularity.py` against ground truth unless the row
+says otherwise. CER; "LR" is the length ratio (returned characters over
+reference). A row without numbers has not been measured, and says why.
+
+| model | trained at | lines | paragraphs | whole pages | served | evidence |
+|---|---|---:|---:|---:|---|---|
+| `qwen3vl-medieval-german-v3` | line | **0.111** | 1.96 / 0.94 | **1.00** (LR 0.001) | line | 14 held-out pages, 2026-09-22 (#165) |
+| `qwen3vl-german-xix-v2` | line | **0.052** | 0.95 | **0.98** (LR 0.02) | line | 15 validation pages of its own run, 2026-09-22 (#165) |
+| `qwen3.5-4b-german-xix-v2` | line | 0.0680 (federal benchmark) | — | fragments, no ground truth | line | 27 Lassberg pages, 2026-09-21 (#159) |
+| `qwen3vl-german-pages-v5-asteraix` | **page** | 1.32 (LR 2.01) | **0.288** (LR 1.12) | 0.98, 0.444 over the 12 without a repetition loop | registered, disabled | 14 medieval held-out pages, 2026-09-22 (training-atr-models#56) |
+| `qwen3vl-german-xix-v1` | line | 0.2551 (federal benchmark) | — | not measured | **page** | its v2 sibling reads lines only; v1 also carries the truncated corpus (#125), so a page number would mix two causes |
+| `qwen3.5-4b-german-xix-v1`, `qwen3.5-2b-german-xix-v1` | line | 0.36 / 0.29 (federal benchmark) | — | not measured | page, disabled | superseded by their v2; same two causes |
+| `qwen3vl-german-medieval-v1`, `qwen3vl-medieval-german-v1`, `qwen3vl-sg-missiven-v1`, `qwen3vl-german-pages-v3` | line / page | — | — | not measured on purpose | disabled | trained before the PageXML fix (#125): the number would mostly measure the truncated ground truth |
+| `lightonocr-catmus-caroline`, `qwen3vl-8b-old-church-slavonic`, `qwen3vl-8b-hebrew` | as published | — | — | — | line / line / page | third-party weights; the level follows what the publisher states, not our measurement |
+| `trocr-*` | line, by architecture | — | — | not applicable | line | a `VisionEncoderDecoderModel` takes one line crop; a page is not an input it has |
+| `kraken-*`, `party` | page, by architecture | — | — | — | page | the engine segments the page itself and reads line by line; the model never sees a whole page as one input |
+
+**The one page-trained model behaves differently, and that is the point.**
+`qwen3vl-german-pages-v5-asteraix` is the only fine-tune here trained at
+`granularity: page`, and it is the only one that returns a paragraph in full
+(0.288 against 0.94-1.96 for the line-trained models). It is *worse* on single
+lines (1.32) than any of them. Granularity is a property the training sets, and
+serving cannot undo it in either direction.
+
 For a **Qwen3.5** base, merge and serve with `.venvs/vllm-next` instead — it is the
 only venv here whose transformers knows `qwen3_5` — and give the registry entry
 `vllm_venv: vllm-next` and `max_num_seqs: 64` (`engines/vllm/README.md`, #157).
