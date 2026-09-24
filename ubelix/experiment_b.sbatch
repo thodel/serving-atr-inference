@@ -1,7 +1,7 @@
 #!/bin/bash
 # Experiment B — does dropping 4-bit NF4 buy throughput on a card we own outright?
 #
-# The VLM trainer defaults to load_in_4bit because asterAIx shares its A40 with
+# The VLM trainer defaults to load_in_4bit because idhefix shares its A40 with
 # the serving engines; a bf16 8B does not fit beside them (VLM_TRAINING.md). That
 # constraint does not exist on a 94 GB H100. The 2026-08-08 run also logged
 # `bitsandbytes: inner dimension (4304) is not aligned for fast kernel` — Qwen3-VL's

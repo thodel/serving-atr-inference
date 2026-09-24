@@ -1,7 +1,7 @@
 Bootstrap: docker
 From: ubuntu:24.04
 
-# Dependency image for the VLM QLoRA trainer. Mirrors asterAIx deliberately:
+# Dependency image for the VLM QLoRA trainer. Mirrors idhefix deliberately:
 # Ubuntu 24.04 + system python3.12 + torch 2.8.0+cu128, the combination
 # docs/idhefix-environment.md pins. The repo itself is NOT baked in — it is
 # bind-mounted at runtime so code edits do not need a rebuild.
@@ -43,4 +43,4 @@ From: ubuntu:24.04
 
 %labels
     Purpose  Qwen3-VL QLoRA HTR training on UBELIX
-    Mirrors  asterAIx vlm-train venv
+    Mirrors  idhefix vlm-train venv

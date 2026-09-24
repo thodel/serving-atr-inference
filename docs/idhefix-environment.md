@@ -1,10 +1,10 @@
 # idhefix — environment & derived decisions
 
 > **This file describes idhefix** (130.92.59.240, `hostname` `srv`), the serving box.
-> Until 16.09.2026 it was named `asteraix-environment.md`, and the text below still
-> calls the box "asterAIx" throughout. Read every "asterAIx" here as idhefix: the name
-> asteraix now belongs to the training box. Fixing the text is #136. The probe below is
-> from June 2026. The current state of both machines is in
+> Until 16.09.2026 it was named `asteraix-environment.md` and called the box
+> "asterAIx" throughout; #136 corrected the name everywhere, including the text
+> below. The name asteraix belongs to the training box, 130.92.59.242. The probe
+> below is from June 2026. The current state of both machines is in
 > [`INFRASTRUCTURE.md`](INFRASTRUCTURE.md). Where the two files differ (linger, disk,
 > what runs on the cards), trust `INFRASTRUCTURE.md`: it was measured on 16.09.2026.
 
@@ -116,7 +116,7 @@ So neither the driver upgrade nor cuda-compat is needed for a model newer than 0
 supports; check for a cu12x wheel first.
 
 ## Open confirmations (need admin / info)
-- Two-server topology: **asterAIx** (`srv`, `130.92.59.240`) runs this stack; the
+- Two-server topology: **idhefix** (`srv`, `130.92.59.240`) runs this stack; the
   client is **agentic_historian on `tei.dh.unibe.ch`**. Confirm `ufw status` and the
   source IP `tei.dh.unibe.ch` actually uses to reach `:8200`.
 - Whether a one-time `loginctl enable-linger tobias` (or adding `tobias` to `docker`)

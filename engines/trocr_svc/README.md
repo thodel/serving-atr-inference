@@ -4,7 +4,7 @@ FastAPI service for medieval / Kurrent / Latin OCR via TrOCR (HuggingFace `Visio
 
 ## Requirements
 
-- Python 3.12 (asterAIx only has Python 3.12)
+- Python 3.12 (idhefix only has Python 3.12)
 - CUDA (optional; falls back to CPU)
 
 ## Install

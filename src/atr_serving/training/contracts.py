@@ -302,7 +302,7 @@ class VlmTrainParams(BaseModel):
     """Hyperparameters for a QLoRA fine-tune of a Qwen3-VL base.
 
     Defaults follow ``lassberg/vlm_training`` (the pipeline these numbers were
-    tuned in) except where asterAIx forces a different choice — each such
+    tuned in) except where idhefix forces a different choice — each such
     deviation is noted on the field.
     """
 

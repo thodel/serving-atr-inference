@@ -72,6 +72,12 @@ runs in well under an hour and is a genuine end-to-end smoke test.
 (publickey,password)`). Everything is developed + unit-tested locally, merged to `main`,
 then run on the box by hand (`git pull --ff-only`, per `docs/DEPLOY.md`).
 
+> **Outdated (#136).** There has been a working key-based entry for a while — the
+> `idhefix` alias, with `ControlMaster` — and the UBELIX route depends on it
+> (`ssh ubelix` jumps through the same box under its older `srv-train` alias). The
+> paragraph above is kept because the plan was written under that assumption; do
+> not plan a cutover around "no remote access".
+
 ---
 
 ## 2. Architecture
@@ -455,7 +461,7 @@ things about it are worth knowing here, because they changed shared code:
 
 ## 9. What the first real runs measured (2026-08-07/08)
 
-Two kraken runs and one VLM run have completed end to end on asterAIx. The pipeline
+Two kraken runs and one VLM run have completed end to end on idhefix. The pipeline
 works — jobs queue, train, score and register unattended, and a failure lands on the
 record with its reason. **The models it produced are not usable**; §9a establishes why.
 This section states what was measured rather than what was hoped, because the numbers

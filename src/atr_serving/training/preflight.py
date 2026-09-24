@@ -1,7 +1,7 @@
 """Resource guards — refuse a job that cannot succeed instead of discovering it
 three hours in.
 
-Two hard limits on asterAIx (``docs/idhefix-environment.md``):
+Two hard limits on idhefix (``docs/idhefix-environment.md``):
 
 * **GPU 1 is shared with the serving engines** (kraken/trocr/party ≈ 10 GB) and,
   when a vLLM model is resident, with an 18 GB 8 B model. Training into whatever

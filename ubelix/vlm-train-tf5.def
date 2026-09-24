@@ -56,4 +56,4 @@ From: ubuntu:24.04
 
 %labels
     Purpose  Qwen3.5 / Qwen3.8 QLoRA HTR training on UBELIX (transformers 5.x)
-    Mirrors  asterAIx vlm-train venv
+    Mirrors  idhefix vlm-train venv

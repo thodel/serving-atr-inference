@@ -6,7 +6,8 @@
 #   ./ubelix/status.sh -n 60        tail 60 log lines instead of 25
 #   ./ubelix/status.sh -j 14108981  a specific job
 #
-# Reaches the cluster through the `ubelix` ssh alias (ProxyJump via asterAIx),
+# Reaches the cluster through the `ubelix` ssh alias (ProxyJump via idhefix, whose
+# alias there is `srv-train` — do not rename it, see docs/INFRASTRUCTURE.md),
 # so it needs no VPN. See docs/UBELIX_PLAN.md §0.
 set -uo pipefail
 

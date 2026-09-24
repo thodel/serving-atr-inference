@@ -116,7 +116,7 @@ class TrainerSettings(BaseSettings):
     #: optimizer state. Checked instead of ``min_free_vram_mb`` for vllm jobs, so a
     #: VLM job queues rather than OOMing on a card that would have fit a kraken run.
     vlm_min_free_vram_mb: int = 24000
-    #: `/` is ~80 % full on asterAIx — never materialize a dataset into the last
+    #: `/` is ~80 % full on idhefix — never materialize a dataset into the last
     #: of it.
     min_free_disk_gb: int = 50
     #: Pages materialized before a chunk is compiled and deleted (#39). 0 = off,

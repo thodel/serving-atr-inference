@@ -18,8 +18,11 @@ Die Aufgabe heisst **ATR** (*Automatic Text Recognition*) oder **HTR**
 (*Handwritten Text Recognition*). Eingabe: das Bild einer Seite. Ausgabe: der Text
 darauf.
 
-Dieses Repository betreibt dafür einen Server auf der Maschine **asterAIx** und
-kann Modelle nicht nur *benutzen*, sondern auch **selbst trainieren**.
+Dieses Repository betreibt dafür einen Server auf der Maschine **idhefix** und
+kann Modelle nicht nur *benutzen*, sondern auch **selbst trainieren** — seit dem
+16.09.2026 auf einer zweiten Maschine, **asteraix**, aus dem Repository
+[training-atr-models](https://github.com/thodel/training-atr-models); dieser Server
+reicht die Trainingsaufrufe dorthin durch.
 
 ## 2. Zwei Wege, und warum es beide gibt
 

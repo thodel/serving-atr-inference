@@ -1,6 +1,6 @@
 """The three ways a LoRA merge is doomed before it starts.
 
-Each case here was met on asterAIx on 2026-09-14, trying to merge the three
+Each case here was met on idhefix on 2026-09-14, trying to merge the three
 `dh-unibe` German-XIX adapters. All three attempts loaded the base first — 26
 seconds and several GB — and only then failed, twice with a message that pointed
 at the wrong thing. The preflight exists so the tool answers "which venv" instead
@@ -104,7 +104,7 @@ def test_transformers_check_stays_quiet_when_it_cannot_tell(model_type, known):
 
 # ── vLLM: merged, and still unservable ───────────────────────────────────────
 
-#: What vLLM 0.11.0 on asterAIx actually reported, 2026-09-14.
+#: What vLLM 0.11.0 on idhefix actually reported, 2026-09-14.
 VLLM_0_11_QWEN = {
     "Qwen2VLForConditionalGeneration", "Qwen2_5_VLForConditionalGeneration",
     "Qwen3ForCausalLM", "Qwen3MoeForCausalLM", "Qwen3NextForCausalLM",
@@ -159,7 +159,7 @@ def test_blocker_renders_its_severity():
 
 # ── the half-written merge ───────────────────────────────────────────────────
 
-#: `ls ~/atr-cache/vllm-merged/qwen3vl-german-xix-v1/` on asterAIx, 2026-09-14
+#: `ls ~/atr-cache/vllm-merged/qwen3vl-german-xix-v1/` on idhefix, 2026-09-14
 #: 12:44 — after a run that printed FAILED and left this behind. 8.3 GB of
 #: correct weights, and every retry skipped it because config.json was there.
 HALF_WRITTEN = [

@@ -1,6 +1,6 @@
 """ModelManager — lifecycle for the heavy vLLM models (issue #6).
 
-vLLM instances run as **child subprocesses** (asterAIx has no passwordless sudo /
+vLLM instances run as **child subprocesses** (idhefix has no passwordless sudo /
 Linger=no, so root systemd units aren't an option). The manager:
 
 - lazily starts a model's ``vllm serve`` on first request and waits for health,
@@ -101,7 +101,7 @@ def resolve_model_path(spec: ModelSpec, settings: Settings) -> str:
 #: What the registry's ``vram_mb`` does **not** cover. It is the size of the
 #: weights; vLLM also wants a KV cache, activation scratch and captured CUDA
 #: graphs out of the same allocation. 1.6x is what the three German-XIX failures
-#: on asterAIx cost to find: at 1.0x (12 000 MB of 45 516) vLLM loaded the weights
+#: on idhefix cost to find: at 1.0x (12 000 MB of 45 516) vLLM loaded the weights
 #: and then died computing a KV cache of 2.22 GiB against the 2.25 GiB it needed.
 KV_HEADROOM = 1.6
 

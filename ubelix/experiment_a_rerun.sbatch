@@ -86,6 +86,6 @@ pass A1-warm "$JOB"
 echo
 echo "================ EXPERIMENT A ================"
 python3 "$HOME/ubelix/report_expA.py" "$JOB" "$S/expA" "$N" || true
-echo "Compare against VLM_TRAINING.md §5: 0.67 samples/s on asterAIx/CIFS."
+echo "Compare against VLM_TRAINING.md §5: 0.67 samples/s on idhefix/CIFS."
 echo "=============================================="
 rm -rf "$LOCAL"

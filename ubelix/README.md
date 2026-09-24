@@ -1,6 +1,6 @@
 # Running this trainer on UBELIX
 
-The same VLM training subsystem as on asterAIx, driven by **Slurm** instead of the
+The same VLM training subsystem as on idhefix, driven by **Slurm** instead of the
 `atr-train` service. Nothing in `src/` or `engines/` changes — everything here is
 environment and job plumbing. Full context and cost estimates:
 [`docs/UBELIX_PLAN.md`](../docs/UBELIX_PLAN.md).
@@ -153,10 +153,10 @@ tail -f ~/ubelix/logs/vlm-smoke-<jobid>.out
 ./ubelix/status.sh -j 14108981 -n 60
 ```
 
-Read-only, and it goes through the `ubelix` ssh alias (ProxyJump via asterAIx), so it
-needs no VPN.
+Read-only, and it goes through the `ubelix` ssh alias (ProxyJump via idhefix, under
+its `srv-train` alias), so it needs no VPN.
 
-If asterAIx is down, that route dies with it. On the UniBE VPN, `submit02` is reachable
+If idhefix is down, that route dies with it. On the UniBE VPN, `submit02` is reachable
 directly — use the `ubelix-direct` alias, or `UBELIX_HOST=ubelix-direct ./ubelix/status.sh`.
 
 ## Paying for GPUs — short version: don't, for H100s
@@ -209,14 +209,14 @@ Verify a resume by three lines: `resuming from …/checkpoint-N` (trainer log),
 `re-entered while \`training\`` (runner log), and the same job id on both
 attempts (batch log).
 
-## Four things that differ from asterAIx
+## Four things that differ from idhefix
 
 All of them are set in `smoke.sbatch`; copy that header for any new job.
 
 1. `--mem` is rejected without `--nodes`.
 2. `/scratch/network` symlinks to `/rs_scratch`; Apptainer must bind **both**.
 3. `ATR_TRAIN_VENVS_ROOT=/opt` — the venv is `/opt/vlm-train` in the container.
-4. `ATR_TRAIN_GPU=0` — Slurm's allocated GPU is index 0, not asterAIx's 1.
+4. `ATR_TRAIN_GPU=0` — Slurm's allocated GPU is index 0, not idhefix's 1.
 
 ## Where things go
 

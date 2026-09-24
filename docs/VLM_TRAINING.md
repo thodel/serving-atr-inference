@@ -539,7 +539,7 @@ The prompt the model was tuned with is stored on its `ModelSpec`. Serving it wit
 different wording is a silent distribution shift, which is why it travels with
 the model rather than living in the serving code.
 
-## Measured on asterAIx (2026-08-08)
+## Measured on idhefix (2026-08-08)
 
 First end-to-end run, deliberately tiny: `max_pages: 40`, `epochs: 1`,
 `eval_samples: 25`, defaults otherwise. Job `20260808T080206Z-qwen3vl-thun-smoke`,

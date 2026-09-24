@@ -34,10 +34,10 @@ INSTALLER = REPO / "scripts" / "install_user_units.sh"
 IDHEFIX_IP = "130.92.59.240"
 ASTERAIX_IP = "130.92.59.242"
 
-#: The docs #142 wrote or rewrote. docs/idhefix-environment.md is left out on
-#: purpose: #142 changed only its title and banner, and its body still calls the
-#: box asterAIx. Fixing that is #136's job; add the file here once #136 lands.
-CHECKED_DOCS = ("docs/INFRASTRUCTURE.md", "README.md", "docs/DEPLOY.md", "docs/SPLIT_PLAN.md")
+#: The docs #142 wrote or rewrote, plus docs/idhefix-environment.md, whose body
+#: called the box asterAIx until #136 swept the name out of the repository.
+CHECKED_DOCS = ("docs/INFRASTRUCTURE.md", "README.md", "docs/DEPLOY.md", "docs/SPLIT_PLAN.md",
+                "docs/idhefix-environment.md")
 
 #: What may follow ```mermaid on the first line. GitHub renders more types; these
 #: are the ones a doc in this repo has a use for.
@@ -404,10 +404,57 @@ def test_the_shared_marker_parser_reads_what_a_person_reads():
 
 
 def test_the_docs_name_the_hosts_correctly():
-    """130.92.59.240 is idhefix and 130.92.59.242 is asteraix (#136). Checked in
-    the docs #142 touched, not repo-wide; the sweep is #136's."""
+    """130.92.59.240 is idhefix and 130.92.59.242 is asteraix (#136)."""
     problems = [f"{rel}: {p}" for rel in CHECKED_DOCS for p in misnamed_hosts(_doc(rel))]
     assert not problems, "\n".join(problems)
+
+
+#: Where the old name may still appear, and why. Everywhere else it is a bug:
+#: the name was swept out of the repository by #136, and every one of the 176
+#: places it stood meant 130.92.59.240, which is idhefix.
+OLD_NAME_IS_ALLOWED = {
+    "docs/INFRASTRUCTURE.md": "the paragraph that explains the confusion",
+    "docs/SPLIT_PLAN.md": "the plan quotes the substitution it ordered",
+    "docs/GERMAN_XIX_MODELS.md": "a heading that dates itself by the name it used",
+    "docs/idhefix-environment.md": "the banner on the file that gave the name back",
+    "tests/test_infrastructure_docs.py": "this test, and the fixture below it",
+}
+OLD_NAME = "aster" + "AIx"  # not a literal, so this line is not itself a hit
+
+
+def _repo_text_files():
+    skip = {".git", ".venv", ".venvs", "node_modules", ".pytest_cache", ".ruff_cache",
+            ".claude", "__pycache__"}
+    suffixes = {".md", ".py", ".sh", ".txt", ".yaml", ".yml", ".toml", ".service",
+                ".def", ".sbatch", ".example", ".json", ".conf"}
+    return [p for p in sorted(REPO.rglob("*"))
+            if p.is_file() and not (set(p.relative_to(REPO).parts) & skip)
+            and (p.suffix in suffixes or p.name == ".env.example")]
+
+
+def test_no_file_calls_the_serving_box_by_its_old_name():
+    """The sweep #136 ordered, kept swept.
+
+    A name that is wrong everywhere it appears cannot be fixed once: the next
+    comment written from memory brings it back. So the check is the sweep.
+    """
+    files = _repo_text_files()
+    assert any(p.name == "INFRASTRUCTURE.md" for p in files), "the scan is vacuous"
+    offenders = sorted(
+        str(p.relative_to(REPO)) for p in files
+        if OLD_NAME in p.read_text(encoding="utf-8", errors="replace")
+        and str(p.relative_to(REPO)) not in OLD_NAME_IS_ALLOWED
+    )
+    assert not offenders, (
+        "130.92.59.240 is idhefix (#136); the old name is in:\n  " + "\n  ".join(offenders))
+
+
+def test_the_exceptions_are_still_exceptions():
+    """An allowlist entry that no longer holds the name is an entry to delete."""
+    stale = sorted(rel for rel in OLD_NAME_IS_ALLOWED
+                   if OLD_NAME not in (REPO / rel).read_text(encoding="utf-8"))
+    assert not stale, "these no longer use the old name; drop them from the allowlist:\n  " \
+                      + "\n  ".join(stale)
 
 
 def test_the_host_check_sees_a_misnamed_host():

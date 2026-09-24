@@ -304,7 +304,7 @@ def test_as_rows_has_the_contract_shape(procs):
 
 # ── service attribution (#414 follow-up) ─────────────────────────────────────
 #
-# Live on asterAIx the first version reported 10 440 MiB "unregistered" on an idle
+# Live on idhefix the first version reported 10 440 MiB "unregistered" on an idle
 # card. All of it was explainable: four gunicorn workers of a neighbouring RAG
 # service, and one of our own trocr engines. A number that is permanently large
 # for good reasons is a number people stop reading — which is how a sixteen-hour

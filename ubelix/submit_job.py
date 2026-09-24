@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create a training job record on disk, without the atr-train service.
 
-On asterAIx a job is born from ``POST /train/jobs``; the service writes the
+On idhefix a job is born from ``POST /train/jobs``; the service writes the
 record and spawns the runner. UBELIX has no service and no systemd — Slurm is
 the supervisor. This shim does the one thing the service did that the runner
 cannot do for itself: turn a JSON request into a JobStore record.

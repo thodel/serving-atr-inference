@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # spike_engine_installs.sh — throwaway check: do the four engine stacks install
-# and import on asterAIx's python3.12 (the only Python on the box)?
+# and import on idhefix's python3.12 (the only Python on the box)?
 #
-# WHY: asterAIx has no python3.11. If kraken or party refuse 3.12 we must request
+# WHY: idhefix has no python3.11. If kraken or party refuse 3.12 we must request
 # a deadsnakes 3.11 venv (needs admin) BEFORE building those engines. This script
 # answers that in ~10-20 min of downloads. It builds temp venvs and removes them
 # again (disk is ~80% full) unless you pass --keep.
@@ -16,7 +16,7 @@ set -uo pipefail
 
 PY="${PYTHON:-python3.12}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# cu128 confirmed working on asterAIx (driver 565 / CUDA 12.7); cu130 fails
+# cu128 confirmed working on idhefix (driver 565 / CUDA 12.7); cu130 fails
 # ("driver too old"). cu128 runs via CUDA minor-version compatibility.
 TORCH_INDEX="https://download.pytorch.org/whl/cu128"
 WORK="$(mktemp -d)"

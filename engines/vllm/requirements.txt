@@ -1,4 +1,4 @@
-# vLLM venv. asterAIx: Python 3.12, driver 565.57.01 / CUDA 12.7.
+# vLLM venv. idhefix: Python 3.12, driver 565.57.01 / CUDA 12.7.
 #
 # IMPORTANT: torch is installed SEPARATELY as 2.8.0+cu128 by make_venvs.sh.
 # Current vLLM (0.2x) ships a CUDA-13 build of vllm._C (needs libcudart.so.13 /
