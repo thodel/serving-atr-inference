@@ -40,7 +40,7 @@ bash scripts/make_venvs.sh party
 
 ## Systemd (production)
 
-asterAIx has **no passwordless sudo** and the docker socket is denied, so every
+idhefix has **no passwordless sudo** and the docker socket is denied, so every
 engine runs as a `systemctl --user` unit:
 
 ```bash

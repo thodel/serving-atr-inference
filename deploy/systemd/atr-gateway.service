@@ -1,4 +1,4 @@
-# asterAIx has no passwordless sudo and Linger=no, so prefer a USER unit:
+# idhefix has no passwordless sudo and Linger=no, so prefer a USER unit:
 #   mkdir -p ~/.config/systemd/user
 #   cp deploy/systemd/atr-gateway.service ~/.config/systemd/user/
 #   # one-time, needs an admin (survives logout):  sudo loginctl enable-linger tobias

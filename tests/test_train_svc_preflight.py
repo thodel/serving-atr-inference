@@ -17,7 +17,7 @@ from atr_serving.training.preflight import (
 )
 
 # `nvidia-smi --query-gpu=index,memory.free,memory.total --format=csv,noheader,nounits`
-# on asterAIx: GPU 0 shared with the RAG service, GPU 1 ours.
+# on idhefix: GPU 0 shared with the RAG service, GPU 1 ours.
 SMI_OUTPUT = "0, 35000, 46068\n1, 40000, 46068\n"
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# probe_host.sh — read-only environment report for the target server (asterAIx @ DH).
+# probe_host.sh — read-only environment report for the target server (idhefix @ DH).
 #
-# Run this ON asterAIx and paste the output back. It changes NOTHING; it only
+# Run this ON idhefix and paste the output back. It changes NOTHING; it only
 # reads. The output drives the version pins for each engine venv (torch/CUDA,
 # vLLM, kraken, transformers, Python) and the systemd/user setup.
 #
@@ -17,7 +17,7 @@ sec()  { printf '\n════════════════════�
 run()  { printf '\n$ %s\n' "$*"; "$@" 2>&1 | sed 's/^/  /'; }
 note() { printf '  (note) %s\n' "$*"; }
 
-printf '########## asterAIx host probe — %s ##########\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '########## idhefix host probe — %s ##########\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf 'host: %s   user: %s\n' "$(hostname 2>/dev/null)" "$(id -un 2>/dev/null)"
 
 # ── OS / kernel ─────────────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ for t in docker podman nvidia-ctk; do have "$t" && run "$t" --version; done
 have docker && run docker ps
 have ollama && run ollama list
 ss -ltnp 2>/dev/null | sed 's/^/  /' | head -40 || (have netstat && netstat -ltnp 2>/dev/null | sed 's/^/  /' | head -40) || note "no ss/netstat to list listening ports"
-note "GPUStack endpoint referenced elsewhere: https://gpustack.unibe.ch/v1 — is asterAIx part of that pool?"
+note "GPUStack endpoint referenced elsewhere: https://gpustack.unibe.ch/v1 — is idhefix part of that pool?"
 
 # ── Networking / firewall (for the two-VM API key setup) ────────────────────
 sec "Networking / firewall"
@@ -120,7 +120,7 @@ run hostname -I
 have ip && ip -brief addr 2>/dev/null | sed 's/^/  /'
 have ufw && (sudo -n ufw status 2>/dev/null || note "ufw present (status needs sudo)")
 have firewall-cmd && (firewall-cmd --state 2>/dev/null | sed 's/^/  /' || note "firewalld present")
-note "Confirm: which port can the agentic_historian VM reach on asterAIx?"
+note "Confirm: which port can the agentic_historian VM reach on idhefix?"
 
 # ── Dev tooling ─────────────────────────────────────────────────────────────
 sec "Dev tooling"

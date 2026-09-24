@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install the ATR systemd USER units (no root needed) and enable them.
 #
-# asterAIx has no passwordless sudo and Linger=no, so we run everything as
+# idhefix has no passwordless sudo and Linger=no, so we run everything as
 # `systemctl --user`. Survival across logout needs linger, which is the ONE
 # step that needs an admin (run once):   sudo loginctl enable-linger "$USER"
 #

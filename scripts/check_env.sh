@@ -54,7 +54,7 @@ fs_type() {
   stat -f -c %T "$1" 2>/dev/null || echo "unknown"
 }
 
-# The share on asterAIx reports **smb2**, not "smb", so every check that compared
+# The share on idhefix reports **smb2**, not "smb", so every check that compared
 # against the literal string passed it as local — including the TMPDIR one, which
 # exists because a network TMPDIR broke compile (0ca2379). Globs, not equality,
 # and one function so a new mount type is fixed in one place.
@@ -198,7 +198,7 @@ else
   UNIT_VARS=$(systemctl --user show atr-train -p Environment --no-pager 2>/dev/null || echo "")
 fi
 if [ -z "$UNIT_VARS" ]; then
-  warn "cannot read atr-train.service environment (systemctl failed — probably not on asterAIx)"
+  warn "cannot read atr-train.service environment (systemctl failed — probably not on idhefix)"
   info "  run this script on the box where the service is installed"
 else
   # Secrets are shown as a fingerprint, never a value. Reading the process

@@ -178,7 +178,7 @@ until you notice every fragment is the biggest text in the image.
 A page-level model now gets **`ATR_VLLM_MAX_NEW_TOKENS_PAGE`** (4096), not the
 line ceiling of `ATR_VLLM_MAX_NEW_TOKENS` (512). Until 2026-09-16 both took the
 same setting, 512 was the default, and serving these page-level out of a fresh
-checkout produced a corpus of quietly truncated transcriptions — asterAIx had
+checkout produced a corpus of quietly truncated transcriptions — idhefix had
 4096 set by hand in `.env`, and nowhere else did.
 
 When generation reaches the ceiling vLLM stops and returns what it has, as a
@@ -305,7 +305,7 @@ Then `systemctl --user restart atr-gateway` and read one real page through it.
 
 ### Disk, before you start
 
-`/` on asterAIx is a single partition and **hit 100 % full on 2026-08-06**
+`/` on idhefix is a single partition and **hit 100 % full on 2026-08-06**
 (`idhefix-environment.md` §7). Merging all three needs roughly:
 
 | | ~size |
@@ -342,7 +342,7 @@ served. The text below is kept as the record of why it looked otherwise.
 | `qwen3.5-4b-german-xix-v1` | possible with `vllm-next`, not done | — | disabled: superseded |
 | `qwen3.5-2b-german-xix-v1` | possible with `vllm-next`, not done | — | disabled: superseded |
 
-### As measured on 2026-09-14 (asterAIx was the wrong name for this box)
+### As measured on 2026-09-14 (on idhefix, which these notes then called asterAIx)
 
 | model | merge | vLLM 0.11.0 can serve it |
 |---|---|---|

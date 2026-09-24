@@ -186,9 +186,11 @@ How a request is recognized depends on the model's engine and level:
 
 **Names.** For months, the docs and issues called the serving box "asterAIx". The
 count in [`SPLIT_PLAN.md`](SPLIT_PLAN.md) (T0) found 176 such places across the
-repositories. Fixing them is #136; until then, code comments and older docs in this
-repository still say "asterAIx" where they mean idhefix. Until this change,
-[`idhefix-environment.md`](idhefix-environment.md) was named `asteraix-environment.md`.
+repositories, and **not one of them meant the other machine** — which is what made
+#136 a replacement rather than a judgement call. This repository's share of them is
+done: the name appears only where a test proves the check that keeps it out. Before
+that change, [`idhefix-environment.md`](idhefix-environment.md) was named
+`asteraix-environment.md`.
 The name asteraix belongs to 130.92.59.242, the training box, and to nothing else.
 Neither `hostname` (`srv`, `dhserver03`) serves as an identity: a job's owner is
 whatever `ATR_TRAIN_HOST_ID` says.

@@ -164,7 +164,7 @@ def peft_blocker(adapter_version: str | None, installed: str | None) -> Blocker 
         f"{adapter_version}. The newer fields in its adapter_config.json are read "
         f"into the wrong shape by {installed}, and the merge fails with an "
         f"AttributeError that names neither peft nor a version.\n"
-        f"    Merge in a venv whose peft is >= {adapter_version} (on asterAIx that "
+        f"    Merge in a venv whose peft is >= {adapter_version} (on idhefix that "
         f"is usually .venvs/vlm-train, which trained it), or upgrade peft here."
     ))
 
@@ -207,7 +207,7 @@ def vllm_blocker(architectures, supported_archs) -> Blocker | None:
         f"the vLLM in this venv does not list {', '.join(architectures)} among its "
         f"supported architectures. The merge will succeed and the result will still "
         f"not load here.\n"
-        f"    Serving it needs a vLLM that knows this architecture — and on asterAIx "
+        f"    Serving it needs a vLLM that knows this architecture — and on idhefix "
         f"a newer vLLM needs a newer driver (engines/vllm/requirements.txt)."
     ))
 

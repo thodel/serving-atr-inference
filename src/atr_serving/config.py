@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ATR_", env_file=".env", extra="ignore")
 
     # ── HTTP ──────────────────────────────────────────────────────────────
-    # :8000/:8080/:9000/:11434/:80 are already taken on asterAIx — see
+    # :8000/:8080/:9000/:11434/:80 are already taken on idhefix — see
     # docs/idhefix-environment.md. Gateway lives on :8200, engines on :820x.
     host: str = "0.0.0.0"
     port: int = 8200
@@ -143,7 +143,7 @@ class Settings(BaseSettings):
         return {**self.engine_urls(), "train": self.train_url}
 
     # ── vLLM (managed as subprocesses by the ModelManager, not systemd) ───────
-    # asterAIx: GPU 1 only (GPU 0 is the shared RAG GPU); one 8B resident at a time.
+    # idhefix: GPU 1 only (GPU 0 is the shared RAG GPU); one 8B resident at a time.
     vllm_python: Path = REPO_ROOT / ".venvs" / "vllm" / "bin" / "vllm"
     vllm_gpu: int = 1
     vllm_port_base: int = 8210
@@ -205,7 +205,7 @@ class Settings(BaseSettings):
     #: Generation ceiling for a **page**. A dense page of nineteenth-century German
     #: runs well past 512 tokens, and hitting the ceiling is a normal ``200`` whose
     #: transcription stops mid-sentence — visible since #123, but only to someone
-    #: who looks. asterAIx had 4096 set by hand in `.env`; every other deployment
+    #: who looks. idhefix had 4096 set by hand in `.env`; every other deployment
     #: and every fresh checkout got 512. It is a fallback: a model that knows its
     #: own length says so in the registry.
     vllm_max_new_tokens_page: int = 4096

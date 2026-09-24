@@ -1,4 +1,4 @@
-# User unit (systemctl --user) — asterAIx has no passwordless sudo / Linger=no.
+# User unit (systemctl --user) — idhefix has no passwordless sudo / Linger=no.
 # Install: scripts/install_user_units.sh  (copies to ~/.config/systemd/user/)
 [Unit]
 Description=ATR Kraken Engine Service

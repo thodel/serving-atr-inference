@@ -2,7 +2,7 @@
 
 A plan and a cost estimate for fine-tuning Qwen3-VL on the **full** medieval
 dataset (`dh-unibe/image-text_medieval-scripts_xiv-xv-xvi`), on the University
-of Bern cluster rather than on asterAIx.
+of Bern cluster rather than on idhefix.
 
 Everything marked **[measured]** is a number we have. Everything marked
 **[estimate]** is arithmetic from those numbers plus published hardware specs,
@@ -24,7 +24,7 @@ all in our favour except the last:
 
 ### Login
 
-Works with a key, from this laptop, **no VPN and no password**. asterAIx sits inside
+Works with a key, from this laptop, **no VPN and no password**. idhefix sits inside
 the UniBE network, so it relays the connection and the private key never leaves the
 laptop:
 
@@ -38,7 +38,7 @@ Host ubelix
 ```
 
 Host keys for all four submit nodes were scanned and matched against the published
-fingerprint table (8/8 OK) before being written to `known_hosts` on asterAIx.
+fingerprint table (8/8 OK) before being written to `known_hosts` on idhefix.
 
 ### What is already on the cluster
 
@@ -60,7 +60,7 @@ production run, but no partial downloads are pending.)
 lives in `$HOME/ubelix/`. Job **14108981**, 1× RTX 4090 on the free `job_gratis` QoS,
 **9 min 34 s wall, zero cost**:
 
-| | asterAIx (A40) | **UBELIX (RTX 4090)** |
+| | idhefix (A40) | **UBELIX (RTX 4090)** |
 |---|---:|---:|
 | selection | 52 pages → 783 crops (594/189) | **identical — 594 / 189** |
 | **CER** | **0.466** | **0.4662** |
@@ -77,15 +77,15 @@ network.** The `cache_datasets: false` default is safe here.
 
 ### Four portability fixes the smoke run found
 
-Each was a silent assumption about asterAIx baked into the code or the job:
+Each was a silent assumption about idhefix baked into the code or the job:
 
 1. **`--mem` requires `--nodes`** on UBELIX's Slurm. Submission is rejected outright.
 2. **`/scratch/network` is a symlink to `/rs_scratch`**, which Apptainer does not
    resolve. Bind *both* or every scratch path inside the container dangles.
 3. **`ATR_TRAIN_VENVS_ROOT=/opt`** — the runner spawns the trainer with
-   `<venvs_root>/vlm-train/bin/python`, which is `$REPO/.venvs` on asterAIx and
+   `<venvs_root>/vlm-train/bin/python`, which is `$REPO/.venvs` on idhefix and
    `/opt` in the container.
-4. **`ATR_TRAIN_GPU=0`** — the asterAIx default of `1` exists to dodge the shared RAG
+4. **`ATR_TRAIN_GPU=0`** — the idhefix default of `1` exists to dodge the shared RAG
    card. Under Slurm, the allocated GPU is always index 0 inside the job.
 
 All four are environment, not code: nothing in the repo had to change.
@@ -230,7 +230,7 @@ to rebuild, that is the cheaper side of the trade.
 
 ## 4. Compute estimate
 
-**The anchor [measured]**, from `20260808T080206Z-qwen3vl-thun-smoke` on asterAIx:
+**The anchor [measured]**, from `20260808T080206Z-qwen3vl-thun-smoke` on idhefix:
 Qwen3-VL-8B, QLoRA NF4, line granularity, effective batch 16, **1.9 samples/s on
 one A40**. That run also logged `bitsandbytes: inner dimension (4304) is not
 aligned ... falling back to slower implementation` — Qwen3-VL's dimensions miss
@@ -245,7 +245,7 @@ Scaling that to UBELIX cards [estimate]:
 | **H100 96 GB** | **6–8×** | **~12** | 5.5× compute **and** 96 GB lets us drop 4-bit entirely — no slow dequant path |
 | H200 141 GB | 7–9× | ~14 | same compute, 4.8 TB/s, bigger batches |
 
-Dropping NF4 on the H100 is worth calling out separately: 4-bit exists on asterAIx
+Dropping NF4 on the H100 is worth calling out separately: 4-bit exists on idhefix
 because the card is *shared with the serving engines*. On a dedicated 96 GB H100
 an 8B model trains in bf16 with room for a real batch, which removes both the
 misaligned-kernel penalty and the quantization noise.
@@ -396,7 +396,7 @@ NVMe instead of the shared filesystem. This is why sharding matters twice.
 `vlm-train` venv pins (torch 2.8.0+cu128, transformers ≥4.57, peft/trl/
 bitsandbytes) and keep the `.sif` in the workspace. This sidesteps the Lmod
 module stack, makes the run reproducible, and means the UBELIX environment and
-asterAIx run identical code. `APPTAINER_TMPDIR`/`APPTAINER_CACHEDIR` must point
+idhefix run identical code. `APPTAINER_TMPDIR`/`APPTAINER_CACHEDIR` must point
 at scratch — the build does not fit in `$HOME`.
 
 **Multi-GPU**: DDP via `torchrun` on a single node, 8 ranks. Do **not** start
@@ -566,11 +566,11 @@ Both are free, and neither needs anything we do not already have.
 ## 9. Proposal, 2026-09-09: what to run on UBELIX next
 
 Written after the corpus-scale runbook (`VLM_TRAINING.md` §5, four failed attempts on
-asterAIx) and after checking what the Qwen3.5/3.8 line would actually require.
+idhefix) and after checking what the Qwen3.5/3.8 line would actually require.
 
 ### 9.1 The recent tests move the goalposts — my §4 estimates were ~3× optimistic
 
-`VLM_TRAINING.md` §5 measures a **325 K-line** corpus on asterAIx at **0.67 samples/s**
+`VLM_TRAINING.md` §5 measures a **325 K-line** corpus on idhefix at **0.67 samples/s**
 — three times worse than the 1.94 samples/s of the Thun smoke test that every estimate
 in §4 of this document was extrapolated from. One epoch took **6.4 days**.
 
@@ -619,11 +619,11 @@ hours of pure copying** per job, to buy a measured −0.5 %. The §5 pipeline's
 
 **What this does and does not settle.** It rules out *shared vs local disk* as
 the mechanism, because on UBELIX all three storage arms are indistinguishable.
-It does not prove the asterAIx 0.67 samples/s was the CIFS mount rather than
+It does not prove the idhefix 0.67 samples/s was the CIFS mount rather than
 that corpus's longer lines — the corpora differ (medieval here, German there),
 so those two remain unseparated. What is certain is that **the 3× corpus-scale
-penalty asterAIx saw does not reproduce here**: 8.2 samples/s on a corpus-scale
-selection against 1.94 on asterAIx's 52-page smoke test, on a card roughly 4×
+penalty idhefix saw does not reproduce here**: 8.2 samples/s on a corpus-scale
+selection against 1.94 on idhefix's 52-page smoke test, on a card roughly 4×
 faster.
 
 ### 9.2-bis The schedule, re-anchored on measurement
@@ -633,7 +633,7 @@ faster.
 | anchored on | 4× H100 | one epoch, 8 M lines | 3 epochs |
 |---|---:|---:|---:|
 | Thun smoke test (§4) | ~41 | 2.3 days | 6.8 days |
-| corpus-scale asterAIx (§9.1) | ~14 | 6.6 days | 20 days |
+| corpus-scale idhefix (§9.1) | ~14 | 6.6 days | 20 days |
 | **measured on UBELIX** | **~28** | **3.3 days** | **~10 days** |
 
 Ten days of free preemptable time for three epochs over the whole medieval set.
@@ -846,7 +846,7 @@ fewer parameters, fewer visual tokens nor more dataloader workers changes that.
 
 | anchored on | 3 epochs over 10.4 M crops |
 |---|---:|
-| corpus-scale asterAIx (§9.1) | 26 days |
+| corpus-scale idhefix (§9.1) | 26 days |
 | measured, 4-bit, bs 4 | ~13 days |
 | measured, bf16, bs 4 | ~9.8 days |
 | **measured, bf16, bs 16** | **~6 days** |
@@ -1030,7 +1030,7 @@ val crops), Qwen3-VL unless stated.
 | # | question | answer |
 |---|---|---|
 | A | is it IO-bound? | **no** — GPFS, node NVMe and page cache within 2 %. Staging *costs*: 10–31 h of copying at full scale for −0.5 %. |
-| B | is 4-bit worth it? | **no** — bf16 is **+23 %** and uses 40 GB of a 94 GB card. 4-bit is an asterAIx inheritance. |
+| B | is 4-bit worth it? | **no** — bf16 is **+23 %** and uses 40 GB of a 94 GB card. 4-bit is an idhefix inheritance. |
 | C | does a smaller model do? | **4B matches 8B** (CER 0.334 vs 0.341) at half the size. 2B is 31 % worse. |
 | D | are visual tokens the lever? | **no** — an 8× range moved throughput 5 %. 128 and 256 tie on CER; 512 is *worse*. |
 | E | is the GPU starved? | **yes — idle 46 % of wall clock.** But not by the dataloader: 4→16 workers changed 1 %. |
@@ -1056,7 +1056,7 @@ bf16 at 10.85 samples/s per H100 [measured], 4 GPUs at 85 % DDP → **~37 sample
 | anchored on | 3 epochs, 8 M lines |
 |---|---:|
 | Thun smoke test (§4) | 6.8 days |
-| corpus-scale asterAIx (§9.1) | 20 days |
+| corpus-scale idhefix (§9.1) | 20 days |
 | measured, 4-bit (§9.2-bis) | ~10 days |
 | **measured, bf16** (8 M) | ~7.5 days |
 | **measured bf16, at the measured 10.4 M line count** | **~9.8 days** |
@@ -1069,7 +1069,7 @@ obvious confirmation run before committing ten days of anything.
 ### 9.2-ter (superseded) The original NVMe proposal
 
 The runbook says copying the crops to local disk "is the obvious experiment and has not
-been run". On asterAIx it is awkward; **on UBELIX it is free and native**: every GPU
+been run". On idhefix it is awkward; **on UBELIX it is free and native**: every GPU
 node has **1.92 TB of local NVMe at `/scratch/local`**, and §5 of this document already
 specifies staging there.
 
@@ -1514,14 +1514,14 @@ one-off.
 
 ---
 
-## 15. Moving trained models to asterAIx
+## 15. Moving trained models to idhefix
 
 **Transfer is trivial; serving is not.** UBELIX `/storage/research/wbkolleg_dh_1` and
-asterAIx `/mnt/wbkolleg_dh_1` are the same storage, and asterAIx's convention is to
+idhefix `/mnt/wbkolleg_dh_1` are the same storage, and idhefix's convention is to
 leave adapters on the share and point `local_path` at them. So the adapters went to
 `Textrecognition_Training/trained-ubelix/`, with a `README.md` beside them.
 
-| model | CER | on asterAIx |
+| model | CER | on idhefix |
 |---|---:|---|
 | `qwen3vl-medieval-german-v1` | 0.532 | registered, **merged (8.3 GB), verified in vLLM**, disabled pending the gate |
 | `qwen3.5-2b-medieval-german-v1` | 0.588 | stored; **not servable** (vLLM 0.11 / transformers 4.57 has no `qwen3_5`) |
@@ -1535,7 +1535,7 @@ fail for everyone.
 
 1. **The merge failed halfway.** All four medieval arms ran under the transformers
    5.x image, so their adapter directories carry 5.x processor files, which
-   asterAIx's 4.57 cannot parse (`'list' object has no attribute 'keys'`). The
+   idhefix's 4.57 cannot parse (`'list' object has no attribute 'keys'`). The
    weights had merged; the base model's processor was saved instead — valid only
    because the adapter has no `modules_to_save` and adds no tokens, which was
    checked (vocab 151,936 ≥ tokenizer 151,669) rather than assumed.
@@ -1544,9 +1544,11 @@ fail for everyone.
    `/ocr`, so it can never pass for a VLM.
 3. **The gateway could not load it.** Every serving unit pins
    `CUDA_VISIBLE_DEVICES=1`; the always-on engines hold ~14 GB there and the
-   asterAIx run `qwen3vl-german-pages-v3` holds ~30 GB, so vLLM started with
+   training run `qwen3vl-german-pages-v3` — on idhefix, which then served *and*
+   trained — holds ~30 GB, so the gateway's vLLM on that same card started with
    **0.59 GB free** and died. This blocks *every* gateway VLM while that training
-   runs, not just this one. Verified the model independently on GPU 0 instead:
+   runs, not just this one. It is also the measurement the split was decided on:
+   training moved to asteraix (130.92.59.242) on 16.09.2026. Verified the model independently on GPU 0 instead:
 
    ```
    REF 'hoc, nunc illud imparatus agere cogar. Ad eam relationem'
@@ -2027,8 +2029,8 @@ beside `ubelix/score_federal_minutes.sbatch`.
 ### 21b. Seven seconds: a stale checkout, the second time
 
 A note on names first: #136 established that the serving box at 130.92.59.240 is
-**idhefix**, not asterAIx; asterAIx is 130.92.59.242 and becomes the training
-host. Sections up to §21a use the old name for .240. From here on it is idhefix.
+**idhefix**; asteraix is 130.92.59.242 and becomes the training host. Sections up
+to §21a were written with the old name for .240 and now carry the right one.
 
 Resubmitted after §21a, the training job `15449955` failed after **7 seconds**:
 

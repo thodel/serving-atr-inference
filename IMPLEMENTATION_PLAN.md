@@ -244,7 +244,7 @@ TrOCR ≈ 1.3 GB; kraken/party models ≪ 1 GB.
   and evicts the least-recently-used **lazy** engine on pressure. Pinned engines never
   evict.
 - vLLM VLMs are started/stopped by the `ModelManager` as **child subprocesses**
-  (`vllm serve …` via `subprocess.Popen`) — asterAIx has no passwordless sudo and
+  (`vllm serve …` via `subprocess.Popen`) — idhefix has no passwordless sudo and
   `Linger=no`, so root `systemctl`-managed `atr-vllm@` units aren't available. The
   manager reads **live free VRAM from `nvidia-smi`** (GPU 0 is shared with a RAG
   service) and sets `--gpu-memory-utilization` to co-reside with pinned models. Cold
@@ -282,7 +282,7 @@ serving-atr-inference/
   scripts/
     download_models.py           # prefetch HF repos + `kraken get` Zenodo ids
     make_venvs.sh                # build the per-engine venvs
-  deploy/systemd/                # `systemctl --user` units (no root on asterAIx)
+  deploy/systemd/                # `systemctl --user` units (no root on idhefix)
     atr-gateway.service
     atr-kraken.service
     atr-trocr.service
@@ -333,7 +333,7 @@ serving-atr-inference/
 - **Auth / exposure** — **static shared API key** in the `X-API-Key` header
   (`ATR_API_KEY`, identical on both VMs); same private university network behind the
   same firewall; **no TLS**. Only the gateway port is exposed; engines bind `127.0.0.1`.
-- **Target host** — **asterAIx** (`srv`), probed 2026-06-26: Ubuntu 24.04, **Python
+- **Target host** — **idhefix** (`srv`), probed 2026-06-26: Ubuntu 24.04, **Python
   3.12 only**, 2× A40 (~45 GB), driver 565.57.01 / CUDA 12.7, **GPU 0 shared** with a
   RAG service / GPU 1 free, **no passwordless sudo**, ports `:8000/8080/9000/11434/80`
   taken. Full details + derived decisions in `docs/idhefix-environment.md`; each venv

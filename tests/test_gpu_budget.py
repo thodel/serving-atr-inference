@@ -1,6 +1,6 @@
 """How much of the card may this model take?
 
-Three launches of `qwen3vl-german-xix-v1` failed on asterAIx on 2026-09-14, and
+Three launches of `qwen3vl-german-xix-v1` failed on idhefix on 2026-09-14, and
 all three failed on the same question answered by a constant — 0.70 — that knows
 neither the model nor the card:
 
@@ -31,7 +31,7 @@ from atr_serving.manager import (
 from atr_serving.registry import ModelSpec
 
 
-#: `nvidia-smi --query-gpu=memory.total` on asterAIx GPU 1 (L40S).
+#: `nvidia-smi --query-gpu=memory.total` on idhefix GPU 1 (L40S).
 TOTAL = 45516
 
 #: What `config/models.yaml` claims for the three German-XIX models.

@@ -4,7 +4,7 @@ Serves the page/line VLMs (LightOnOCR + the Qwen3-VL fine-tunes) via vLLM's
 OpenAI-compatible server. Unlike the other engines, vLLM is **not** a systemd
 unit — the gateway's `ModelManager` (`src/atr_serving/manager.py`) starts each
 model as a `vllm serve` **subprocess** on demand and evicts the LRU one under
-the VRAM budget (asterAIx: GPU 1 only, one 8B resident at a time).
+the VRAM budget (idhefix: GPU 1 only, one 8B resident at a time).
 
 ## Models (from config/models.yaml)
 - `lightonocr-catmus-caroline` — pinned, **line-level** (cropped lines)

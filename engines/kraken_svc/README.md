@@ -52,7 +52,7 @@ Or directly:
 .venvs/kraken/bin/python -m kraken_svc.app
 ```
 
-Production (systemd) — asterAIx has **no passwordless sudo**, so these are
+Production (systemd) — idhefix has **no passwordless sudo**, so these are
 `systemctl --user` units, installed by `scripts/install_user_units.sh`:
 
 ```bash

@@ -1,4 +1,4 @@
-# Training kraken models on asterAIx
+# Training kraken models on idhefix
 
 > **Retired on this box (16.09.2026).** Training runs on asteraix (130.92.59.242) in
 > [training-atr-models](https://github.com/thodel/training-atr-models); this repo's
@@ -575,7 +575,7 @@ built them reads them from the cache, and `jobs/<id>/data/` keeps only the two
 deleted afterwards, rather than moved — a move that failed partway would leave a
 job holding manifests for arrows that are no longer anywhere.
 
-This is a cross-filesystem copy on asterAIx: `jobs_root` is on the CIFS share and
+This is a cross-filesystem copy on idhefix: `jobs_root` is on the CIFS share and
 the cache is on the system disk. The files are handed to the cache individually
 for exactly that reason — gathering them into a staging directory beside the job
 first would send 41 GB over SMB twice.

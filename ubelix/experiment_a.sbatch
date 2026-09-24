@@ -26,8 +26,8 @@
 # evaluation, which differ between the runner and a direct invocation.
 #
 # READ THE RESULT CAREFULLY.
-#  * UBELIX shared scratch is parallel GPFS; asterAIx's share is CIFS/SMB. A1
-#    here is NOT the asterAIx baseline. If A1-cold already beats 0.67 samples/s
+#  * UBELIX shared scratch is parallel GPFS; idhefix's share is CIFS/SMB. A1
+#    here is NOT the idhefix baseline. If A1-cold already beats 0.67 samples/s
 #    by a wide margin, the finding is "the CIFS mount was the problem" and local
 #    staging buys little more. That is a good answer, but a different one.
 #  * The corpus is the medieval set on purpose: it is the target, so the crop
@@ -130,6 +130,6 @@ pass A1-warm "$JOB"
 echo
 echo "================ EXPERIMENT A ================"
 python3 "$HOME/ubelix/report_expA.py" "$JOB" "$S/expA" "$N" || true
-echo "Compare against VLM_TRAINING.md §5: 0.67 samples/s on asterAIx/CIFS."
+echo "Compare against VLM_TRAINING.md §5: 0.67 samples/s on idhefix/CIFS."
 echo "=============================================="
 rm -rf "$LOCAL"

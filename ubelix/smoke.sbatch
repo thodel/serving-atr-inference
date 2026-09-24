@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 1 smoke: reproduce the asterAIx Thun run (CER 0.466) on UBELIX.
+# Phase 1 smoke: reproduce the idhefix Thun run (CER 0.466) on UBELIX.
 # One RTX 4090 on the free 96 h gratis QoS. Minutes of GPU; this proves the
 # container, the share paths and the job shim, not the model.
 #SBATCH --job-name=vlm-smoke
@@ -51,11 +51,11 @@ export ATR_TRAIN_JOBS_ROOT=$S/smoke/jobs
 export ATR_TRAIN_CHECKPOINT_ROOT=$S/smoke/checkpoints
 export ATR_TRAIN_TRAINED_ROOT=$S/smoke/trained
 export PYTHONPATH=$REPO/src:$REPO/engines
-# The runner spawns the trainer with the engine venv interpreter. On asterAIx that
+# The runner spawns the trainer with the engine venv interpreter. On idhefix that
 # is $REPO/.venvs/vlm-train; in the container it is /opt/vlm-train.
 export ATR_TRAIN_VENVS_ROOT=/opt
 # Slurm hands us one GPU and nvidia-smi inside the job sees it as index 0.
-# The asterAIx default of 1 (avoiding the shared RAG card) is wrong here.
+# The idhefix default of 1 (avoiding the shared RAG card) is wrong here.
 export ATR_TRAIN_GPU=0
 mkdir -p "$ATR_TRAIN_JOBS_ROOT" "$ATR_TRAIN_CHECKPOINT_ROOT" "$ATR_TRAIN_TRAINED_ROOT"
 

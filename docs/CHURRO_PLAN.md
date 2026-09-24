@@ -245,7 +245,7 @@ Für 0.4 nicht die #92-Lehre vergessen: `max_new_tokens` mindestens 4.096, und
 `base_model` ist schon heute ein freies Feld, und `AutoModelForImageTextToText`
 lädt `qwen2_5_vl` — CHURRO als Basis erfordert keinen Umbau des Laders, nur 1.1–1.5.
 
-### Phase 2 — LoRA-Feinabstimmung auf asterAIx
+### Phase 2 — LoRA-Feinabstimmung auf idhefix
 
 Daten wie v3: dieselbe Auswahl (5 Datasets, 13.929 Seiten nach #110), **derselbe
 Split** (seed 42, partition 0,9), damit jede Zahl direkt neben v3 steht.

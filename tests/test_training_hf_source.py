@@ -134,7 +134,7 @@ def test_hub_cache_dir_follows_HF_HOME(monkeypatch, tmp_path):
 
 
 def test_hub_cache_dir_defaults_to_the_standard_path(monkeypatch):
-    """No HF_HOME override: on asterAIx ~/.cache/huggingface/hub is a symlink to
+    """No HF_HOME override: on idhefix ~/.cache/huggingface/hub is a symlink to
     the research share, so the default IS the shared cache."""
     monkeypatch.delenv("HF_HOME", raising=False)
     assert hub_cache_dir(REPO).parts[-3:] == (".cache", "huggingface", "hub") + () or True

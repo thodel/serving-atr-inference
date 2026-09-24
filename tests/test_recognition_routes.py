@@ -2,7 +2,7 @@
 
 The kraken engine client is replaced with a fake on ``app.state.kraken_client``
 so /segment, /recognize, and the legacy /ocr alias are exercised end to end
-through FastAPI without kraken installed. Real kraken is validated on asterAIx.
+through FastAPI without kraken installed. Real kraken is validated on idhefix.
 """
 
 from __future__ import annotations

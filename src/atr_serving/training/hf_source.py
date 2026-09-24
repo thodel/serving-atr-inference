@@ -5,7 +5,7 @@ per-project parquet directories::
 
     data/<split>/<project_name>/<timestamp>-<shard>.parquet
 
-asterAIx has ~356 GB free, so a job that calls ``load_dataset(repo)`` without
+idhefix has ~356 GB free, so a job that calls ``load_dataset(repo)`` without
 ``data_files`` is not slow — it is a filled disk. Every selection therefore goes
 through :func:`data_files_for`, which refuses an empty selection outright.
 
@@ -481,7 +481,7 @@ def hub_cache_dir(hf_repo: str, hf_home=None):
     the hub itself uses, and the one ``lassberg/vlm_training`` checks with
     ``_repo_cache_dir`` — "same name = same dataset" is answered by the presence
     of that directory. We follow it rather than inventing a parallel copy: on
-    asterAIx ``~/.cache/huggingface/hub`` is a symlink to
+    idhefix ``~/.cache/huggingface/hub`` is a symlink to
     ``/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub``, so a dataset another
     project already pulled is simply there.
     """

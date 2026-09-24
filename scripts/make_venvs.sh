@@ -18,12 +18,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENVS="${ROOT}/.venvs"
-# asterAIx ships Python 3.12 only (no 3.11) — see docs/idhefix-environment.md
+# idhefix ships Python 3.12 only (no 3.11) — see docs/idhefix-environment.md
 PY="${PYTHON:-python3.12}"
 
 # pip stages a package's EXISTING files into TMPDIR before overwriting them, so a
 # TMPDIR on the research share breaks every *upgrade* while fresh installs keep
-# working — which is exactly how this presented on asterAIx (2026-08-07): 60-odd
+# working — which is exactly how this presented on idhefix (2026-08-07): 60-odd
 # packages installed fine, then `pip install -U pip` died with "OSError: [Errno 1]
 # Operation not permitted" uninstalling the bundled pip, and a later downgrade
 # died the same way on huggingface_hub. CIFS refuses the ownership work the
@@ -61,7 +61,7 @@ new_venv() {  # new_venv <name>
   echo "== $1 venv =="
   "${PY}" -m venv "${VENVS}/$1"
   # Best-effort. `python -m venv` already installs a working pip, so upgrading it
-  # is a convenience — and on asterAIx (2026-08-07) it failed with
+  # is a convenience — and on idhefix (2026-08-07) it failed with
   # "OSError: [Errno 1] Operation not permitted" while UNINSTALLING the bundled
   # pip 24.0, on ext4 with 662 GB free. Under `set -e` that aborted the whole
   # build before a single real dependency was installed. Whatever the cause, pip
