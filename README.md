@@ -22,6 +22,100 @@ A dependency-free **FastAPI gateway** routes to **isolated per-engine services**
 its own venv, because the engine families need mutually incompatible
 `torch`/`transformers` pins. `/train/*` is a thin proxy to the trainer on asteraix.
 
+## How it was conceived
+
+**The client contract came first.** Before this repository existed,
+`agentic_historian` already spoke to a small kraken service through
+`agent_a/kraken_client.py` — `/health`, `/models`, `/segment`, `/recognize`,
+`/ocr`, an `X-API-Key` header. The gateway was built to *satisfy that contract*
+rather than to replace it, which is why a client gained four engine families
+without changing a line.
+
+**One API over families that cannot share a process.** A vLLM wheel, kraken 7,
+a `VisionEncoderDecoderModel` and party pin mutually incompatible
+`torch`/`transformers` versions; `os-vlm-tester` spent its life discovering that.
+So each engine gets its own venv and its own service, and the gateway itself has
+**no ML dependencies at all** — it can be restarted, tested and reasoned about
+without a GPU, and an engine can be upgraded without touching the others.
+
+**Selection belongs to the caller.** The gateway knows which models it can run,
+not which model a 15th-century Kurrent page deserves. `config/models.yaml` is the
+single source of truth for the former, published at `GET /models` with scripts,
+languages, centuries and level; `agentic_historian`'s `model_selector.py` decides
+the latter against that live registry. A new model is a registry entry here, and
+nothing at all on the client side.
+
+**Residency is a scheduling problem, not a configuration.** Two A40s hold a small
+number of large VLMs, so models are lazy and evictable and the budget is
+inspectable (`GET /gpu`). It is also why a batch caller iterates model-major:
+page-major pays an evict-and-reload per page.
+
+**Fail loudly — a `200` must mean something.** `/ocr` never answers
+`200 {"text": ""}` because a model could not be loaded; an empty text with
+`lines: 0` means the page had no detected lines. An unknown id is a `404` that
+lists the known ones, a model that does not fit its card is a `503` naming free
+and needed MB, and an unreachable trainer is a `502` naming the URL — never a job
+id for a job that was never created. Three of seven engines once returned 500s in
+production while the registry claimed all seven (#21, #30, #32); every rule in
+this paragraph is a consequence.
+
+**Registered is not servable.** A trained model is registered `enabled: false`
+and advertised only after a real page has gone through the real engine — the
+promotion gate below. The same instinct applies to results: a job with no
+readable CER is failed, not completed.
+
+**Training was here, and then it was not.** Serving and training shared one box
+and one card until 16.09.2026, where a QLoRA run holding ~30 GB left vLLM 0.59 GB
+and killed it — which blocked *every* gateway VLM for the duration. Training now
+lives on its own machine in its own repository, and the only thing that crosses is
+HTTP.
+
+## Who calls this gateway
+
+```mermaid
+flowchart LR
+  subgraph tei["tei.dh.unibe.ch"]
+    bot["agentic_historian<br/>bot · batch runner"]
+    mcp["ATR-MCP<br/>/mcp/atr"]
+  end
+  subgraph idhefix["idhefix · 130.92.59.240 · 2× A40"]
+    gw["gateway :8200<br/>no ML deps"]
+    eng["kraken :8201 · trocr :8202<br/>party :8203 · vLLM :8210+"]
+  end
+  subgraph asteraix["asteraix · 130.92.59.242 · 2× A40"]
+    tr["atr-train :8204<br/>training-atr-models"]
+  end
+  share[("research share<br/>models.yaml · registry/trained · hf_hub")]
+  hf["🤗 dh-unibe"]
+
+  bot -->|"ATR_API_KEY · /models /ocr /recognize /segment"| gw
+  bot -->|"/train/* · read-only today"| gw
+  mcp -->|"ATR_API_KEY"| gw
+  gw --> eng
+  gw -->|"ATR_TRAIN_API_KEY · proxy"| tr
+  tr -->|"promotion gate · POST /ocr"| gw
+  gw -->|"publishes models.yaml"| share
+  tr -->|"registry/trained/ID.yaml · weights"| share
+  share -->|"trained registrations, no restart"| gw
+  hf --> eng
+  tr --> hf
+```
+
+| edge | who initiates | key | what it is |
+|---|---|---|---|
+| tei → `:8200` | `agentic_historian`, ATR-MCP | `ATR_API_KEY` | recognition, the live registry, `GET /gpu` |
+| tei → `:8200/train/*` | `agentic_historian` | `ATR_API_KEY` | job records, stage logs, `GET /train/gpu` — read-only from the bot today |
+| `:8200` → asteraix `:8204` | this gateway | `ATR_TRAIN_API_KEY` | the `/train/*` proxy; the trainer's allowlist admits idhefix and its own loopback |
+| asteraix → `:8200/ocr` | the trainer | `ATR_API_KEY` | the promotion gate: does the new model actually transcribe? |
+| share ↔ both | neither — a mounted filesystem | — | the curated registry out, trained registrations and weights in; the weights cross no network |
+
+Two consequences worth stating once. **The trainer is not reachable from tei**,
+by design: there is one door on `:8200` and one key per direction, so a leaked
+key opens one direction only. And **a model trained on Monday is routable on
+Tuesday without a deployment**: the trainer writes `registry/trained/ID.yaml` to
+the share, this gateway reads it (#138), and the caller's next `GET /models`
+shows it — provided the promotion gate passed.
+
 ## Status
 
 Serving runs on idhefix as `systemctl --user` units (`deploy/systemd/`). Training runs
