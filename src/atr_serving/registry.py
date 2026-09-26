@@ -17,6 +17,54 @@ from pydantic import BaseModel, Field, model_validator
 Engine = Literal["vllm", "trocr", "kraken", "party"]
 
 
+class VramMeasurement(BaseModel):
+    """What one warm vLLM actually held, and under which conditions (#130).
+
+    ``vram_mb`` is an input to arithmetic — :func:`atr_serving.manager.plan_gpu_budget`
+    multiplies it by 1.6 to size every launch. This is an observation. They are
+    kept apart because a number somebody guessed and a number somebody measured
+    have to be distinguishable at a glance, and until #130 they were not: the
+    registry carried one blanket comment saying every value was rough, which
+    stayed true and stopped being read.
+
+    **What ``total_mib`` is not.** ``nvidia-smi --query-compute-apps`` against a
+    running vLLM reports what the process was *granted*, not what it needs: vLLM
+    claims ``gpu_memory_utilization`` of the card and fills the remainder with KV
+    cache. Measuring only that would produce a number that moves with the
+    launcher's own arithmetic — a circle. The figure that belongs in ``vram_mb``
+    is :attr:`weights_mib`, which is fixed by the checkpoint, and the figure that
+    calibrates the 1.6 multiplier is :attr:`kv_cache_mib` beside it.
+    """
+
+    #: ``nvidia-smi`` against the vLLM pid and its descendants once the model is
+    #: warm. A cross-check on the grant, not a requirement — see the class note.
+    total_mib: int
+    #: The checkpoint on the card, from vLLM's own memory-profiling line. This is
+    #: what ``vram_mb`` should equal. None when the log carried no line this
+    #: version knows how to read: a wording we cannot parse is not a licence to
+    #: invent a split.
+    weights_mib: int | None = None
+    #: What was left for the KV cache at this ``max_model_len``. Divided by
+    #: :attr:`weights_mib` it is the real multiplier, against the 1.6 that
+    #: ``manager.KV_HEADROOM`` guesses from one model.
+    kv_cache_mib: int | None = None
+    #: The two settings without which the numbers above describe nothing
+    #: repeatable. ``max_model_len`` decides the KV cache; the utilisation
+    #: decides how much room there was for one.
+    max_model_len: int | None = None
+    gpu_memory_utilization: float | None = None
+    #: Where and when. An A40 measurement does not transfer to another card, and
+    #: a merged checkpoint can be re-merged.
+    host: str
+    measured_at: str
+    #: The card index the measurement ran on, for the same reason.
+    gpu: int | None = None
+    #: Free text from the operator — a re-merge, a vLLM upgrade, anything that
+    #: explains a number that does not match its neighbours.
+    note: str | None = None
+
+
+
 class ModelSpec(BaseModel):
     id: str
     engine: Engine
@@ -43,6 +91,13 @@ class ModelSpec(BaseModel):
     scripts: list[str] = Field(default_factory=list)
     centuries: list[int] = Field(default_factory=list)
     vram_mb: int = 0
+    #: The measurement behind ``vram_mb``, when there is one (#130). Absent means
+    #: the value was estimated and never checked against a card — which is the
+    #: honest reading of every entry written before this field existed, and the
+    #: reason it defaults to None rather than to a plausible-looking record.
+    #: ``scripts/measure_vram.py`` produces it; ``--check`` fails when a measured
+    #: model has outgrown the budget its ``vram_mb`` buys it.
+    vram_measured: VramMeasurement | None = None
     #: Tokens this model may generate per call. None = the level's default from
     #: settings. Declared per model because a page of Hebrew and a page of Kurrent
     #: are not the same length, and because a global that suits one of them
