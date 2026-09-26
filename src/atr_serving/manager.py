@@ -209,6 +209,39 @@ def plan_gpu_budget(
     return Budget(utilisation, reason)
 
 
+def vram_provenance(spec: ModelSpec) -> str:
+    """Where ``spec.vram_mb`` came from, as the launch log should say it (#130).
+
+    The sizing line is the one place a human sees this number in anger, and until
+    now it read the same whether the value had been measured on this card or
+    typed from memory. Both failures the estimate causes are quiet — too low and
+    vLLM dies a minute in computing a KV cache, too high and a resident model is
+    evicted for nothing — so the line has to carry its own provenance rather than
+    send the reader to a YAML comment.
+    """
+    measured = spec.vram_measured
+    if measured is None:
+        return "vram_mb is an estimate, never measured (#130)"
+    where = f"measured {measured.measured_at} on {measured.host}"
+    if measured.weights_mib is None:
+        return where
+    drift = measured.weights_mib - spec.vram_mb
+    if abs(drift) <= VRAM_DRIFT_TOLERANCE_MB:
+        return f"{where}: {measured.weights_mib} MiB of weights"
+    # The registry says one thing and the card said another. Not an error here —
+    # refusing a launch over a stale registry entry would ground the host — but
+    # the sentence has to name it, because the arithmetic above used the stale
+    # number.
+    return (f"{where}: {measured.weights_mib} MiB of weights, "
+            f"{drift:+d} MiB against the registry's {spec.vram_mb}")
+
+
+#: How far ``vram_mb`` may sit from the measured weights before the launch line
+#: calls it out. A merge writes slightly different padding run to run; 256 MiB is
+#: below what the 1.6 multiplier absorbs and above that noise.
+VRAM_DRIFT_TOLERANCE_MB = 256
+
+
 def gpu_budget(spec: ModelSpec, gpu: int, settings: Settings) -> Budget:
     """:func:`plan_gpu_budget` against the live card, with every way out.
 
@@ -236,10 +269,11 @@ def gpu_budget(spec: ModelSpec, gpu: int, settings: Settings) -> Budget:
         raise ManagerError(
             f"{spec.id} needs at least {int(spec.vram_mb * MIN_HEADROOM)} MiB on gpu "
             f"{gpu}, which has {free_mb} of {total_mb} MiB free "
-            f"(reserving {settings.vllm_vram_reserve_mb} MiB). Free the card — "
+            f"(reserving {settings.vllm_vram_reserve_mb} MiB; "
+            f"{vram_provenance(spec)}). Free the card — "
             "`GET /gpu` names what is holding it — or evict a resident model."
         )
-    return budget
+    return Budget(budget.utilisation, f"{budget.reason} [{vram_provenance(spec)}]")
 
 
 @dataclass(frozen=True)
