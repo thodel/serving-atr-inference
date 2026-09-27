@@ -623,13 +623,14 @@ def test_the_share_table_names_every_reader_the_code_has():
 
 
 def test_every_registry_source_is_named():
-    """The gateway reads three registry sources; the doc lists all three, with
-    the paths the settings really use."""
+    """The gateway reads two registry sources, and the doc lists both with the
+    paths the settings really use — plus the retired overlay, which is listed
+    because the file is still on disk on any box that ever trained (#143)."""
     section = _section(INFRA.read_text(encoding="utf-8"), "The research share")
     fields = Settings.model_fields
     expected = {
         "curated": fields["models_config"].default.relative_to(REPO).as_posix(),
-        "legacy overlay": fields["models_overlay"].default.relative_to(REPO).as_posix(),
+        "legacy overlay": "config/models.local.yaml",
         "trained": f"registry/{TRAINED_DIRNAME}/ID.yaml",
     }
     rows = {r[0]: r for r in _table_rows(section)}
@@ -757,3 +758,15 @@ def test_the_firewall_block_admits_every_caller_of_the_gateway():
     assert not unknown, f"callers of :8200 this test does not know how to check: {unknown}"
     missing = sorted(c for c in callers if not admitted[c])
     assert not missing, f"docs/DEPLOY.md §6 has no ufw rule for: {missing}"
+
+
+def test_the_retired_overlay_is_not_read_by_default():
+    """The setting is the retirement. A default that points at a file would put
+    the eleven duplicate registrations back (#143)."""
+    assert Settings.model_fields["models_overlay"].default is None
+
+
+def test_the_doc_says_the_overlay_is_no_longer_read():
+    section = _section(INFRA.read_text(encoding="utf-8"), "The research share")
+
+    assert "no longer read" in section

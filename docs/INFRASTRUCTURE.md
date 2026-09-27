@@ -375,24 +375,31 @@ progress looks exactly like an orphan.
 
 ### Where a model is registered
 
-The gateway builds its registry from three sources. Only the second is on the share.
+The gateway builds its registry from two sources. Only the second is on the share.
 
 | source | where | written by | when the gateway notices a change |
 |---|---|---|---|
 | curated | `config/models.yaml`, in git on idhefix | a commit. A new vLLM entry also needs `scripts/download_models.py`, and a LoRA adapter `scripts/merge_loras.py` ([`DEPLOY.md` §4](DEPLOY.md#4-prefetch-model-weights-and-merge-vllm-lora-adapters)) | only at a restart of `atr-gateway`, which drops the resident vLLM models |
 | trained | `registry/trained/ID.yaml` on the share | the trainer, or `python -m atr_training.registration` on asteraix | at the next look at the share, without a restart |
-| legacy overlay | `config/models.local.yaml` on idhefix, gitignored | the retired in-repo trainer, until 16.09. | at the next look, like `trained/` |
+| legacy overlay | `config/models.local.yaml` on idhefix, gitignored | the retired in-repo trainer, until 16.09.2026 | **nothing — it is no longer read** |
 
-**The legacy overlay is still read.** On 16.09. it held 11 registrations from the old
-trainer, all `enabled: false`, and their weights are already on the share (#143).
-#143 moves them to `registry/trained/` with the same writer; a follow-up named there
-then stops the gateway from reading the file. Until then:
+**The legacy overlay is retired.** It held 11 registrations from the trainer that ran
+on this box, all `enabled: false`. That trainer was stopped and disabled on 16.09.2026
+(#137/#139), the 11 entries were migrated into `registry/trained/` on 21.09.2026, and
+from then until the follow-up the gateway logged "registered twice" for every one of
+them — two records of the same eleven models, one of them inert. `Settings.models_overlay`
+is now `None` and nothing reads the file (#143).
 
-- An id in both the overlay and `trained/` is served from `trained/`, and the gateway
-  logs the collision.
-- An overlay id that is also a curated id stops the gateway from starting. On a
-  reload, the same clash is logged and the previous registry stays in service.
-- `scripts/merge_loras.py` reads all three sources, disabled entries included.
+- The file is gitignored, so it is still in the checkout of any box that ever trained.
+  When it is on disk and not being read, the gateway says so once at startup, naming
+  the file and where its registrations belong now.
+- Setting `ATR_MODELS_OVERLAY` to a path reads it again, exactly as before — for a
+  deployment that still has a local trainer. The precedence rules then apply
+  unchanged: an id in both the overlay and `trained/` is served from `trained/` with
+  the collision logged, and an overlay id that is also a curated id stops the gateway
+  from starting (on a reload it is logged and the previous registry stays in service).
+- `scripts/merge_loras.py` reads whatever sources are configured, disabled entries
+  included.
 
 ### CIFS rules, each one learned the hard way
 
@@ -641,7 +648,7 @@ checked for v5 on 16.09.
 
 | event | survives | ends |
 |---|---|---|
-| restart of `atr-gateway` | the curated registry (read again from the checkout and published again), the trained registrations (read again from the share) and the legacy overlay `config/models.local.yaml` (read again; an overlay id that is also curated stops the start) | resident vLLM models (the next request reloads them, about 45 s for the 4B xix); requests in flight; a kraken job's promotion gate, if one is running: it fails without a retry, the model stays disabled, and the job's `promotion_reason` names the connection error ([what to do](#when-the-gate-did-not-promote-a-model)) |
+| restart of `atr-gateway` | the curated registry (read again from the checkout and published again) and the trained registrations (read again from the share). The legacy overlay is not read at all any more; if the file is still on disk, the start says so once | resident vLLM models (the next request reloads them, about 45 s for the 4B xix); requests in flight; a kraken job's promotion gate, if one is running: it fails without a retry, the model stays disabled, and the job's `promotion_reason` names the connection error ([what to do](#when-the-gate-did-not-promote-a-model)) |
 | restart of `atr-train` | running jobs (`KillMode=process`) and every job record | nothing that is running; at startup the service reconciles its own jobs and cleans up orphaned weights under the conditions [above](#who-writes-and-who-reads-what) |
 | reboot of either host | every enabled unit comes back (`WantedBy=default.target`, linger on) | everything that ran. The retired `atr-train` on idhefix stays down: it is disabled and its unit file has been moved away |
 | the share goes away | the gateway keeps serving the registrations it has read. A gateway that starts during the outage serves the curated models after at most 10 s and publishes `models.yaml` once the share returns | requests for trained models whose weights cannot be opened; the stage logs, which live on the share (#134) |
