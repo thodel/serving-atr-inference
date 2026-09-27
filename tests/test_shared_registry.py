@@ -724,7 +724,10 @@ def test_the_trainers_gate_passes_through_the_gateway(curated, share, tmp_path, 
     register(share, "kraken-fresh", enabled=False)
     client = gate_client(curated, share)
     page = tmp_path / "page.jpg"
-    page.write_bytes(b"\xff\xd8-fake")
+    # A real JPEG signature is FF D8 FF; this stand-in carried only the first two
+    # bytes and so was never a JPEG. Nothing noticed, because nothing looked —
+    # which is the failure #174 is about, one layer down.
+    page.write_bytes(b"\xff\xd8\xff-fake")
     monkeypatch.setattr(httpx, "post", lambda url, **kw: client.post(
         url.removeprefix("http://gateway:8200"),
         headers=kw["headers"], files=kw["files"], data=kw["data"]))

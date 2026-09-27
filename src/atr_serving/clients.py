@@ -22,7 +22,25 @@ from atr_serving.api.schemas import Line, RecognitionResult, SegmentResponse
 
 
 class EngineError(Exception):
-    """Raised when an engine service is unreachable or returns an error."""
+    """Raised when an engine service is unreachable or returns an error.
+
+    ``status_code`` is the engine's **own** status when it answered at all, and
+    None when it never did — unreachable, or a timeout. That distinction is the
+    whole of #174: every engine failure used to reach the caller as a 502, which
+    means "the service behind me is broken, try again". So a batch retried a PDF
+    that kraken had correctly rejected with 400 ("unsupported image: cannot
+    identify image file"), twice with backoff, eleven times in one run, and
+    charged each one to the model.
+
+    Same shape as :class:`TrainerError` below, and for the reason its docstring
+    gives: an engine's 4xx is *actionable* — it describes the request — and
+    collapsing it into a 502 throws away the part that tells the caller what to
+    fix, and tells them to do the one thing that cannot help.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class KrakenEngineClient:
@@ -58,7 +76,8 @@ class KrakenEngineClient:
             raise EngineError(f"kraken engine unreachable at {url}: {exc}") from exc
         if resp.status_code >= 400:
             raise EngineError(
-                f"kraken engine error {resp.status_code} at {url}: {resp.text}"
+                f"kraken engine error {resp.status_code} at {url}: {resp.text}",
+                status_code=resp.status_code,
             )
         return resp.json()
 
@@ -161,7 +180,9 @@ class EngineHTTPClient:
         except httpx.RequestError as exc:
             raise EngineError(f"{self.engine} engine unreachable at {url}: {exc}") from exc
         if resp.status_code >= 400:
-            raise EngineError(f"{self.engine} engine error {resp.status_code} at {url}: {resp.text}")
+            raise EngineError(
+                f"{self.engine} engine error {resp.status_code} at {url}: {resp.text}",
+                status_code=resp.status_code)
         return coerce_result(resp.json(), self.engine, model)
 
 
@@ -201,7 +222,8 @@ class VllmClient:
         except httpx.RequestError as exc:
             raise EngineError(f"vLLM unreachable at {url}: {exc}") from exc
         if resp.status_code >= 400:
-            raise EngineError(f"vLLM error {resp.status_code} at {url}: {resp.text}")
+            raise EngineError(f"vLLM error {resp.status_code} at {url}: {resp.text}",
+                              status_code=resp.status_code)
         return resp.json()
 
     async def transcribe_image_detail(
