@@ -7,7 +7,21 @@
 #
 # residency:  pinned = always resident; lazy = load on first request, LRU-evict.
 # gpu_affinity: fixed GPU index, or null = ModelManager decides.
-# NOTE: vram_mb values are rough estimates — refine after Phase 3 measurements.
+# vram_mb: the weights, in MiB. Since #127 it sizes every vLLM launch —
+#   `--gpu-memory-utilization = min(vram_mb x 1.6, free - 2048) / total` — so a
+#   wrong value fails in both directions: too low and vLLM dies computing a KV
+#   cache a minute into the load, too high and a launch is refused or a resident
+#   model evicted for nothing.
+#
+#   Every value below was estimated, none measured (#130). An entry that HAS been
+#   measured carries `vram_measured:` beside it, with the host and date; absence
+#   of that block means the number is somebody's guess. Measure one with
+#
+#       python scripts/measure_vram.py --model <id> --write
+#
+#   on the serving box, against the running gateway. `--report` shows what is
+#   measured so far; `--check` (also a test) fails when a measured entry and its
+#   vram_mb have drifted apart.
 #
 # idhefix placement (see docs/idhefix-environment.md): GPU 0 is SHARED with a
 # live RAG service (~10 GB), GPU 1 is free. Default everything to GPU 1; the

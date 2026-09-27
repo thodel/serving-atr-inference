@@ -189,7 +189,28 @@ The launcher therefore computes the fraction for each launch, from the registry'
 `min(vram_mb × 1.6, free − 2048 MiB) / total`, rounded down to two decimals
 
 The ×1.6 covers the KV cache, activation scratch space and CUDA graphs, which
-`vram_mb` does not include. The 2048 MiB stays with the card. Every launch logs the
+`vram_mb` does not include. Both numbers are estimates: the ×1.6 was fitted to
+one model, and no `vram_mb` in the registry was ever measured against a card
+(#130). `scripts/measure_vram.py` is how one gets measured —
+
+```bash
+python scripts/measure_vram.py --model qwen3vl-german-xix-v1 --write
+python scripts/measure_vram.py --report      # what is measured so far
+```
+
+It warms the model through `POST /recognize`, reads the resident total from
+`GET /gpu`, and takes the weights/KV split from vLLM's own memory-profiling line
+in the gateway's journal. The split is what matters: `nvidia-smi` alone reports
+what vLLM was *granted* by the arithmetic above, not what it needs, so feeding
+that back into `vram_mb` would close a circle rather than measure anything. A
+measured entry carries `vram_measured:` in `config/models.yaml`, and the launch
+line then says so:
+
+```
+vLLM qwen3vl-german-xix-v1 gpu budget: 0.42 = 19200 of 45516 MiB
+  (12000 MiB weights x 1.6 for KV cache), 31047 MiB free
+  [measured 2026-09-26 on idhefix: 8521 MiB of weights, -3479 MiB against the registry's 12000]
+``` The 2048 MiB stays with the card. Every launch logs the
 number and the arithmetic behind it:
 
 ```

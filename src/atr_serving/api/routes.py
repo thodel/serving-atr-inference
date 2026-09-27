@@ -34,6 +34,7 @@ from atr_serving.api.schemas import (
     SegmentResponse,
 )
 from atr_serving.clients import EngineError, get_engine_client, get_kraken_client, get_vllm_client
+from atr_serving.image_io import validate_format
 from atr_serving.config import Settings
 from atr_serving.manager import GpuBusyError, ManagerError, vllm_pids, vram_budget
 from atr_serving.pipeline import (
@@ -359,7 +360,60 @@ async def segment(
             mode=seg_mode or mode,
         )
     except EngineError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise _engine_http_error(exc) from exc
+
+
+#: An engine's 4xx that must NOT reach the caller as itself. Authentication
+#: between the gateway and an engine on 127.0.0.1 is the deployment's business;
+#: a 401 or 403 arriving at a client means "your API key is wrong", which would
+#: be a false accusation and send them to fix the one thing that is fine. A
+#: broken deployment is genuinely "the service behind me is unwell" — 502.
+_ENGINE_AUTH_STATUSES = frozenset({401, 403, 407})
+
+
+def _engine_http_error(exc: EngineError) -> HTTPException:
+    """An engine failure as the status the caller should act on (#174).
+
+    Every engine failure used to be a 502, and 502 means "try again". kraken
+    answered 400 to a PDF — correctly, it is not an image — the gateway said 502,
+    and the batch retried it twice with backoff before counting it as a failed
+    page against the model. Eleven times in one run, none of them a page.
+
+    So: the engine answered with a 4xx, the caller gets a 4xx, because the
+    request is what is wrong and repeating it cannot help. The engine answered
+    5xx, or never answered at all, and it stays a 502 — that is what a 502 is
+    for.
+    """
+    status = exc.status_code
+    if status is not None and 400 <= status < 500 and status not in _ENGINE_AUTH_STATUSES:
+        return HTTPException(status_code=status, detail=str(exc))
+    return HTTPException(status_code=502, detail=str(exc))
+
+
+def _require_image(raw: bytes, filename: str) -> None:
+    """Refuse anything that is not an image, before an engine is asked (#174).
+
+    The magic bytes, not the extension and not the content type: the eleven
+    failures of 2026-09-21 were PDFs that a corpus walk had listed as pages, and
+    they arrived with whatever the uploader happened to say.
+
+    415 rather than 400, because the request is well-formed and the *medium* is
+    the problem, and a caller can tell those apart without reading prose.
+
+    ``validate_format`` raises the **builtin** ``ValueError``. There is no symbol
+    called ``ValueError`` in :mod:`atr_serving.image_io` to import, and trying to
+    import one makes this module unimportable — which stops the application from
+    starting at all. It is caught here, not imported.
+    """
+    try:
+        validate_format(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=415,
+            detail=(f"{filename}: not an image the gateway can read. {exc} "
+                    "A PDF is a container of pages, not a page — render it to "
+                    "images before sending it."),
+        ) from exc
 
 
 async def _party_second_opinion(request: Request, engine: str, raw: bytes,
@@ -431,6 +485,7 @@ async def recognize(
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
+    _require_image(raw, filename)
 
     # Each engine wants a different model reference: kraken/party download by
     # Zenodo DOI, trocr loads by HF repo, vllm uses the registry id (= its
@@ -505,7 +560,7 @@ async def recognize(
                 )
             )
     except EngineError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise _engine_http_error(exc) from exc
     finally:
         # A request that failed, or an engine that never reached the attach step,
         # must not leave the party call running: the task would outlive the
@@ -551,6 +606,9 @@ async def ocr(
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
+    # Before the party task, not after: a second opinion is an engine call too,
+    # and "no engine sees a PDF" has to mean none of them.
+    _require_image(raw, filename)
     # Concurrent with the engine below — see /recognize for why it is a task.
     party_task = asyncio.ensure_future(
         _party_second_opinion(request, engine, raw, filename, ctype)
@@ -573,7 +631,7 @@ async def ocr(
         second = await _second_opinion_within(
             party_task, _settings(request).party_second_opinion_grace_s)
     except EngineError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise _engine_http_error(exc) from exc
     finally:
         if not party_task.done():
             party_task.cancel()
@@ -599,4 +657,4 @@ async def chat_completions(request: Request) -> dict:
     try:
         return await _vllm_client(request, port).chat(body)
     except EngineError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise _engine_http_error(exc) from exc

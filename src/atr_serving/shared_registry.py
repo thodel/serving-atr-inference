@@ -21,9 +21,14 @@ What moving the handover to a file costs, and how this module pays for it:
 * **Reload lags.** :class:`RegistryWatch` notices a change by a per-file
   signature, throttled; the CIFS attribute cache adds its own delay on top. At
   the end of a 24-hour run neither matters.
-* **The transition.** The old trainer on idhefix still registers into the local
-  overlay (``config/models.local.yaml``) and will until it is retired, so that
-  file is read as well. When one id is in both, the shared registration wins.
+* **The transition, now over.** The old trainer on idhefix registered into the
+  local overlay (``config/models.local.yaml``), and this module read it as well
+  until that trainer was retired. It was: stopped on 16.09.2026, its eleven
+  entries migrated into ``trained/`` on 21.09.2026 (#143). ``Settings.models_overlay``
+  is None from then on and nothing reads the file. The precedence rule for an id
+  in both — the shared registration wins — is kept below, because a deployment
+  that points the setting at its own local trainer's file gets the old behaviour
+  back unchanged.
 """
 
 from __future__ import annotations
@@ -425,12 +430,14 @@ class RegistryWatch:
     #: mount does not answer at all.
     startup_wait_s = 10.0
 
-    def __init__(self, tracked: Registry, *, root: str | Path, overlay: str | Path,
+    def __init__(self, tracked: Registry, *, root: str | Path,
+                 overlay: str | Path | None = None,
                  source: str | Path | None = None, interval_s: float = 5.0,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.tracked = tracked
         self.root = Path(root)
-        self.overlay = Path(overlay)
+        #: None = the retired local overlay is not read at all (#143).
+        self.overlay = Path(overlay) if overlay else None
         self.source = source
         self.interval_s = interval_s
         self.clock = clock
@@ -444,6 +451,17 @@ class RegistryWatch:
         self._published = False
         self._thread: threading.Thread | None = None
 
+    def _local(self) -> list[ModelSpec]:
+        """The local overlay's registrations, or none because it is retired (#143).
+
+        Its writer — the trainer on idhefix — was stopped on 16.09.2026 and its
+        entries migrated to the shared registry on 21.09.2026, after which every
+        one of them was read twice and the local copy ignored. An empty list here
+        is the whole retirement: the precedence rules below are unchanged, they
+        simply have nothing local left to prefer against.
+        """
+        return [] if self.overlay is None else load_overlay(self.overlay)
+
     def initial(self) -> Registry:
         """The registry to serve before the share has been looked at.
 
@@ -451,7 +469,7 @@ class RegistryWatch:
         #138: it is on the local disk, and a broken one stopped the start then
         too. Only the shared side is forgiving.
         """
-        trained = _trained(self.tracked, load_overlay(self.overlay), [])
+        trained = _trained(self.tracked, self._local(), [])
         registry = merge(self.tracked, trained)
         self._candidates = _awaiting_the_gate(trained)
         return registry
@@ -504,7 +522,8 @@ class RegistryWatch:
             raise
 
     def _current_signature(self) -> tuple[Signature, tuple[int, int] | None]:
-        return trained_signature(self.root), _stat_key(self.overlay)
+        return (trained_signature(self.root),
+                None if self.overlay is None else _stat_key(self.overlay))
 
     def _read_shared(self) -> tuple[list[ModelSpec], bool]:
         """The shared registrations to serve, and whether every file was read."""
@@ -566,7 +585,7 @@ class RegistryWatch:
                 # and one that cannot compares equal and stays quiet.
                 self._signature = (None, signature[1])
             try:
-                trained = _trained(self.tracked, load_overlay(self.overlay), shared)
+                trained = _trained(self.tracked, self._local(), shared)
                 registry = merge(self.tracked, trained)
             except Exception as exc:  # noqa: BLE001 — a reload must never take serving down
                 logger.error("Registry reload failed ({}: {}); still serving the previous "

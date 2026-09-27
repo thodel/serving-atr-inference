@@ -41,16 +41,28 @@ class Settings(BaseSettings):
 
     # ── Registry ──────────────────────────────────────────────────────────
     models_config: Path = REPO_ROOT / "config" / "models.yaml"
-    #: Locally trained models, written by the trainer's register stage and
-    #: **gitignored** — the tracked registry above stays a reviewed artifact. Only
-    #: entries the promotion gate has proven servable (``enabled: true``) are
-    #: merged; a missing file is the normal state of a box that has not trained.
-    models_overlay: Path = REPO_ROOT / "config" / "models.local.yaml"
+    #: The **retired** local overlay, ``config/models.local.yaml`` (#143).
+    #:
+    #: It was how the trainer on this box handed a freshly trained model to the
+    #: gateway, before training moved to asteraix (#137/#139) and registrations
+    #: moved to the shared registry on the research share (#138). Its writer has
+    #: been stopped and disabled since 16.09.2026, and its eleven entries were
+    #: migrated into ``<registry_root>/trained/`` on 21.09.2026 — after which the
+    #: gateway logged "registered twice" for every one of them, serving the
+    #: shared registration and ignoring the local copy. Two records of the same
+    #: eleven models, one of them inert.
+    #:
+    #: So: None, and nothing reads it. The setting stays rather than the code
+    #: path being deleted, because a deployment that still has a local trainer
+    #: can point at its file; set it and the old behaviour is back, unchanged.
+    #: When it is None and the file is nevertheless on disk, the gateway says so
+    #: once at startup — an operator whose model "disappeared" should not have to
+    #: guess where it went.
+    models_overlay: Path | None = None
     #: The registry directory on the research share (#138), e.g.
     #: ``/mnt/wbkolleg_dh_1/Textrecognition_Training/registry``. The gateway
     #: publishes ``models_config`` there as ``models.yaml`` on startup and serves
-    #: the trainer's ``trained/<id>.yaml`` alongside ``models_overlay``, reloading
-    #: both without a restart. None = off, and the gateway reads exactly what it
+    #: the trainer's ``trained/<id>.yaml`` from it, reloading without a restart. None = off, and the gateway reads exactly what it
     #: read before. The trainer's ``ATR_TRAIN_MODELS_CONFIG`` must name
     #: ``<this>/models.yaml`` — one more value the two machines have to agree on.
     #:

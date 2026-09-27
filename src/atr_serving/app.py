@@ -12,6 +12,7 @@ from atr_serving.api.routes import router
 from atr_serving.api.train_routes import router as train_router
 from atr_serving.config import (
     DEFAULT_INSECURE_KEY,
+    REPO_ROOT,
     Settings,
     get_settings,
     is_loopback_url,
@@ -43,6 +44,32 @@ def _check_auth_hardening(settings: Settings) -> None:
         )
 
 
+#: Where the retired local overlay used to live, for the one log line below.
+RETIRED_OVERLAY = REPO_ROOT / "config" / "models.local.yaml"
+
+
+def _warn_if_the_retired_overlay_is_still_there(settings: Settings) -> None:
+    """Say once that the file on disk is no longer read (#143).
+
+    The overlay was how the trainer on this box handed over a model until it was
+    retired; its entries now live in the shared registry. The file is gitignored,
+    so it is still sitting in the checkout of every box that ever trained — and a
+    model that used to be served from it now simply is not, with nothing said.
+    That is the kind of silence this codebase keeps finding in its own history,
+    so: name the file, name what to do.
+    """
+    if settings.models_overlay is not None:
+        return
+    if not RETIRED_OVERLAY.is_file():
+        return
+    logger.warning(
+        "{} is no longer read: the local overlay was retired with the trainer "
+        "that wrote it (#143), and its registrations belong in the shared "
+        "registry under {}. Nothing on this box serves from it. Delete it, or "
+        "set ATR_MODELS_OVERLAY to read it again.",
+        RETIRED_OVERLAY, settings.registry_root or "<registry_root, unset>")
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     registry: Registry = load_registry(settings.models_config)
@@ -54,8 +81,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # when two sets of weights answer to one name you cannot tell which one
     # transcribed a page, which is #30/#31 with extra steps.
     watch: RegistryWatch | None = None
+    _warn_if_the_retired_overlay_is_still_there(settings)
     if settings.registry_root is None:
-        trained = load_overlay(settings.models_overlay)
+        trained = load_overlay(settings.models_overlay) if settings.models_overlay else []
         if trained:
             tracked = len(registry)
             registry = merge(registry, trained)
