@@ -366,3 +366,71 @@ def test_the_wait_is_longer_than_the_share_look_it_waits_out():
     from atr_serving.shared_registry import RegistryWatch
 
     assert mv.GATEWAY_WAIT_S > RegistryWatch.startup_wait_s
+
+
+# ── the warm request has to match the endpoint it calls ─────────────────────
+def test_the_warm_request_is_accepted_by_the_real_recognize_route(monkeypatch):
+    """The field is `image`, because that is what `routes.recognize` declares.
+
+    It was `file`, and the live gateway answered 422 to every warm request —
+    `{"loc": ["body", "image"], "msg": "Field required"}`. A client written
+    without reading the endpoint it calls. Driven through the real app here, so
+    the two cannot drift apart again: a wrong field name is a 422 and this test
+    goes red, whatever the engine behind it does.
+    """
+    from fastapi.testclient import TestClient
+
+    from atr_serving.app import create_app
+    from atr_serving.clients import EngineError
+
+    reached: list[str] = []
+
+    class _Engine:
+        def __getattr__(self, name):
+            async def _record(*args, **kwargs):
+                reached.append(name)
+                raise EngineError("no engine is wired in this test")
+            return _record
+
+    app = create_app()
+    for factory in ("_kraken_client", "_vllm_client", "_engine_client"):
+        monkeypatch.setattr(f"atr_serving.api.routes.{factory}",
+                            lambda *a, **k: _Engine(), raising=False)
+    async def _no_second_opinion(*args, **kwargs):
+        return None                      # the route wraps this in ensure_future
+
+    monkeypatch.setattr("atr_serving.api.routes._party_second_opinion",
+                        _no_second_opinion, raising=False)
+
+    client = TestClient(app)
+    key = getattr(app.state.settings, "api_key", None)
+    client.headers.update({"X-API-Key": key} if key else {})
+
+    try:
+        mv.warm(client, "kraken-catmus-medieval")
+    except SystemExit as exc:
+        assert "422" not in str(exc), f"the warm request was malformed: {exc}"
+
+    assert reached, "the request never reached an engine — it was rejected first"
+
+
+def test_the_warm_page_is_not_blank():
+    """A `level: line` model reads what kraken segmented, so a blank page would
+    reach the engine zero times. Residency — which is what the measurement needs
+    — happens either way, but a warm request that warms nothing is a poor name."""
+    import io
+
+    from PIL import Image
+
+    sent: dict = {}
+
+    class _Capture:
+        def post(self, path, files=None, data=None, **kw):
+            sent["bytes"] = files["image"][1].read()
+            return _Answer(200)
+
+    mv.warm(_Capture(), "any-model")
+
+    with Image.open(io.BytesIO(sent["bytes"])) as page:
+        colours = {c for _n, c in page.convert("RGB").getcolors(maxcolors=100000)}
+    assert (0, 0, 0) in colours, "nothing for the segmenter to find"

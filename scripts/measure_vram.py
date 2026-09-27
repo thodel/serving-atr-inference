@@ -258,22 +258,38 @@ def wait_for_gateway(client, timeout: float = GATEWAY_WAIT_S) -> None:
 
 
 def warm(client, model_id: str) -> None:
-    """Make the model resident by asking it to read one small image.
+    """Make the model resident by sending one small page through ``/recognize``.
 
-    A recognition rather than a bare load: the KV cache is allocated when the
-    engine starts, but CUDA graphs are captured on the first real forward pass,
-    and those are inside the same allocation `vram_mb` is meant to cover.
+    What this does and does not achieve, because the first live run made the
+    difference matter: ``_ensure_vllm_port`` runs **before** any segmentation, so
+    the model becomes resident whatever the image contains — and residency is
+    what the measurement needs, since vLLM allocates the weights and sizes the KV
+    cache while its engine starts.
+
+    A ``level: line`` model then reads whatever kraken segmented, so a blank page
+    would reach the engine zero times. The bars below are there to give the
+    segmenter something to find; if it finds nothing the measurement still holds,
+    it is only missing a forward pass.
+
+    **The field is ``image``**, which is what `routes.recognize` declares
+    (``image: UploadFile = File(...)``). It was ``file`` here, and the gateway
+    answered 422 to every warm request — a client written without reading the
+    endpoint it calls.
     """
     import io
 
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
+    page = Image.new("RGB", (900, 300), "white")
+    draw = ImageDraw.Draw(page)
+    for top in (60, 130, 200):                  # three dark bars: no font needed
+        draw.rectangle([80, top, 820, top + 18], fill="black")
     buf = io.BytesIO()
-    Image.new("RGB", (512, 64), "white").save(buf, format="PNG")
+    page.save(buf, format="PNG")
     buf.seek(0)
     response = client.post(
         "/recognize",
-        files={"file": ("warm.png", buf, "image/png")},
+        files={"image": ("warm.png", buf, "image/png")},
         data={"model": model_id},
     )
     if response.status_code >= 400:
