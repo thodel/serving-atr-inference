@@ -302,3 +302,67 @@ def test_a_checkout_without_the_gateway_package_still_reports(monkeypatch):
 
     assert url == "http://127.0.0.1:8200"
     assert key is None
+
+
+# ── the gateway is not up the instant it is restarted ───────────────────────
+class _Gateway:
+    """A client double that refuses for `refusals` calls, then answers."""
+
+    def __init__(self, refusals: int, base_url: str = "http://127.0.0.1:8200") -> None:
+        self.refusals = refusals
+        self.base_url = base_url
+        self.calls = 0
+
+    def get(self, path, **kwargs):
+        import httpx
+        self.calls += 1
+        if self.calls <= self.refusals:
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+        return _Answer(200)
+
+
+class _Answer:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+def test_a_gateway_that_is_still_starting_is_waited_for(monkeypatch):
+    """`create_app` blocks on the share for up to 10 s and uvicorn binds only
+    after that, so the documented order — restart, then measure — meets a
+    refused connection. The first live run died on exactly this."""
+    monkeypatch.setattr(mv.time, "sleep", lambda _s: None)
+    gateway = _Gateway(refusals=3)
+
+    mv.wait_for_gateway(gateway, timeout=60)
+
+    assert gateway.calls == 4
+
+
+def test_a_gateway_that_never_comes_up_says_so_rather_than_hanging(monkeypatch):
+    """Ninety seconds of refusals is a service that did not start, and that is a
+    different sentence from "still importing"."""
+    monkeypatch.setattr(mv.time, "sleep", lambda _s: None)
+    clock = iter([0.0, 10.0, 20.0, 999.0, 1000.0])
+    monkeypatch.setattr(mv.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(SystemExit) as exc:
+        mv.wait_for_gateway(_Gateway(refusals=99), timeout=90)
+
+    assert "did not answer" in str(exc.value)
+    assert "systemctl --user status atr-gateway" in str(exc.value)
+
+
+def test_a_gateway_that_is_already_up_costs_one_call():
+    gateway = _Gateway(refusals=0)
+
+    mv.wait_for_gateway(gateway, timeout=90)
+
+    assert gateway.calls == 1
+
+
+def test_the_wait_is_longer_than_the_share_look_it_waits_out():
+    """`RegistryWatch.startup_wait_s` is what `create_app` blocks on; a timeout
+    at or below it would fail on a healthy start."""
+    from atr_serving.shared_registry import RegistryWatch
+
+    assert mv.GATEWAY_WAIT_S > RegistryWatch.startup_wait_s

@@ -214,6 +214,49 @@ def _client(gateway: str, api_key: str | None):
     return httpx.Client(base_url=gateway, headers=headers, timeout=WARM_TIMEOUT_S)
 
 
+#: How long to wait for the gateway to answer before giving up. `create_app`
+#: calls `RegistryWatch.start`, which blocks on the share for up to
+#: `startup_wait_s` (10 s) — and uvicorn binds the port only after the import
+#: returns. So the documented order in DEPLOY.md (restart, then measure) reaches
+#: a socket nobody is listening on yet, and the first live run died on exactly
+#: that. Generous, because the share is the slow part and a CIFS mount that is
+#: reconnecting takes longer than the timeout it is given.
+GATEWAY_WAIT_S = 90
+
+
+def wait_for_gateway(client, timeout: float = GATEWAY_WAIT_S) -> None:
+    """Block until ``/health`` answers, or say plainly that nothing is there.
+
+    A connection refused right after a restart is not an error, it is the
+    gateway still importing. A connection refused ninety seconds later is a
+    service that did not come up, and the difference has to reach the operator
+    as two different sentences rather than one stack trace.
+    """
+    import httpx
+
+    deadline = time.monotonic() + timeout
+    said = False
+    while True:
+        try:
+            if client.get("/health", timeout=5).status_code < 500:
+                if said:
+                    print("  gateway is up")
+                return
+        except httpx.HTTPError:
+            pass
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                f"the gateway at {client.base_url} did not answer within "
+                f"{timeout:.0f}s. Is it running? `systemctl --user status "
+                "atr-gateway`, and `journalctl --user -u atr-gateway -n 50` for "
+                "why it stopped.")
+        if not said:
+            print(f"  waiting for the gateway at {client.base_url} "
+                  "(it blocks on the share while starting) …")
+            said = True
+        time.sleep(2)
+
+
 def warm(client, model_id: str) -> None:
     """Make the model resident by asking it to read one small image.
 
@@ -372,6 +415,7 @@ def _scalar(value) -> str:
 def measure(model_id: str, gateway: str, api_key: str | None, gpu_hint: int | None) -> dict:
     started = datetime.now(timezone.utc)
     with _client(gateway, api_key) as client:
+        wait_for_gateway(client)
         print(f"  warming {model_id} …")
         warm(client, model_id)
         # The engine reports its profile while starting; the journal needs a
