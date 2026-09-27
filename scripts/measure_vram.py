@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import socket
 import subprocess
@@ -83,6 +84,31 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY = ROOT / "config" / "models.yaml"
+
+sys.path.insert(0, str(ROOT / "src"))
+
+
+def gateway_defaults() -> tuple[str, str | None]:
+    """``(base URL, api key)`` from the gateway's own settings.
+
+    Asked of :class:`atr_serving.config.Settings` rather than hardcoded, because
+    hardcoding got it wrong: this script shipped with ``http://127.0.0.1:8000``
+    while the gateway has lived on **8200** since the beginning — :8000 is taken
+    on idhefix, and `config.py` says so in a comment three lines above the field.
+    ``Settings`` also reads ``.env``, so the API key comes from the same place the
+    service gets it and does not have to be pasted onto a command line.
+
+    Falls back to the documented port and ``ATR_API_KEY`` when ``atr_serving``
+    cannot be imported — a bare checkout without the gateway venv, where
+    ``--report`` and ``--check`` still work and need neither.
+    """
+    try:
+        from atr_serving.config import get_settings
+    except Exception:  # noqa: BLE001 — no gateway venv; the offline modes still run
+        return "http://127.0.0.1:8200", os.environ.get("ATR_API_KEY") or None
+    settings = get_settings()
+    key = getattr(settings, "api_key", None)
+    return f"http://127.0.0.1:{settings.port}", key or None
 
 #: The unit whose journal carries vLLM's stdout. `manager._launch` runs
 #: `subprocess.Popen(cmd, env=env)` without capturing, so the child's output is
@@ -445,13 +471,18 @@ def main() -> int:
                         help="what is measured so far; reads nothing live")
     parser.add_argument("--check", action="store_true",
                         help="CI gate: measured entries still match their vram_mb")
-    parser.add_argument("--gateway", default="http://127.0.0.1:8000")
-    parser.add_argument("--api-key", default=None)
+    parser.add_argument("--gateway", default=None,
+                        help="default: http://127.0.0.1:<Settings.port>, i.e. :8200")
+    parser.add_argument("--api-key", default=None,
+                        help="default: ATR_API_KEY, as the gateway itself reads it")
     parser.add_argument("--gpu", type=int, default=None,
                         help="card index to record when /gpu does not name one")
     args = parser.parse_args()
 
     models = load_registry()
+    default_gateway, default_key = gateway_defaults()
+    gateway = args.gateway or default_gateway
+    api_key = args.api_key or default_key
     if args.check:
         return check(models)
     if args.report:
@@ -469,7 +500,7 @@ def main() -> int:
     results = {}
     for model_id in targets:
         print(f"{model_id}:")
-        result = measure(model_id, args.gateway, args.api_key, args.gpu)
+        result = measure(model_id, gateway, api_key, args.gpu)
         pids = result.pop("_pids")
         results[model_id] = result
         print(f"  resident total {result['total_mib']} MiB across pids {pids}")

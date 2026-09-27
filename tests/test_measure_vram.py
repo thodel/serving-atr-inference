@@ -252,3 +252,53 @@ def test_a_measurement_without_a_split_still_names_its_origin():
         total_mib=3072, host="idhefix", measured_at="2026-09-26"))
 
     assert "idhefix" in vram_provenance(spec)
+
+
+# ── the box's own settings, not a hardcoded guess ───────────────────────────
+def test_the_default_gateway_is_the_port_the_gateway_actually_uses():
+    """This shipped pointing at :8000. The gateway has always been on :8200 —
+    :8000 is taken on idhefix, and `config.py` says so in a comment three lines
+    above the field. The first live run died on it."""
+    from atr_serving.config import Settings
+
+    url, _ = mv.gateway_defaults()
+
+    assert url == f"http://127.0.0.1:{Settings.model_fields['port'].default}"
+    assert ":8000" not in url
+
+
+def test_the_api_key_comes_from_the_same_place_the_service_reads_it(monkeypatch):
+    """`require_auth` is True on the server, so a missing key is a 401 rather
+    than a measurement. `Settings` reads `.env`; nothing has to be pasted onto a
+    command line."""
+    import atr_serving.config as config
+
+    monkeypatch.setenv("ATR_API_KEY", "from-the-environment")
+    # `get_settings` memoises into a module global, so the cached instance from
+    # an earlier test would answer instead.
+    monkeypatch.setattr(config, "_settings", None)
+
+    _, key = mv.gateway_defaults()
+
+    assert key == "from-the-environment"
+
+
+def test_a_checkout_without_the_gateway_package_still_reports(monkeypatch):
+    """`--report` and `--check` need neither a gateway nor a key, and must not
+    fail on an import that only the serving box has."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def refuse(name, *args, **kwargs):
+        if name.startswith("atr_serving"):
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse)
+    monkeypatch.delenv("ATR_API_KEY", raising=False)
+
+    url, key = mv.gateway_defaults()
+
+    assert url == "http://127.0.0.1:8200"
+    assert key is None

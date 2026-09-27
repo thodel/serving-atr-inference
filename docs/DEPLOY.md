@@ -194,8 +194,12 @@ one model, and no `vram_mb` in the registry was ever measured against a card
 (#130). `scripts/measure_vram.py` is how one gets measured —
 
 ```bash
-python scripts/measure_vram.py --model qwen3vl-german-xix-v1 --write
-python scripts/measure_vram.py --report      # what is measured so far
+# From the gateway venv: the script needs httpx, pillow and pyyaml, and it reads
+# the port and the API key out of `Settings` (so out of `.env`) rather than
+# taking them on the command line. idhefix has no `python`, only `python3`.
+.venvs/gateway/bin/python scripts/measure_vram.py --model qwen3vl-german-xix-v1 --write
+.venvs/gateway/bin/python scripts/measure_vram.py --report   # what is measured so far
+python3 scripts/measure_vram.py --check                      # needs no gateway
 ```
 
 It warms the model through `POST /recognize`, reads the resident total from
