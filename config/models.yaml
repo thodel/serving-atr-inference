@@ -277,6 +277,41 @@ models:
       - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
       - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
 
+  # ── Pre-1600 German — the one line model this box has for those hands ─────
+  #
+  # Registered on 2026-09-29 for the Berner Disputation manuscripts (Staatsarchiv
+  # Bern A V 1443-1447), which the xix models cannot read: they were trained on
+  # 19th-century Kurrent and this is 1528. The four corpora behind this one are
+  # the Zurich Rats- und Richtebücher XV-XVI, the Bullinger autographs, the
+  # Königsfelden charters post-1500 and AAEB XIV-XVII — the same decades and in
+  # part the same hands, the Bullinger set holding Berchtold Haller and Eberhard
+  # von Rümlang, who wrote and copied at that disputation.
+  #
+  # `level: line` is measured, not assumed. `scripts/eval_granularity.py` on its
+  # 14 held-out pages, 2026-09-22 (#165): CER 0.111 on line crops, 1.00 on whole
+  # pages, where every page came back as "de" or "te" at a length ratio of 0.001.
+  # Its own card reports CER 0.112 over 200 validation samples, and says that is
+  # mostly in-domain rather than a held-out-hands benchmark — so for a Bern hand
+  # neither number is a promise, and the run has to be looked at.
+  - id: qwen3vl-medieval-german-v3
+    engine: vllm
+    hf_repo: dh-unibe/qwen3vl-medieval-german-v3
+    base_model: Qwen/Qwen3-VL-4B-Instruct
+    task: htr
+    level: line          # CER 0.111 on lines, 1.00 on pages (#165)
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [15, 16, 17]
+    vram_mb: 12000
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_rats-und-richtebuecher_xv-xvi
+      - https://huggingface.co/datasets/dh-unibe/image-text_bullinger-autoren
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-post-1500
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii
+
   # ── Party HTR — its own always-on service (runs for every image) ──────────
   - id: party
     engine: party
