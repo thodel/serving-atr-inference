@@ -1061,7 +1061,8 @@ that has to match reality. The literal stays in `KrakenTrainParams` so the job r
 that produced every number above still load.
 
 What this does **not** do is fix the numbers already measured. Every kraken CER in this
-document and in `ARCHITECTURE_SEARCH.md` was measured at a frozen `lrate/25`, so the
+document and in `ARCHITECTURE_SEARCH.md` (now in training-atr-models, which holds the
+code it describes) was measured at a frozen `lrate/25`, so the
 *requested* rates in those tables are not the rates that were compared. The next sweep
 is the first one where `--lrate` means what it says — worth remembering before reading
 an old and a new CER side by side. Upstream is worth telling: `steps_per_epoch` should
