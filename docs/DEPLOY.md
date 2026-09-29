@@ -202,6 +202,13 @@ one model, and no `vram_mb` in the registry was ever measured against a card
 python3 scripts/measure_vram.py --check                      # needs no gateway
 ```
 
+Straight after `systemctl --user restart atr-gateway` the port is not open yet:
+`create_app` calls `RegistryWatch.start`, which blocks on the share for up to
+`startup_wait_s` (10 s), and uvicorn binds only once the import returns. The
+script waits for `/health` rather than dying on the refused connection, and says
+which it is doing — but `systemctl --user status atr-gateway` is the first thing
+to check if it waits the full ninety seconds.
+
 It warms the model through `POST /recognize`, reads the resident total from
 `GET /gpu`, and takes the weights/KV split from vLLM's own memory-profiling line
 in the gateway's journal. The split is what matters: `nvidia-smi` alone reports

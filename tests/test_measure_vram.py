@@ -302,3 +302,135 @@ def test_a_checkout_without_the_gateway_package_still_reports(monkeypatch):
 
     assert url == "http://127.0.0.1:8200"
     assert key is None
+
+
+# ── the gateway is not up the instant it is restarted ───────────────────────
+class _Gateway:
+    """A client double that refuses for `refusals` calls, then answers."""
+
+    def __init__(self, refusals: int, base_url: str = "http://127.0.0.1:8200") -> None:
+        self.refusals = refusals
+        self.base_url = base_url
+        self.calls = 0
+
+    def get(self, path, **kwargs):
+        import httpx
+        self.calls += 1
+        if self.calls <= self.refusals:
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+        return _Answer(200)
+
+
+class _Answer:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+def test_a_gateway_that_is_still_starting_is_waited_for(monkeypatch):
+    """`create_app` blocks on the share for up to 10 s and uvicorn binds only
+    after that, so the documented order — restart, then measure — meets a
+    refused connection. The first live run died on exactly this."""
+    monkeypatch.setattr(mv.time, "sleep", lambda _s: None)
+    gateway = _Gateway(refusals=3)
+
+    mv.wait_for_gateway(gateway, timeout=60)
+
+    assert gateway.calls == 4
+
+
+def test_a_gateway_that_never_comes_up_says_so_rather_than_hanging(monkeypatch):
+    """Ninety seconds of refusals is a service that did not start, and that is a
+    different sentence from "still importing"."""
+    monkeypatch.setattr(mv.time, "sleep", lambda _s: None)
+    clock = iter([0.0, 10.0, 20.0, 999.0, 1000.0])
+    monkeypatch.setattr(mv.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(SystemExit) as exc:
+        mv.wait_for_gateway(_Gateway(refusals=99), timeout=90)
+
+    assert "did not answer" in str(exc.value)
+    assert "systemctl --user status atr-gateway" in str(exc.value)
+
+
+def test_a_gateway_that_is_already_up_costs_one_call():
+    gateway = _Gateway(refusals=0)
+
+    mv.wait_for_gateway(gateway, timeout=90)
+
+    assert gateway.calls == 1
+
+
+def test_the_wait_is_longer_than_the_share_look_it_waits_out():
+    """`RegistryWatch.startup_wait_s` is what `create_app` blocks on; a timeout
+    at or below it would fail on a healthy start."""
+    from atr_serving.shared_registry import RegistryWatch
+
+    assert mv.GATEWAY_WAIT_S > RegistryWatch.startup_wait_s
+
+
+# ── the warm request has to match the endpoint it calls ─────────────────────
+def test_the_warm_request_is_accepted_by_the_real_recognize_route(monkeypatch):
+    """The field is `image`, because that is what `routes.recognize` declares.
+
+    It was `file`, and the live gateway answered 422 to every warm request —
+    `{"loc": ["body", "image"], "msg": "Field required"}`. A client written
+    without reading the endpoint it calls. Driven through the real app here, so
+    the two cannot drift apart again: a wrong field name is a 422 and this test
+    goes red, whatever the engine behind it does.
+    """
+    from fastapi.testclient import TestClient
+
+    from atr_serving.app import create_app
+    from atr_serving.clients import EngineError
+
+    reached: list[str] = []
+
+    class _Engine:
+        def __getattr__(self, name):
+            async def _record(*args, **kwargs):
+                reached.append(name)
+                raise EngineError("no engine is wired in this test")
+            return _record
+
+    app = create_app()
+    for factory in ("_kraken_client", "_vllm_client", "_engine_client"):
+        monkeypatch.setattr(f"atr_serving.api.routes.{factory}",
+                            lambda *a, **k: _Engine(), raising=False)
+    async def _no_second_opinion(*args, **kwargs):
+        return None                      # the route wraps this in ensure_future
+
+    monkeypatch.setattr("atr_serving.api.routes._party_second_opinion",
+                        _no_second_opinion, raising=False)
+
+    client = TestClient(app)
+    key = getattr(app.state.settings, "api_key", None)
+    client.headers.update({"X-API-Key": key} if key else {})
+
+    try:
+        mv.warm(client, "kraken-catmus-medieval")
+    except SystemExit as exc:
+        assert "422" not in str(exc), f"the warm request was malformed: {exc}"
+
+    assert reached, "the request never reached an engine — it was rejected first"
+
+
+def test_the_warm_page_is_not_blank():
+    """A `level: line` model reads what kraken segmented, so a blank page would
+    reach the engine zero times. Residency — which is what the measurement needs
+    — happens either way, but a warm request that warms nothing is a poor name."""
+    import io
+
+    from PIL import Image
+
+    sent: dict = {}
+
+    class _Capture:
+        def post(self, path, files=None, data=None, **kw):
+            sent["bytes"] = files["image"][1].read()
+            return _Answer(200)
+
+    mv.warm(_Capture(), "any-model")
+
+    with Image.open(io.BytesIO(sent["bytes"])) as page:
+        colours = {c for _n, c in page.convert("RGB").getcolors(maxcolors=100000)}
+    assert (0, 0, 0) in colours, "nothing for the segmenter to find"
