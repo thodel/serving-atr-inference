@@ -299,6 +299,15 @@ models:
     base_model: Qwen/Qwen3-VL-4B-Instruct
     task: htr
     level: line          # CER 0.111 on lines, 1.00 on pages (#165)
+    # The budget belongs to the fine-tune, not to the box it happens to run on.
+    # idhefix has ATR_VLLM_MAX_NEW_TOKENS=4096 in its .env — raised for the
+    # page-level experiment (#154) and never lowered when #165 put every model
+    # back on lines — so without this a LINE call carries eight times the code
+    # default of 512. Measured on the Schöni sample, 29.09.2026: 4 of 25 pages
+    # held a line that degenerated into a digit run and used the whole 4096,
+    # ~4100 characters for one line of a manuscript page. 512 does not stop a
+    # model from looping; it stops a loop from being expensive and invisible.
+    max_new_tokens: 512
     prompt: Transcribe the handwritten text in this image exactly as written.
     languages: [de]
     scripts: [Kurrent]
