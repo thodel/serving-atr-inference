@@ -221,6 +221,28 @@ def test_the_base_model_is_linked_as_well(tmp_path: Path):
     assert frontmatter(card)["base_model"] == "Qwen/Qwen3-VL-8B-Instruct"
 
 
+def test_a_doi_base_is_linked_where_it_resolves(tmp_path: Path):
+    """A DOI has a slash, so the old rule linked it to huggingface.co/10.5281/…"""
+    meta = {**KRAKEN_META, "base_model": "10.5281/zenodo.15030337"}
+    card = card_for(tmp_path, meta)
+
+    assert "[`10.5281/zenodo.15030337`](https://doi.org/10.5281/zenodo.15030337)" in card
+    assert "huggingface.co/10.5281" not in card
+    assert "base_model" not in frontmatter(card), "a DOI is not a hub repo"
+
+
+def test_a_registry_id_base_is_stated_not_advertised(tmp_path: Path):
+    """`kraken-medieval-german-v2` shipped `base_model: kraken-early_modern_german`
+    in its frontmatter — a hub link to nothing, naming weights that were CATMuS
+    Medieval (serving-atr-inference#101)."""
+    meta = {**KRAKEN_META, "base_model": "kraken-early_modern_german"}
+    card = card_for(tmp_path, meta)
+
+    assert "base_model" not in frontmatter(card)
+    assert "a gateway registry id" in card
+    assert "`kraken-early_modern_german`" in card
+
+
 def test_the_declared_score_names_the_slice_it_was_measured_on(tmp_path: Path):
     """A repo id alone would claim the whole 6.6 TB corpus; the eval projects are
     what the CER is actually about."""
