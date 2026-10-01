@@ -401,7 +401,10 @@ class TestMarkdownRenderer:
         )
         md = format_report_markdown(report)
         assert "# Model Discovery Report" in md
-        assert "0 new / 0 total" in md
+        # Without a catalogue the report no longer calls anything "new": that
+        # word meant "not in models.yaml", which is what #113 is about.
+        assert "Run without a catalogue" in md
+        assert "**Queried:** 0 HF, 0 Zenodo" in md
         assert "500 Server Error" in md
         assert "HF query" in md
 

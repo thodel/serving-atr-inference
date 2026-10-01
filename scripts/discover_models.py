@@ -18,6 +18,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import sys
@@ -30,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # One answer to "which record is that", shared with scripts/audit_registry.py:
 # this was a private copy here, and two copies of it would let the discovery and
 # the audit disagree about the same DOI (#101).
+from atr_serving import discoveries  # noqa: E402
+from atr_serving.discoveries import Observation, Triage  # noqa: E402
 from atr_serving.registry_audit import normalize_zenodo_id  # noqa: E402
 
 try:
@@ -106,6 +109,10 @@ class ZenodoRecord:
     keywords: list[str]
     zenodo_url: str
     score: int = field(default=0)
+    #: Zenodo's ``updated``, so that "this record moved since you rejected it"
+    #: is answerable for Zenodo as it is for the Hub (#113). Empty when the
+    #: record carries no such field — absent, not unchanged.
+    last_modified: str = field(default="")
 
 
 @dataclass
@@ -117,6 +124,10 @@ class DiscoveryReport:
     new_hf_models: list[HFModel] = field(default_factory=list)
     new_zenodo_models: list[ZenodoRecord] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    #: What the catalogue made of this run (#113). None when the run was told
+    #: not to read one, and then the report falls back to the old counting —
+    #: which is "not served", and says so rather than calling it new.
+    triage: Triage | None = field(default=None)
 
 
 # ─── HF API ───────────────────────────────────────────────────────────────────
@@ -271,6 +282,21 @@ ZENODO_COMMUNITIES = ["scribes", "scriboco", "ocr", "digitaalregion", "handwritt
 # anonymously. The previous 200 made every query 400 and the weekly report
 # silently lost all Zenodo candidates (#66).
 ZENODO_PAGE_SIZE = 25
+#: Which Zenodo resource types to ask for, or None for "any".
+#:
+#: Every query used to carry ``type=dataset``, which is a filter and can only
+#: ever remove records. A kraken ``.mlmodel`` is uploaded as a dataset by some
+#: depositors and as software, other, or Zenodo's own "model" type by others —
+#: #101's own 39 registry DOIs are not all datasets — so the filter was
+#: dropping model records by construction. It is gone: a wider net is what the
+#: catalogue in :mod:`atr_serving.discoveries` is for, since a rejected
+#: candidate does not come back.
+#:
+#: Kept as a setting rather than deleted because it cannot be checked from
+#: here (this container cannot reach zenodo.org: policy denial on CONNECT), so
+#: whoever runs it on a box with internet can narrow it again in one flag and
+#: see the difference in the counts.
+ZENODO_TYPES: list[str] | None = None
 
 
 def _search_zenodo(session: requests.Session, params: dict) -> dict:
@@ -280,26 +306,30 @@ def _search_zenodo(session: requests.Session, params: dict) -> dict:
     return resp.json()
 
 
-def discover_zenodo_models(session: requests.Session) -> tuple[list[ZenodoRecord], str | None]:
-    """
-    Search Zenodo for kraken/HTR model records across communities.
-    Returns (candidates, error_message_or_None).
+def discover_zenodo_models(
+    session: requests.Session,
+    types: list[str] | None = None,
+) -> tuple[list[ZenodoRecord], str | None]:
+    """Search Zenodo for kraken/HTR model records across communities.
+
+    Returns ``(candidates, error_message_or_None)``. An empty result with no
+    error is itself reported as an error: 39 of the registry's entries are
+    Zenodo DOIs, so "Zenodo has nothing" is never the likely reading, and #113
+    ranks silently returning 0 as the worst of the three things this could do.
     """
     all_records: dict[str, ZenodoRecord] = {}
     error_msg: str | None = None
 
     # Build list of (q, community) query pairs
-    queries = [
-        ({"q": "kraken", "communities": c, "type": "dataset", "size": ZENODO_PAGE_SIZE, "allversions": "false"}, c)
-        for c in ZENODO_COMMUNITIES
-    ]
-    # Also a general HTR search
-    queries.append(
-        ({"q": "handwritten text recognition", "type": "dataset", "size": ZENODO_PAGE_SIZE, "allversions": "false"}, "htr")
-    )
-    queries.append(
-        ({"q": "HTR model", "type": "dataset", "size": ZENODO_PAGE_SIZE, "allversions": "false"}, "htr-model")
-    )
+    base = {"size": ZENODO_PAGE_SIZE, "allversions": "false"}
+    if types:
+        base["type"] = list(types)
+    queries = [({**base, "q": "kraken", "communities": c}, c) for c in ZENODO_COMMUNITIES]
+    # And two searches over all of Zenodo. The second element of each pair is a
+    # label for the error messages — it is NOT sent, and #113 read one of these
+    # ("Zenodo community 'htr-model' …") as a community that does not exist.
+    queries.append(({**base, "q": "handwritten text recognition"}, "all: htr"))
+    queries.append(({**base, "q": "HTR model"}, "all: htr-model"))
 
     for params, community in queries:
         page = 1
@@ -332,6 +362,7 @@ def discover_zenodo_models(session: requests.Session) -> tuple[list[ZenodoRecord
                             doi=doi,
                             keywords=keywords,
                             zenodo_url=f"https://zenodo.org/records/{zid}",
+                            last_modified=str(hit.get("updated", "") or ""),
                         )
                         if zid not in all_records:
                             all_records[zid] = record
@@ -361,7 +392,15 @@ def discover_zenodo_models(session: requests.Session) -> tuple[list[ZenodoRecord
                 consecutive_empty = 2  # break outer while
                 break
 
-    return list(all_records.values()), error_msg
+    records = list(all_records.values())
+    if not records and error_msg is None:
+        error_msg = (
+            "Zenodo returned 0 records from %d queries and reported no error. The "
+            "registry holds 39 Zenodo DOIs, so this is a broken query, not an empty "
+            "Zenodo. Check it on a box with internet: "
+            "curl -sS 'https://zenodo.org/api/records?q=kraken&size=25' | head -c 400"
+            % len(queries))
+    return records, error_msg
 
 
 # ─── Diff ─────────────────────────────────────────────────────────────────────
@@ -386,6 +425,22 @@ def diff_report(
         bare = normalize_zenodo_id(record.zenodo_id)
         if bare not in served_zenodo_ids:
             report.new_zenodo_models.append(record)
+
+
+def observations(report: DiscoveryReport) -> list[Observation]:
+    """This run's candidates, in the shape the catalogue compares against.
+
+    Built from ``new_*`` rather than from every candidate: a model already in
+    ``models.yaml`` is not a discovery, and putting it in the catalogue would
+    mean carrying a verdict for something that was decided by registering it.
+    """
+    seen = [Observation(id=m.id, source="hf", last_modified=m.last_modified,
+                        downloads=m.downloads)
+            for m in report.new_hf_models]
+    seen += [Observation(id=r.zenodo_id, source="zenodo",
+                         last_modified=r.last_modified or None, title=r.title)
+             for r in report.new_zenodo_models]
+    return seen
 
 
 # ─── Markdown renderer ────────────────────────────────────────────────────────
@@ -423,17 +478,103 @@ def format_zenodo_table(records: list[ZenodoRecord]) -> str:
     return "\n".join(lines)
 
 
+#: How many awaiting-a-verdict rows the report lists. The rest are a count:
+#: a 206-row table is what nobody triaged (#113).
+AWAITING_ROWS = 25
+
+
+def format_catalogue_summary(triage: Triage) -> str:
+    """Counts by verdict, then what needs a decision. Leads the report.
+
+    The old report led with "206 new", which was true of the word "new" as it
+    was then defined and false of everything a reader does with it. This one
+    says how many nobody has looked at, and 0 when the answer is 0.
+    """
+    counts = triage.counts
+    lines = [
+        "| verdict | count |",
+        "|---|---|",
+        *(f"| {verdict} | {counts[verdict]} |" for verdict in VERDICTS_ORDER),
+        f"| **total** | **{sum(counts.values())}** |",
+        "",
+        f"**{len(triage.unseen)} unseen** this run"
+        f" · **{len(triage.changed)} changed** upstream since a verdict"
+        f" · **{len(triage.undecided)} awaiting a verdict** from an earlier run",
+    ]
+    if triage.missing:
+        lines.append(f" · {len(triage.missing)} no longer matched by any query "
+                     "(kept, with their verdicts)")
+    return "\n".join(lines) + "\n"
+
+
+def format_changes(changes: list) -> str:
+    """The signal the old report threw away."""
+    if not changes:
+        return "_Nothing that was decided has moved upstream._\n"
+    lines = ["| candidate | verdict | what moved |", "|---|---|---|"]
+    for change in changes:
+        lines.append(f"| `{change.entry.key}` | {change.entry.verdict} | {change.why} |")
+    return "\n".join(lines) + "\n"
+
+
+def format_awaiting(entries: list) -> str:
+    if not entries:
+        return "_Nothing is awaiting a verdict._\n"
+    lines = ["| candidate | first seen | downloads |", "|---|---|---|"]
+    for entry in entries[:AWAITING_ROWS]:
+        downloads = f"{entry.downloads:,}" if entry.downloads is not None else "—"
+        lines.append(f"| `{entry.key}` | {entry.first_seen} | {downloads} |")
+    text = "\n".join(lines) + "\n"
+    if len(entries) > AWAITING_ROWS:
+        text += (f"\n_…and {len(entries) - AWAITING_ROWS} more. "
+                 "Record verdicts with `scripts/discover_models.py --decide`._\n")
+    return text
+
+
+VERDICTS_ORDER = discoveries.VERDICTS
+
+
 def format_report_markdown(report: DiscoveryReport) -> str:
     sections = [
         "# Model Discovery Report\n",
-        f"**HF candidates:** {len(report.new_hf_models)} new / {len(report.hf_candidates)} total\n",
-        f"**Zenodo candidates:** {len(report.new_zenodo_models)} new / {len(report.zenodo_candidates)} total\n",
-        f"**Served (excluded):** {len(report.served_hf_repos)} HF repos, {len(report.served_zenodo_ids)} Zenodo records\n",
     ]
+    if report.triage is not None:
+        sections.append("\n## Where the candidates stand\n\n")
+        sections.append(format_catalogue_summary(report.triage))
+    else:
+        sections.append(
+            "\n_Run without a catalogue, so "
+            f"**{len(report.new_hf_models)}** HF and "
+            f"**{len(report.new_zenodo_models)}** Zenodo candidates below are "
+            '"not in models.yaml", which is not the same as new (#113)._\n')
+    sections.append(
+        f"\n**Queried:** {len(report.hf_candidates)} HF, "
+        f"{len(report.zenodo_candidates)} Zenodo. "
+        f"**Already served:** {len(report.served_hf_repos)} HF repos, "
+        f"{len(report.served_zenodo_ids)} Zenodo records.\n")
+
     if report.errors:
         sections.append("\n⚠️ **Errors** (graceful degradation):\n")
         for err in report.errors:
             sections.append(f"- {err}\n")
+
+    if report.triage is not None:
+        unseen = {e.key for e in report.triage.unseen}
+        sections.append("\n## Unseen before this run\n")
+        sections.append(format_hf_table(
+            [m for m in report.new_hf_models
+             if discoveries.key_for("hf", m.id) in unseen]))
+        sections.append("\n")
+        sections.append(format_zenodo_table(
+            [r for r in report.new_zenodo_models
+             if discoveries.key_for("zenodo", r.zenodo_id) in unseen]))
+
+        sections.append("\n## Changed since a verdict\n")
+        sections.append(format_changes(report.triage.changed))
+
+        sections.append("\n## Awaiting a verdict\n")
+        sections.append(format_awaiting(report.triage.undecided))
+        return "".join(sections)
 
     sections.append("\n## New HuggingFace Models\n")
     sections.append(format_hf_table(report.new_hf_models))
@@ -455,12 +596,34 @@ def report_to_json(report: DiscoveryReport) -> dict:
         "served_hf_repos": sorted(report.served_hf_repos),
         "served_zenodo_ids": sorted(report.served_zenodo_ids),
         "errors": report.errors,
+        # The shape GET /train/discoveries (#116) can serve without scraping
+        # GitHub, which is half the reason the state is a file (#113).
+        "catalogue": None if report.triage is None else {
+            "counts": report.triage.counts,
+            "unseen": [asdict(e) for e in report.triage.unseen],
+            "changed": [{"candidate": asdict(c.entry), "why": c.why}
+                        for c in report.triage.changed],
+            "undecided": [asdict(e) for e in report.triage.undecided],
+            "missing": [asdict(e) for e in report.triage.missing],
+        },
     }
 
 
 # ─── Main discovery ───────────────────────────────────────────────────────────
 
-def discover(session: requests.Session) -> DiscoveryReport:
+def discover(
+    session: requests.Session,
+    *,
+    catalogue: Path | None = None,
+    today: str | None = None,
+    zenodo_types: list[str] | None = None,
+) -> DiscoveryReport:
+    """One run. ``catalogue=None`` skips the state entirely (``--no-catalogue``).
+
+    The order is deliberate: the registry filter first, because a served model
+    is not a discovery, then the catalogue, because "new" means unseen and not
+    "not served" (#113).
+    """
     report = DiscoveryReport()
 
     # Load served registry
@@ -475,15 +638,26 @@ def discover(session: requests.Session) -> DiscoveryReport:
         report.errors.append(hf_error)
 
     # Query Zenodo
-    zenodo_records, zenodo_error = discover_zenodo_models(session)
+    zenodo_records, zenodo_error = discover_zenodo_models(session, zenodo_types)
     report.zenodo_candidates = zenodo_records
     if zenodo_error:
         report.errors.append(zenodo_error)
 
-    # Diff
+    # Diff: drop what is already served.
     diff_report(report, served_hf, served_zenodo)
 
+    # Then the catalogue: of what is left, what has nobody seen before?
+    if catalogue is not None:
+        report.triage = triage_run(report, catalogue=catalogue, today=today)
+
     return report
+
+
+def triage_run(report: DiscoveryReport, *, catalogue: Path,
+               today: str | None = None) -> Triage:
+    today = today or dt.date.today().isoformat()
+    return discoveries.triage(discoveries.load(catalogue), observations(report),
+                              today=today)
 
 
 
@@ -657,12 +831,63 @@ def _build_parser() -> argparse.ArgumentParser:
         default=REPO_ROOT / "discovery_report.md",
         help="Path to the markdown report (default: discovery_report.md)",
     )
+    p.add_argument(
+        "--catalogue", type=Path, default=discoveries.CATALOGUE,
+        help="The tracked candidate catalogue (default: config/discovered.yaml)",
+    )
+    p.add_argument(
+        "--no-catalogue", action="store_true",
+        help="Do not read or write the catalogue; 'new' falls back to 'not served'",
+    )
+    p.add_argument(
+        "--zenodo-type", action="append", dest="zenodo_types", metavar="TYPE",
+        help="Restrict the Zenodo search to a resource type (repeatable). The "
+             "default asks for any: the old type=dataset filter dropped model "
+             "records uploaded as software or other (#113)",
+    )
+    decide = p.add_argument_group(
+        "recording a verdict",
+        "Instead of a discovery run: write a decision into the catalogue, so "
+        "that the candidate stops coming back and the next reader learns why.")
+    decide.add_argument("--decide", metavar="SOURCE:ID",
+                        help="the catalogue key, e.g. hf:CATMuS/medieval")
+    decide.add_argument("--verdict", choices=discoveries.VERDICTS)
+    decide.add_argument("--reason", help="required for 'rejected'")
+    decide.add_argument("--by", help="who decided (default: $USER)")
     return p
+
+
+def record_decision(args) -> int:
+    """``--decide``: one verdict into the catalogue. Returns the exit code."""
+    if not args.verdict:
+        print("ERROR: --decide needs --verdict "
+              f"({', '.join(discoveries.VERDICTS)})", file=sys.stderr)
+        return 2
+    who = args.by or os.environ.get("USER") or ""
+    if not who:
+        print("ERROR: --decide needs --by (or $USER): a decision nobody made is "
+              "not a decision", file=sys.stderr)
+        return 2
+    entries = discoveries.load(args.catalogue)
+    try:
+        entry = discoveries.decide(entries, args.decide, args.verdict, by=who,
+                                   at=dt.date.today().isoformat(), reason=args.reason)
+    except discoveries.CatalogueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    discoveries.save(entries, args.catalogue)
+    print(f"{entry.key}: {entry.verdict}"
+          + (f" — {entry.reason}" if entry.reason else ""))
+    print(f"catalogue: {args.catalogue}")
+    return 0
 
 
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+
+    if args.decide:
+        sys.exit(record_decision(args))
 
     json_path = args.out or REPO_ROOT / "discovery_report.json"
     md_path = args.md or REPO_ROOT / "discovery_report.md"
@@ -670,7 +895,15 @@ def main() -> None:
     session = requests.Session()
     session.headers["User-Agent"] = "serving-atr-inference/discover-models"
 
-    report = discover(session)
+    catalogue = None if args.no_catalogue else args.catalogue
+    try:
+        report = discover(session, catalogue=catalogue,
+                          zenodo_types=args.zenodo_types)
+    except discoveries.CatalogueError as exc:
+        # Before the network, not after: a catalogue that cannot be read must
+        # not be overwritten by a run that could not compare against it.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     md_text = format_report_markdown(report)
     json_text = json.dumps(report_to_json(report), indent=2, ensure_ascii=False)
@@ -683,6 +916,13 @@ def main() -> None:
     md_path.write_text(md_text, encoding="utf-8")
     print(f"JSON: {json_path}")
     print(f"MD:   {md_path}")
+
+    if report.triage is not None:
+        discoveries.save(report.triage.entries, catalogue)
+        print(f"CAT:  {catalogue} "
+              f"({len(report.triage.unseen)} unseen, "
+              f"{len(report.triage.changed)} changed, "
+              f"{len(report.triage.undecided)} awaiting a verdict)")
 
     if report.errors:
         print("\n⚠️  Some sources failed (graceful degradation):")
@@ -703,8 +943,14 @@ def main() -> None:
         if not os.environ.get("GITHUB_TOKEN"):
             print("ERROR: GITHUB_TOKEN is not set.", file=sys.stderr)
             sys.exit(1)
-        if not report.new_hf_models and not report.new_zenodo_models:
-            print("No new candidates — skipping issue update.")
+        nothing_to_say = (
+            not report.triage.unseen and not report.triage.changed
+            if report.triage is not None
+            else not report.new_hf_models and not report.new_zenodo_models)
+        if nothing_to_say:
+            # The whole point of #113: an unchanged week says nothing instead of
+            # overwriting the issue with the same 206 rows.
+            print("Nothing unseen and nothing changed — skipping issue update.")
             return
         session2 = requests.Session()
         session2.headers["User-Agent"] = "serving-atr-inference/discover-models"
