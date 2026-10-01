@@ -452,8 +452,21 @@ class TrainerClient:
     async def submit(self, body: dict[str, Any]) -> dict:
         return await self._request("POST", "/jobs", json=body)
 
-    async def list_jobs(self) -> dict:
-        return await self._request("GET", "/jobs")
+    async def list_jobs(self, limit: int | None = None,
+                        fields: str = "full") -> dict:
+        """The trainer's job list, optionally shortened (#107).
+
+        Both parameters are the trainer's own (training-atr-models#38) and both
+        are opt-in: with neither, the request is byte-identical to the one this
+        made before, so a caller that wants every record still gets it and an
+        older trainer sees no query string at all.
+        """
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = limit
+        if fields != "full":
+            params["fields"] = fields
+        return await self._request("GET", "/jobs", params=params or None)
 
     async def get(self, job_id: str) -> dict:
         return await self._request("GET", f"/jobs/{job_id}")

@@ -29,7 +29,7 @@ remote trainer's 5xx text keeps its status but gains the trainer's URL, because
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 from loguru import logger
@@ -175,8 +175,27 @@ async def submit_job(request: Request, response: Response, body: dict = Body(...
 
 
 @router.get("/jobs")
-async def list_jobs(request: Request) -> dict:
-    return await _forward(_client(request).list_jobs())
+async def list_jobs(
+    request: Request,
+    limit: int | None = Query(None, ge=1,
+                              description="keep only the N newest jobs"),
+    fields: Literal["full", "summary"] = Query(
+        "full", description="summary: id, status, stage, created_at, "
+                            "queued_reason, error"),
+) -> dict:
+    """List jobs, newest first. Both parameters are opt-in (#107).
+
+    The full list carries every job's whole submitted ``request`` object: 807 KB
+    for 42 jobs, measured from tei, for a bot view that shows five rows of
+    status, stage and id — and it grows with every run. ``limit`` slices the id
+    list in the trainer before a single ``job.json`` is read; ``fields=summary``
+    returns the six keys a list view shows. The whole record stays at
+    ``GET /train/jobs/{job_id}``, which is where a caller that wants it belongs.
+
+    Nothing is forwarded that the caller did not ask for, so the default
+    response is unchanged — the bytes are saved when the caller asks.
+    """
+    return await _forward(_client(request).list_jobs(limit=limit, fields=fields))
 
 
 @router.get("/jobs/{job_id}")

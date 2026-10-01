@@ -136,7 +136,10 @@ class Settings(BaseSettings):
     #: the 5 s /health check, but its caller, agent_a's training_client, waits
     #: ATR_HTTP_TIMEOUT = 300 s.) The ~1 MB /train/jobs body does not need more:
     #: httpx's read timeout counts the gap between chunks, not the transfer, so
-    #: only the trainer's time to first byte counts against it.
+    #: only the trainer's time to first byte counts against it. (That body is no
+    #: longer compulsory either: since #107 a caller asks for ``limit`` and
+    #: ``fields=summary``. It is still what the default returns, because the
+    #: watcher that polls it reads fields the summary does not carry.)
     train_timeout_s: float = 20.0
     # vLLM instances are dynamic (one per resident VLM); discovered via the
     # ModelManager in Phase 3, not statically configured here.

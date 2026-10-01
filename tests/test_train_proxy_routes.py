@@ -51,8 +51,11 @@ class FakeTrainer:
     async def submit(self, body):
         return await self._answer("submit", body, result=JOB)
 
-    async def list_jobs(self):
-        return await self._answer("list", result={"jobs": [JOB]})
+    #: Overridable per test; the default is one job in the full shape.
+    list_result = {"jobs": [JOB]}
+
+    async def list_jobs(self, limit=None, fields="full"):
+        return await self._answer("list", limit, fields, result=self.list_result)
 
     async def get(self, job_id):
         return await self._answer("get", job_id, result={**JOB, "status": "training"})
