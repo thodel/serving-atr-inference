@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from atr_serving.training import publish
 from atr_serving.training.publish import (
     CARD_FILENAME,
     METADATA_FILENAME,
@@ -231,15 +232,74 @@ def test_a_doi_base_is_linked_where_it_resolves(tmp_path: Path):
     assert "base_model" not in frontmatter(card), "a DOI is not a hub repo"
 
 
-def test_a_registry_id_base_is_stated_not_advertised(tmp_path: Path):
+def _registry_of(*specs):
+    """A real Registry, so these tests exercise the production lookup."""
+    from atr_serving.registry import Registry
+
+    return Registry(list(specs))
+
+
+def _spec(**kwargs):
+    from atr_serving.registry import ModelSpec
+
+    return ModelSpec(**{"engine": "kraken", **kwargs})
+
+
+def test_a_registry_id_resolves_to_the_weights_it_names(tmp_path: Path, monkeypatch):
+    """The fix for #101 at the point where it reached the public: a card said
+    `kraken-early_modern_german`, which named CATMuS Medieval's weights. An id is
+    now reported as the registry resolves it — title, DOI, and the id as asked."""
+    monkeypatch.setattr(publish, "_registry", lambda: _registry_of(_spec(
+        id="kraken-catmus_medieval", zenodo_id="10.5281/zenodo.15030337",
+        description="CATMuS Medieval")))
+    card = card_for(tmp_path, {**KRAKEN_META, "base_model": "kraken-catmus_medieval"})
+
+    assert "**CATMuS Medieval**" in card
+    assert "[`10.5281/zenodo.15030337`](https://doi.org/10.5281/zenodo.15030337)" in card
+    assert "requested as `kraken-catmus_medieval`" in card
+
+
+def test_a_base_trained_here_is_reported_by_its_path(tmp_path: Path, monkeypatch):
+    """A model fine-tuned from one of our own has no DOI; the registry resolves
+    it to weights on disk, and that is what the card can honestly say."""
+    monkeypatch.setattr(publish, "_registry", lambda: _registry_of(_spec(
+        id="kraken-thun-kurrent-v2", local_path="/atr-cache/trained/thun/thun.mlmodel",
+        description="Thun Kurrent, trained here")))
+    card = card_for(tmp_path, {**KRAKEN_META, "base_model": "kraken-thun-kurrent-v2"})
+
+    assert "**Thun Kurrent, trained here**" in card
+    assert "local weights `/atr-cache/trained/thun/thun.mlmodel`" in card
+    assert "base_model" not in frontmatter(card), "a path is not a hub repo"
+
+
+def test_an_id_that_resolves_to_a_hub_repo_earns_the_frontmatter(tmp_path: Path, monkeypatch):
+    """That relation the hub *can* follow, so it belongs in the header too."""
+    monkeypatch.setattr(publish, "_registry", lambda: _registry_of(_spec(
+        id="trocr-kurrent", engine="trocr", hf_repo="dh-unibe/trocr-kurrent",
+        description="TrOCR Kurrent")))
+    card = card_for(tmp_path, {**KRAKEN_META, "base_model": "trocr-kurrent"})
+
+    assert frontmatter(card)["base_model"] == "dh-unibe/trocr-kurrent"
+    assert "[`dh-unibe/trocr-kurrent`](https://huggingface.co/dh-unibe/trocr-kurrent)" in card
+
+
+def test_an_unknown_registry_id_is_stated_not_advertised(tmp_path: Path, monkeypatch):
     """`kraken-medieval-german-v2` shipped `base_model: kraken-early_modern_german`
-    in its frontmatter — a hub link to nothing, naming weights that were CATMuS
-    Medieval (serving-atr-inference#101)."""
-    meta = {**KRAKEN_META, "base_model": "kraken-early_modern_german"}
-    card = card_for(tmp_path, meta)
+    in its frontmatter — a hub link to nothing. An id this box cannot resolve says
+    so, which is the one thing a reader can act on."""
+    monkeypatch.setattr(publish, "_registry", lambda: _registry_of())
+    card = card_for(tmp_path, {**KRAKEN_META, "base_model": "kraken-early_modern_german"})
 
     assert "base_model" not in frontmatter(card)
-    assert "a gateway registry id" in card
+    assert "does not know" in card
+    assert "`kraken-early_modern_german`" in card
+
+
+def test_a_missing_registry_never_fails_a_publish(tmp_path: Path, monkeypatch):
+    """Best-effort: no config file is a reason to say less, not to stop."""
+    monkeypatch.setattr(publish, "_registry", lambda: None)
+    card = card_for(tmp_path, {**KRAKEN_META, "base_model": "kraken-early_modern_german"})
+
     assert "`kraken-early_modern_german`" in card
 
 
