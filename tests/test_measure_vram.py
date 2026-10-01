@@ -407,7 +407,7 @@ def test_the_warm_request_is_accepted_by_the_real_recognize_route(monkeypatch):
     client.headers.update({"X-API-Key": key} if key else {})
 
     try:
-        mv.warm(client, "kraken-catmus-medieval")
+        mv.warm(client, "kraken-catmus_medieval")
     except SystemExit as exc:
         assert "422" not in str(exc), f"the warm request was malformed: {exc}"
 

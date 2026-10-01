@@ -5,8 +5,8 @@ The run this exists for:
     20260810T105206Z-kraken-thun-finetune-v1  failed
     ValueError in train: kraken-medieval_generic_b is not a valid DOI
 
-`kraken-medieval_generic_b` is in config/models.yaml, and TRAINING_PLAN §4 said a
-registry id works. It did not, and the failure landed in the *train* stage — after
+`kraken-medieval_generic_b` was in config/models.yaml (it is `kraken-prima` since the
+registry was corrected, #101), and TRAINING_PLAN §4 said a registry id works. It did not, and the failure landed in the *train* stage — after
 prepare and compile had already run.
 """
 
@@ -22,9 +22,9 @@ from atr_serving.training.base_models import (
 @pytest.fixture
 def registry() -> Registry:
     return Registry([
-        ModelSpec(id="kraken-late_medieval_german", engine="kraken",
+        ModelSpec(id="kraken-bifrost_old_norse", engine="kraken",
                   zenodo_id="10.5281/zenodo.15366732", task="htr"),
-        ModelSpec(id="kraken-medieval_generic_b", engine="kraken",
+        ModelSpec(id="kraken-prima", engine="kraken",
                   zenodo_id="10.5281/zenodo.18220238", task="htr"),
         ModelSpec(id="kraken-locally-trained", engine="kraken",
                   local_path="/atr-cache/trained/x/x.mlmodel", enabled=False),
@@ -40,11 +40,11 @@ def never_exists(_path: str) -> bool:
 
 # ── the case that cost a run ────────────────────────────────────────────────
 def test_a_registry_id_resolves_to_its_doi(registry):
-    resolved = resolve_base_model("kraken-medieval_generic_b", "kraken", registry,
+    resolved = resolve_base_model("kraken-prima", "kraken", registry,
                                   path_exists=never_exists)
     assert resolved.ref == "10.5281/zenodo.18220238"
     assert resolved.kind == "registry"
-    assert resolved.source_id == "kraken-medieval_generic_b"
+    assert resolved.source_id == "kraken-prima"
 
 
 def test_a_registry_entry_with_only_local_weights_resolves_to_the_path(registry):
@@ -71,10 +71,10 @@ def test_a_path_on_disk_wins_for_every_engine(registry):
 # ── refusals, and whether they help ─────────────────────────────────────────
 def test_an_unknown_reference_lists_the_ids_that_would_work(registry):
     with pytest.raises(BaseModelError) as exc:
-        resolve_base_model("kraken-medieval_generic_z", "kraken", registry,
+        resolve_base_model("kraken-primz", "kraken", registry,
                            path_exists=never_exists)
     message = str(exc.value)
-    assert "kraken-medieval_generic_b" in message      # what they probably meant
+    assert "kraken-prima" in message      # what they probably meant
     assert "10.xxxx/zenodo.NNNN" in message            # and the other accepted form
 
 
@@ -132,7 +132,7 @@ def test_a_doi_resolves_without_any_registry():
 
 def test_a_registry_id_without_a_registry_says_so_plainly():
     with pytest.raises(BaseModelError, match="not a file, a registry id"):
-        resolve_base_model("kraken-medieval_generic_b", "kraken", None,
+        resolve_base_model("kraken-prima", "kraken", None,
                            path_exists=never_exists)
 
 
@@ -143,6 +143,6 @@ def test_the_shipped_registry_resolves_the_id_that_failed():
     from atr_serving.registry import load_registry
 
     config = Path(__file__).resolve().parents[1] / "config" / "models.yaml"
-    resolved = resolve_base_model("kraken-medieval_generic_b", "kraken",
+    resolved = resolve_base_model("kraken-prima", "kraken",
                                   load_registry(config), path_exists=never_exists)
     assert resolved.ref.startswith("10.5281/zenodo.")

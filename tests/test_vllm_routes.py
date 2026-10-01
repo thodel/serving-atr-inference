@@ -106,7 +106,7 @@ def test_chat_completions_rejects_non_vllm(client: TestClient):
     r = client.post(
         "/v1/chat/completions",
         headers={"X-API-Key": KEY},
-        json={"model": "kraken-catmus-medieval", "messages": []},
+        json={"model": "kraken-catmus_medieval", "messages": []},
     )
     assert r.status_code == 400
 
