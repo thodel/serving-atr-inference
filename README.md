@@ -460,6 +460,8 @@ An unreachable hub is **not** a bad spec: the job queues anyway with
 run starts — possibly hours later — and a network hiccup now should not cost the
 submission.
 
+There also exists a .parquet file with an altered xml_content in which all XML-Signatures beside <Textline> have been removed.
+
 Add `"engine": "vllm"` (and VLM `params`) to submit a QLoRA fine-tune instead; the
 envelope is otherwise identical.
 
