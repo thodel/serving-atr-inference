@@ -331,6 +331,7 @@ models:
   - id: party
     engine: party
     zenodo_id: "10.5281/zenodo.20642057"
+    description: "Pretrained multilingual Party base model"
     task: htr
     level: page
     languages: [mul]
@@ -422,6 +423,7 @@ models:
   - id: kraken-fondue_gd_v2
     engine: kraken
     zenodo_id: "10.5281/zenodo.21536798"
+    description: "FoNDUE-GD"
     task: htr
     level: page
     languages: [fr, de, es, la, nl]
@@ -463,6 +465,7 @@ models:
   - id: kraken-old_norse_am305
     engine: kraken
     zenodo_id: "10.5281/zenodo.20529753"
+    description: "HTR model for AM 305 fol (Járnsíða/Magnúsbók, Old Norse law, 13th c.)"
     task: htr
     level: page
     languages: [non]
@@ -476,6 +479,7 @@ models:
   - id: kraken-prima
     engine: kraken
     zenodo_id: "10.5281/zenodo.18220238"
+    description: "PRIMA HTR"
     task: htr
     level: page
     languages: [it]
@@ -490,6 +494,7 @@ models:
   - id: kraken-bastarda_inzigkofen
     engine: kraken
     zenodo_id: "10.5281/zenodo.18207779"
+    description: "Bastarda HTR model related to the Augustinian canonesses in Inzigkofen"
     base_model: "10.5281/zenodo.15030337"   # fine-tune of CATMuS Medieval, served here too
     task: htr
     level: page
@@ -507,6 +512,7 @@ models:
   - id: kraken-cursive_inzigkofen
     engine: kraken
     zenodo_id: "10.5281/zenodo.18207767"
+    description: "Cursive HTR model related to the Augustinian canonesses in Inzigkofen"
     base_model: "10.5281/zenodo.15030337"   # fine-tune of CATMuS Medieval, served here too
     task: htr
     level: page
@@ -524,6 +530,7 @@ models:
   - id: kraken-textualis_inzigkofen
     engine: kraken
     zenodo_id: "10.5281/zenodo.18207719"
+    description: "Textualis HTR model related to the Augustinian canonesses in Inzigkofen"
     base_model: "10.5281/zenodo.13862096"   # fine-tune of TRIDIS v2, served here too
     task: htr
     level: page
@@ -541,6 +548,7 @@ models:
   - id: kraken-mendelssohn_letters
     engine: kraken
     zenodo_id: "10.5281/zenodo.18207676"
+    description: "Fanny loves Wilhelm. HTR Model trained on letters and notes by Fanny Mendelssohn (Fanny Hensel)"
     task: htr
     level: page
     languages: [de]
@@ -557,6 +565,7 @@ models:
   - id: kraken-french_vietnamese
     engine: kraken
     zenodo_id: "10.5281/zenodo.17690418"
+    description: "HTR model for 19th-20th century French-Vietnamese historical documents with Vietnamese tone mark support"
     base_model: "10.5281/zenodo.10592716"   # fine-tune of CATMuS-Print [Large], served here too
     task: htr
     level: page
@@ -572,6 +581,7 @@ models:
   - id: kraken-bifrost_old_norse
     engine: kraken
     zenodo_id: "10.5281/zenodo.15366732"
+    description: "Bifrost: A Handwritten Text Recognition Model for Old Norse"
     base_model: "10.5281/zenodo.15030337"   # fine-tune of CATMuS Medieval, served here too
     task: htr
     level: page
@@ -590,6 +600,7 @@ models:
   - id: kraken-catmus_medieval
     engine: kraken
     zenodo_id: "10.5281/zenodo.15030337"
+    description: "CATMuS Medieval"
     task: htr
     level: page
     languages: [fro, la, es, it]
@@ -603,6 +614,7 @@ models:
   - id: kraken-kuzushiji
     engine: kraken
     zenodo_id: "10.5281/zenodo.13942714"
+    description: "HTR model for (Japanese) Kuzushiji"
     task: htr
     level: page
     languages: [ja]
@@ -617,6 +629,7 @@ models:
   - id: kraken-tridis_v2
     engine: kraken
     zenodo_id: "10.5281/zenodo.13862096"
+    description: "TRIDIS v2 : HTR model for Multilingual Medieval and Early Modern Documentary Manuscripts (11th-16th)"
     task: htr
     level: page
     languages: [la, fr, es]
@@ -631,6 +644,7 @@ models:
   - id: kraken-samaritan
     engine: kraken
     zenodo_id: "10.5281/zenodo.13814200"
+    description: "Recognition model for historical Samaritan Manuscripts for one column pages, model trained on 13 pentateuchal Samaritan manuscripts"
     task: htr
     level: page
     languages: [sam]
@@ -645,6 +659,7 @@ models:
   - id: kraken-mccatmus
     engine: kraken
     zenodo_id: "10.5281/zenodo.13788177"
+    description: "McCATMuS - Transcription model for handwritten, printed and typewritten documents from the 16th century to the 21st century"
     task: htr
     level: page
     languages: [fr, la, es, en, de, it, oc]
@@ -659,6 +674,7 @@ models:
   - id: kraken-latin_graphematic_11c
     engine: kraken
     zenodo_id: "10.5281/zenodo.13741957"
+    description: "Model trained on 11th century manuscripts to produce graphematic transcription (Latin)."
     task: htr
     level: page
     languages: [la]
@@ -673,6 +689,7 @@ models:
   - id: kraken-latin_expanded_11c
     engine: kraken
     zenodo_id: "10.5281/zenodo.13736584"
+    description: "Model trained on 11th century manuscripts to produce expanded transcription (Latin)."
     task: htr
     level: page
     languages: [la]
@@ -688,6 +705,7 @@ models:
   - id: kraken-bohemian_19th
     engine: kraken
     zenodo_id: "10.5281/zenodo.11673242"
+    description: "Kraken HTR recognition model, Bohemian provenance 19th century"
     task: htr
     level: page
     languages: [de, cs]
@@ -703,6 +721,7 @@ models:
   - id: kraken-latin_incunabula
     engine: kraken
     zenodo_id: "10.5281/zenodo.11113737"
+    description: "Latin Incunabula and Early Prints"
     base_model: "10.5281/zenodo.10592716"   # fine-tune of CATMuS-Print [Large], served here too
     task: ocr
     level: page
@@ -721,6 +740,7 @@ models:
   - id: kraken-manu_mcfondue
     engine: kraken
     zenodo_id: "10.5281/zenodo.10886224"
+    description: "HTR-United - Manu Mc Fondue (Manuscripts of Modern and Contemporaneous French - Manu McFrench v4)"
     task: htr
     level: page
     languages: [fr, la, de]
@@ -735,6 +755,7 @@ models:
   - id: kraken-catmus_gothic_print
     engine: kraken
     zenodo_id: "10.5281/zenodo.10599911"
+    description: "CATMuS Gothic Print"
     base_model: "10.5281/zenodo.15030337"   # fine-tune of CATMuS Medieval, served here too
     task: htr
     level: page
@@ -751,6 +772,7 @@ models:
   - id: kraken-catmus_print_large
     engine: kraken
     zenodo_id: "10.5281/zenodo.10592716"
+    description: "CATMuS-Print [Large]"
     task: ocr
     level: page
     languages: [fr, es, de, en, it, la]
@@ -765,6 +787,7 @@ models:
   - id: kraken-estournelles_typewritten
     engine: kraken
     zenodo_id: "10.5281/zenodo.10556673"
+    description: "Transcription model for Paul d'Estournelles de Constant French typewritten letters (1914-1924)"
     task: htr
     level: page
     languages: [fr]
@@ -779,6 +802,7 @@ models:
   - id: kraken-german_print
     engine: kraken
     zenodo_id: "10.5281/zenodo.10519596"
+    description: "OCR model for German prints trained from several datasets"
     task: htr
     level: page
     languages: [de, la]
@@ -793,6 +817,7 @@ models:
   - id: kraken-peraire_french
     engine: kraken
     zenodo_id: "10.5281/zenodo.8193498"
+    description: "Transcription model for Lucien Peraire's handwriting (French, 20th century)"
     task: htr
     level: page
     languages: [fr]
@@ -807,6 +832,7 @@ models:
   - id: kraken-austrian_fraktur
     engine: kraken
     zenodo_id: "10.5281/zenodo.7933402"
+    description: "Fraktur model trained from enhanced Austrian Newspapers dataset"
     task: htr
     level: page
     languages: [de]
@@ -821,6 +847,7 @@ models:
   - id: kraken-glagolitic_print
     engine: kraken
     zenodo_id: "10.5281/zenodo.7755504"
+    description: "HTR model for transcribing Glagolitic sources printed in the 16th century Tübingen-Urach printing style into the Latin script"
     task: htr
     level: page
     languages: [cu]
@@ -835,6 +862,7 @@ models:
   - id: kraken-cyrillic_uncial
     engine: kraken
     zenodo_id: "10.5281/zenodo.7755483"
+    description: "Generic HTR model for Old Cyrillic uncial and semi-uncial script styles (11th-16th c.)"
     task: htr
     level: page
     languages: [cu]
@@ -849,6 +877,7 @@ models:
   - id: kraken-cremma_medieval
     engine: kraken
     zenodo_id: "10.5281/zenodo.7631619"
+    description: "Generic CREMMA Model for Medieval Manuscripts (Latin and Old French), 8-15th century"
     task: htr
     level: page
     languages: [la, fro]
@@ -863,6 +892,7 @@ models:
   - id: kraken-medieval_latin_french_abbreviated
     engine: kraken
     zenodo_id: "10.5281/zenodo.7516310"
+    description: "HTR Model - Medieval Latin and French 12th-15th c. with abbreviations (no expansion)"
     task: htr
     level: page
     languages: [la, fro]
@@ -878,6 +908,7 @@ models:
   - id: kraken-medieval_latin_french_expanded
     engine: kraken
     zenodo_id: "10.5281/zenodo.7516057"
+    description: "HTR Model - Medieval Latin and French 12th-15th c. expanded (no abbr.)"
     task: htr
     level: page
     languages: [la, fro]
@@ -891,6 +922,7 @@ models:
   - id: kraken-gallicorpora
     engine: kraken
     zenodo_id: "10.5281/zenodo.7410529"
+    description: "Gallicorpora+"
     task: htr
     level: page
     languages: [fr]
@@ -905,6 +937,7 @@ models:
   - id: kraken-openiti_persian_print
     engine: kraken
     zenodo_id: "10.5281/zenodo.7051644"
+    description: "Printed Persian Base Model Trained on the OpenITI Corpus"
     base_model: "10.5281/zenodo.7050270"   # fine-tune of the OpenITI Arabic-script base, served here too
     task: htr
     level: page
@@ -920,6 +953,7 @@ models:
   - id: kraken-openiti_ottoman_print
     engine: kraken
     zenodo_id: "10.5281/zenodo.7050342"
+    description: "Printed Ottoman Base Model Trained on the OpenITI Corpus"
     base_model: "10.5281/zenodo.7050270"   # fine-tune of the OpenITI Arabic-script base, served here too
     task: htr
     level: page
@@ -936,6 +970,7 @@ models:
   - id: kraken-openiti_arabic_print
     engine: kraken
     zenodo_id: "10.5281/zenodo.7050270"
+    description: "Printed Arabic-Script Base Model Trained on the OpenITI Corpus"
     task: htr
     level: page
     languages: [ar, fa, ur, ota]
@@ -950,6 +985,7 @@ models:
   - id: kraken-lectaurep_french
     engine: kraken
     zenodo_id: "10.5281/zenodo.6542744"
+    description: "LECTAUREP Contemporary French Model (Administration)"
     task: htr
     level: page
     languages: [fr]
@@ -964,6 +1000,7 @@ models:
   - id: kraken-hebrew_sephardi
     engine: kraken
     zenodo_id: "10.5281/zenodo.5468665"
+    description: "Medieval Hebrew manuscripts in Sephardi bookhand version 1.0"
     task: htr
     level: page
     languages: [he]
@@ -978,6 +1015,7 @@ models:
   - id: kraken-english_print
     engine: kraken
     zenodo_id: "10.5281/zenodo.2577813"
+    description: "A generalized model for English printed text"
     task: htr
     level: page
     languages: [en]

@@ -6,6 +6,11 @@ drift apart nothing fails — the model loads, the recogniser runs, and the mode
 selector routes by a name that describes different weights. That is invisible
 until somebody reads a Zenodo page (#101).
 
+It also holds each entry's `description` against that same title. The description
+is what `/models` serves to consumers, so a stale one is the old problem wearing
+a different hat: `--check` fails on a mismatch there too, with no baseline to
+grandfather it, because the registry starts clean (#198).
+
     python scripts/audit_registry.py                  # resolve and print the table
     python scripts/audit_registry.py --engine kraken  # one engine only
     python scripts/audit_registry.py --check          # fail if the mismatch set grew
@@ -128,9 +133,13 @@ def audit(engine: str | None) -> list[dict]:
             continue
         record = record_id(model["zenodo_id"])
         title = fetch_title(record)
+        described = model.get("description")
         rows.append({
             "id": model["id"], "engine": model.get("engine"), "record": record,
             "title": title, "verdict": classify(model["id"], title),
+            "description": described,
+            # Unresolved records say nothing about the description either way.
+            "description_ok": True if title.startswith("<unresolved") else described == title,
         })
         time.sleep(0.4)
     return rows
@@ -156,6 +165,14 @@ def report(rows: list[dict]) -> None:
         width = max(len(r["id"]) for r in bad)
         for row in bad:
             print("  %-*s  %-9s  %s" % (width, row["id"], row["record"], row["title"][:64]))
+
+    adrift = [r for r in rows if not r["description_ok"]]
+    if adrift:
+        print("\ndescription is not the record's title:")
+        width = max(len(r["id"]) for r in adrift)
+        for row in adrift:
+            print("  %-*s  %s" % (width, row["id"], row["description"] or "(none)"))
+            print("  %-*s  record says: %s" % (width, "", row["title"][:64]))
 
     dupes = duplicates(rows)
     if dupes:
@@ -229,6 +246,13 @@ def main() -> int:
         return 0
 
     if args.check:
+        adrift = sorted(r["id"] for r in rows if not r["description_ok"])
+        if adrift:
+            print("\n%d description(s) no longer match their record: %s"
+                  % (len(adrift), ", ".join(adrift)))
+            print("A description is the record's title, verbatim — fix the registry,"
+                  " not this check.")
+            return 1
         known = set(json.loads(BASELINE.read_text(encoding="utf-8"))["mismatched_ids"]) \
             if BASELINE.exists() else set()
         new = sorted(set(current) - known)
