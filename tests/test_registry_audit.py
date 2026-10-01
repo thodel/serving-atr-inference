@@ -1,7 +1,13 @@
 """The kraken registry, held against the recorded mismatch set (#101).
 
-28 of 43 kraken entries name something their DOI does not contain. #101 asked
-for two things and deliberately did neither of two others:
+**The mapping has since been corrected (PR #198): every entry is named after the
+Zenodo record its DOI loads, the baseline is empty, and the duplicates are gone.**
+What follows therefore pins the corrected state — the same tests, read the other
+way round: a new mismatch, a new duplicate pair, or a re-appearing DOI without
+weights all fail here.
+
+28 of 43 kraken entries used to name something their DOI does not contain. #101
+asked for two things and deliberately did neither of two others:
 
     1. a report-only `scripts/audit_registry.py` that resolves every DOI and
        prints that table, so the state is checkable at any time;
@@ -18,12 +24,13 @@ network, because they are facts about the registry file rather than about Zenodo
 * and `classify()`, the heuristic the whole table rests on, held against the
   rows of the issue itself.
 
-**Nothing here corrects a mapping.** #101's reason stands: the name says what
-somebody wanted, the DOI says what they got, and neither says which is the
-mistake. Three of the mismatches resolve to models trained on the Inzigkofen
-manuscripts, which this project benchmarks against — a wrong guess would turn
-memorisation into a published recognition number (#100). The test's job is to
-make a change visible, not to make one.
+**How the correction was decided**, since this file used to say it could not be:
+the DOI is what the engine downloads and loads, so the record is the only
+verifiable side, and most of the wished-for names (`medieval_generic_a`…`_e`,
+`printed_urdu_wide`, `czech_historic`) name no published model at all. The three
+Inzigkofen models are now named after their records and carry the ground truth
+they were trained on, which is what keeps #100 — memorisation reported as a
+recognition number — visible at the point of choosing a model.
 """
 
 import json
@@ -47,11 +54,13 @@ from atr_serving.registry_audit import (  # noqa: E402
 )
 from scripts.audit_registry import classify, offline, record_id  # noqa: E402
 
-#: The three entries that make this more than untidy naming: their DOIs resolve
-#: to models trained on the Inzigkofen manuscripts, the corpus this project
-#: benchmarks recognition against (#100).
-INZIGKOFEN = ("kraken-medieval_generic_a", "kraken-medieval_generic_c",
-              "kraken-medieval_generic_d")
+#: The three entries that make this more than untidy naming: they are trained on
+#: the Inzigkofen manuscripts, the corpus this project benchmarks recognition
+#: against (#100). Named `medieval_generic_a/_c/_d` until PR #198.
+INZIGKOFEN = ("kraken-bastarda_inzigkofen", "kraken-cursive_inzigkofen",
+              "kraken-textualis_inzigkofen")
+#: The DOI that publishes a metadata JSON and no .mlmodel, removed in PR #198.
+WITHOUT_WEIGHTS = "18732245"
 
 
 @pytest.fixture(scope="module")
@@ -71,7 +80,7 @@ def test_the_recorded_mismatch_set_lives_in_the_repository(baseline):
     can read."""
     assert BASELINE.is_file()
     assert BASELINE.name == "registry_mismatches.json"
-    assert len(baseline) == 28
+    assert len(baseline) == 0, "PR #198 corrected every mismatch; see the diff"
 
 
 def test_the_baseline_is_sorted_and_free_of_duplicates(baseline):
@@ -80,12 +89,31 @@ def test_the_baseline_is_sorted_and_free_of_duplicates(baseline):
     assert baseline == sorted(set(baseline))
 
 
-def test_the_inzigkofen_entries_are_still_flagged(baseline):
-    """The three that would turn memorisation into a recognition number. If one
-    leaves the baseline, it was corrected or the baseline was edited, and from
-    here those look alike."""
+def test_the_inzigkofen_entries_say_what_they_were_trained_on(kraken):
+    """The three that would turn memorisation into a recognition number. They are
+    no longer hidden behind a generic name, and each one records the ground truth
+    its record names — which is what a caller needs before scoring on Inzigkofen
+    (#100)."""
+    by_id = {s.id: s for s in kraken}
+
     for model_id in INZIGKOFEN:
-        assert model_id in baseline
+        assert model_id in by_id, f"{model_id} left the registry"
+        assert by_id[model_id].training_datasets, model_id
+
+
+def test_a_fine_tune_of_a_served_model_says_so(kraken):
+    """`kraken-bifrost_old_norse` is a fine-tune of `kraken-catmus_medieval`,
+    which is served here too: two such candidates are not independent, however
+    different their ids look. The lineage has to be readable from the registry."""
+    by_doi = {normalize_zenodo_id(str(s.zenodo_id)): s.id for s in kraken}
+    lineage = {s.id: normalize_zenodo_id(str(s.base_model))
+               for s in kraken if s.base_model}
+
+    assert lineage, "no kraken entry records a base_model"
+    assert lineage["kraken-bifrost_old_norse"] == "15030337"
+    for model_id, base in lineage.items():
+        assert base in by_doi, f"{model_id} names a base this registry does not serve"
+        assert by_doi[base] != model_id
 
 
 def test_every_recorded_mismatch_is_still_in_the_registry_with_a_doi(baseline, kraken):
@@ -100,16 +128,26 @@ def test_every_recorded_mismatch_is_still_in_the_registry_with_a_doi(baseline, k
 
 
 def test_the_mismatch_set_can_shrink_but_not_grow(baseline, kraken):
-    """The "never grow" half, as a statement about counts: 28 of 43. A new
-    kraken entry nobody resolved is exactly what produced this issue — the block
-    was filled in without per-entry checking — so the ratio is pinned too."""
+    """The "never grow" half, as a statement about counts: 0 of 37 since PR #198
+    (was 28 of 43). A new kraken entry nobody resolved is exactly what produced
+    this issue — the block was filled in without per-entry checking — so the
+    ratio is pinned too."""
     assert len(baseline) <= len(kraken)
-    assert (len(kraken), len(baseline)) == (43, 28)
+    assert (len(kraken), len(baseline)) == (37, 0)
 
 
 def test_a_removed_id_is_reported(kraken):
     assert missing_from_registry(["kraken-not-in-the-registry"], kraken) == \
         ["kraken-not-in-the-registry"]
+
+
+def test_the_doi_that_publishes_no_weights_is_not_served(kraken):
+    """zenodo.18732245 (MiDRASH Geniza) ships a metadata JSON and no .mlmodel, so
+    kraken has nothing to load. Advertising it costs every caller a round trip to
+    find that out — the lesson of #30, applied again in PR #198."""
+    records = {normalize_zenodo_id(str(s.zenodo_id)) for s in kraken}
+
+    assert WITHOUT_WEIGHTS not in records
 
 
 def test_an_id_that_lost_its_doi_is_reported(kraken):
@@ -124,19 +162,18 @@ def test_an_id_that_lost_its_doi_is_reported(kraken):
 
 
 # ── the duplicates, which need no network ───────────────────────────────────
-def test_five_dois_are_claimed_by_two_ids_each(kraken):
-    """A fact about the file. #101's prose says four and its own table lists
-    five, which is why this is a test and not a sentence."""
-    duplicates = duplicate_dois(kraken)
-
-    assert len(duplicates) == 5
-    assert all(len(ids) == 2 for ids in duplicates.values())
+def test_no_doi_is_claimed_by_two_ids(kraken):
+    """Five were, each under an underscore and a hyphen spelling of one name, so
+    a caller could pick either and not know they were one model. PR #198 kept one
+    id per record."""
+    assert duplicate_dois(kraken) == {}
 
 
-def test_the_registry_serves_fewer_models_than_it_lists(kraken):
+def test_the_registry_lists_exactly_the_models_it_serves(kraken):
+    """It listed 43 entries for 38 records before PR #198."""
     unique = {normalize_zenodo_id(str(s.zenodo_id)) for s in kraken}
 
-    assert (len(kraken), len(unique)) == (43, 38)
+    assert (len(kraken), len(unique)) == (37, 37)
 
 
 def test_both_halves_of_every_duplicate_are_servable(kraken):
@@ -155,12 +192,13 @@ def test_each_duplicate_pair_is_an_underscore_and_a_hyphen_of_one_name(kraken):
         assert len({i.replace("-", "_") for i in ids}) == 1, ids
 
 
-def test_the_duplicates_are_the_pairs_the_issue_named(kraken):
-    """Shrinking is welcome; a new pair is not."""
-    pairs = {tuple(ids) for ids in duplicate_dois(kraken).values()}
+def test_the_pairs_the_issue_named_are_gone(kraken):
+    """Shrinking is welcome; a new pair is not. These two were the issue's own
+    examples, and the hyphen spellings no longer exist at all."""
+    ids = {s.id for s in kraken}
 
-    assert ("kraken-catmus-medieval", "kraken-catmus_medieval") in pairs
-    assert ("kraken-printed-french", "kraken-printed_french") in pairs
+    assert not {"kraken-catmus-medieval", "kraken-printed-french"} & ids
+    assert duplicate_dois(kraken) == {}
 
 
 def test_an_entry_without_a_doi_is_not_counted(kraken):
@@ -267,17 +305,18 @@ def test_the_offline_run_needs_no_network(capsys):
     assert offline("kraken") == 0
 
     printed = capsys.readouterr().out
-    assert "43 entries for kraken, 43 with a DOI, 38 distinct records" in printed
-    assert "28 ids recorded as mismatched, all still in the registry" in printed
+    assert "37 entries for kraken, 37 with a DOI, 37 distinct records" in printed
+    assert "0 ids recorded as mismatched" in printed
 
 
-def test_the_offline_run_names_every_duplicate_pair(capsys):
+def test_the_offline_run_reports_no_duplicates(capsys):
+    """It listed five pairs before PR #198; the section is now absent rather than
+    empty, so a returning pair is visible in the output as well as in the tests."""
     offline("kraken")
 
     printed = capsys.readouterr().out
-    for model_id in ("kraken-printed-french", "kraken-catmus_medieval",
-                     "kraken-openiti-arabic"):
-        assert model_id in printed
+    assert "same DOI under more than one id" not in printed
+    assert "kraken-printed-french" not in printed
 
 
 def test_a_baseline_that_no_longer_fits_the_registry_fails_the_offline_run(
@@ -302,7 +341,7 @@ def test_the_offline_run_is_reachable_from_the_command_line():
         capture_output=True, text=True, timeout=120, cwd=ROOT)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "38 distinct records" in result.stdout
+    assert "37 distinct records" in result.stdout
 
 
 def test_the_script_never_writes_the_registry():
