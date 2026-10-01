@@ -39,7 +39,10 @@ from typing import Iterable
 
 import yaml
 
+from atr_serving.base_models import BACKENDS
+
 __all__ = [
+    "BACKENDS",
     "CATALOGUE",
     "CatalogueError",
     "Change",
@@ -125,6 +128,9 @@ class Entry:
     downloads: int | None = None
     #: Kept for the report so a row does not need a second lookup.
     title: str | None = None
+    #: Which backend could load it, from :mod:`atr_serving.base_models` (#115).
+    #: ``None`` is "not judged yet" or "none could" — ``reason`` says which.
+    backend: str | None = None
 
     @property
     def key(self) -> str:
@@ -206,6 +212,10 @@ def _validate(entry: Entry) -> None:
         raise CatalogueError(
             f"{entry.key}: verdict {entry.verdict!r} needs a reason — without one the "
             "next reader has to make the same decision again")
+    if entry.backend is not None and entry.backend not in BACKENDS:
+        raise CatalogueError(
+            f"{entry.key}: backend {entry.backend!r} is not one of "
+            f"{', '.join(BACKENDS)}")
     if entry.verdict in DECIDED and not (entry.by or "").strip():
         raise CatalogueError(
             f"{entry.key}: verdict {entry.verdict!r} needs a 'by' — a decision nobody "
