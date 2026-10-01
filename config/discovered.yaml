@@ -1,0 +1,21 @@
+# Discovered model candidates, and what was decided about them (#113).
+#
+# Written by scripts/discover_models.py. Hand-editable, and meant to be:
+# recording a verdict is the point of the file. The checked fields are
+#
+#   verdict  new | watching | rejected | adopted
+#   reason   required for 'rejected' — the next reader must learn why
+#   by, at   required for anything other than 'new'
+#
+# and discover_models.py refuses to run against a file that breaks them rather
+# than overwriting it. The easy way:
+#
+#   scripts/discover_models.py --decide hf:OWNER/MODEL --verdict rejected \
+#       --reason "line-level only, no page model" --by tobias
+#
+# A 'rejected' candidate does not come back — unless its upstream moved, and
+# then it comes back saying so, because the rejection was about the model as it
+# was. Nothing is ever deleted here: a candidate a query stopped matching keeps
+# its verdict, or it would be new again the next time a search term changes.
+version: 1
+candidates: []
