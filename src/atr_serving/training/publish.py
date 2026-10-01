@@ -34,12 +34,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Literal, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Protocol, Sequence
 
 import yaml
 
 from atr_serving.training.contracts import utcnow
+
+if TYPE_CHECKING:  # the registry is resolved lazily; see _registry()
+    from atr_serving.registry import ModelSpec, Registry
 
 __all__ = [
     "PublishError",
@@ -299,6 +303,29 @@ def _plain(value: Any) -> str:
     return "—" if value is None else str(value)
 
 
+@lru_cache(maxsize=1)
+def _registry() -> "Registry | None":
+    """The registry this box serves, for resolving a base given as its id.
+
+    Best-effort on purpose: an upload must not fail because a config file moved,
+    and a card that cannot resolve an id says so (see :func:`_base_cell`) rather
+    than guessing. Cached because one publish run writes many cards.
+    """
+    try:
+        from atr_serving.config import Settings
+        from atr_serving.registry import load_registry
+
+        return load_registry(Settings().models_config)
+    except Exception:                                  # noqa: BLE001 — never fatal
+        return None
+
+
+def _resolved_base(base: str) -> "ModelSpec | None":
+    """The registry entry a base id names, if this box knows it."""
+    registry = _registry()
+    return registry.get(base) if registry is not None else None
+
+
 def _is_hub_repo(ref: str) -> bool:
     """``owner/name`` — the only shape the hub's ``base_model:`` can resolve.
 
@@ -314,15 +341,35 @@ def _is_hub_repo(ref: str) -> bool:
 
 
 def _base_cell(base: str | None) -> str:
-    """The provenance row's base: linked where a link resolves, plain otherwise."""
+    """The provenance row's base: what the weights are, and where they live.
+
+    A registry id names nothing by itself — that is how a card came to claim
+    `kraken-early_modern_german` for CATMuS Medieval (#101). So an id is looked
+    up in the registry and reported as its title plus the reference the registry
+    resolves it to: a DOI, or the path of weights trained here. The id stays in
+    the line, because it is what the training request asked for.
+    """
     if not base:
         return "trained from scratch"
     if base.startswith("10."):
         return f"[`{base}`](https://doi.org/{base})"
     if _is_hub_repo(base):
         return f"[`{base}`](https://huggingface.co/{base})"
-    return (f"`{base}` — a gateway registry id; `config/models.yaml` resolves it "
-            f"to the weights, and the id alone does not name them")
+
+    spec = _resolved_base(base)
+    if spec is None:
+        return (f"`{base}` — a gateway registry id this box's registry does not "
+                f"know; it names no weights by itself")
+    if spec.zenodo_id:
+        where = f"[`{spec.zenodo_id}`](https://doi.org/{spec.zenodo_id})"
+    elif spec.local_path:
+        where = f"local weights `{spec.local_path}`"
+    elif spec.hf_repo:
+        where = f"[`{spec.hf_repo}`](https://huggingface.co/{spec.hf_repo})"
+    else:
+        where = "no weights reference in the registry"
+    title = spec.description or spec.id
+    return f"**{title}** — {where}, requested as `{base}`"
 
 
 def _frontmatter(model: TrainedModel, licence: str | None) -> str:
@@ -347,10 +394,16 @@ def _frontmatter(model: TrainedModel, licence: str | None) -> str:
     header["tags"] = [
         "htr", "ocr", "handwritten-text-recognition", "historical-documents", model.engine,
     ]
-    # Only a hub repo: see _is_hub_repo. A DOI or a registry id is stated in the
-    # provenance table instead, where it can be read for what it is.
-    if model.base_model and _is_hub_repo(model.base_model):
-        header["base_model"] = model.base_model
+    # Only a hub repo: see _is_hub_repo. A DOI is stated in the provenance table
+    # instead, where it can be read for what it is; a registry id earns the field
+    # when it resolves to a hub repo, which is a relation the hub can follow.
+    if model.base_model:
+        if _is_hub_repo(model.base_model):
+            header["base_model"] = model.base_model
+        else:
+            resolved = _resolved_base(model.base_model)
+            if resolved is not None and resolved.hf_repo:
+                header["base_model"] = resolved.hf_repo
     if datasets:
         # De-duplicated, order preserved: two slices of one corpus are one link.
         header["datasets"] = list(dict.fromkeys(d.repo for d in datasets))
