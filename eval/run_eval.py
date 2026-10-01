@@ -5,7 +5,7 @@ Ports the os-vlm-tester result schema (outputs/<model>/<image>.json +
 outputs/index.jsonl) but calls the live ATR gateway instead of loading models
 locally.
 
-    python eval/run_eval.py --images-dir data/test --models kraken-catmus-medieval,party
+    python eval/run_eval.py --images-dir data/test --models kraken-catmus_medieval,party
     python eval/run_eval.py --images-dir data/test --models-file models.txt \
         --gt-dir data/test/gt --gateway http://130.92.59.240:8200
 

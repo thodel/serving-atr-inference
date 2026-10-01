@@ -777,7 +777,7 @@ def test_the_published_file_is_readable_by_the_trainers_reader(tmp_path, share):
         assert (entry.engine, entry.zenodo_id, entry.local_path, entry.enabled) == (
             spec.engine, spec.zenodo_id, spec.local_path, spec.enabled), model_id
     # The two ids real jobs named as bases, as of 16.09.2026 (11 jobs and 1).
-    for model_id in ("kraken-early_modern_german", "kraken-medieval_generic_b"):
+    for model_id in ("kraken-catmus_medieval", "kraken-prima"):
         assert entries[model_id].engine == "kraken"
         assert entries[model_id].zenodo_id.startswith("10.5281/zenodo.")
     # The per-model file holds one entry, readable by the same model.

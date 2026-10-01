@@ -7,8 +7,9 @@ after prepare and compile had already run —
 
     ValueError in train: kraken-medieval_generic_b is not a valid DOI
 
-`kraken-medieval_generic_b` is in ``config/models.yaml``. The user had every reason to
-expect it to work, and lost a run finding out otherwise.
+`kraken-medieval_generic_b` was in ``config/models.yaml`` — it is ``kraken-prima`` since
+the registry was renamed after the records its DOIs load (#101). The user had every
+reason to expect it to work, and lost a run finding out otherwise.
 
 Two things are fixed here, and the second matters more than the first:
 

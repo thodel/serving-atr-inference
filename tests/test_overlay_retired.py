@@ -53,7 +53,7 @@ def overlay(tmp_path: Path) -> Path:
 def curated(tmp_path: Path) -> Registry:
     path = tmp_path / "models.yaml"
     path.write_text(yaml.safe_dump({"models": [{
-        "id": "kraken-catmus-medieval", "engine": "kraken",
+        "id": "kraken-catmus_medieval", "engine": "kraken",
         "zenodo_id": "10.5281/zenodo.2", "vram_mb": 500}]}), encoding="utf-8")
     return load_registry(path)
 
@@ -92,7 +92,7 @@ def test_the_startup_registry_is_now_the_curated_one_alone(curated, share, overl
     nothing. They arrive with the first look, within `startup_wait_s`."""
     watch = RegistryWatch(curated, root=share, interval_s=0)
 
-    assert {spec.id for spec in watch.initial().all()} == {"kraken-catmus-medieval"}
+    assert {spec.id for spec in watch.initial().all()} == {"kraken-catmus_medieval"}
 
 
 def test_the_duplicate_no_longer_produces_a_warning_per_entry(curated, share, overlay):

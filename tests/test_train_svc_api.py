@@ -621,7 +621,7 @@ class TestBaseModelAtSubmit:
         from atr_serving.registry import ModelSpec, Registry
 
         app.state.registry = Registry([
-            ModelSpec(id="kraken-late_medieval_german", engine="kraken",
+            ModelSpec(id="kraken-bifrost_old_norse", engine="kraken",
                       zenodo_id="10.5281/zenodo.15366732", task="htr"),
         ])
         yield
@@ -631,12 +631,12 @@ class TestBaseModelAtSubmit:
     def test_an_unknown_base_model_is_refused_before_a_job_exists(self, client):
         resp = client.post("/jobs", json={**BODY, "base_model": "kraken-nope"})
         assert resp.status_code == 400
-        assert "kraken-late_medieval_german" in resp.json()["detail"]
+        assert "kraken-bifrost_old_norse" in resp.json()["detail"]
         assert client.get("/jobs").json()["jobs"] == []   # nothing was queued
 
     def test_a_registry_id_is_accepted(self, client):
         resp = client.post("/jobs", json={
-            **BODY, "base_model": "kraken-late_medieval_german",
+            **BODY, "base_model": "kraken-bifrost_old_norse",
             "params": {"batch_size": 16, "epochs": 30, "resize": "union"}})
         assert resp.status_code == 202
 

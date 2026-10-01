@@ -165,7 +165,7 @@ curl -s -X POST "http://localhost:8200/train/jobs" \
   -H "Content-Type: application/json" -d '{
     "model_id": "mein-erster-versuch",
     "engine": "kraken",
-    "base_model": "kraken-early_modern_german",
+    "base_model": "kraken-catmus_medieval",
     "dataset": {
       "hf_repo": "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi",
       "train_projects": ["GT_Thun-Training_(TEST-DEMO)"],

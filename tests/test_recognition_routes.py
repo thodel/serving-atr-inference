@@ -97,13 +97,13 @@ def test_segment_requires_key(client: TestClient):
 def test_recognize_routes_to_kraken(client: TestClient, fake: FakeKrakenClient):
     resp = client.post(
         "/recognize", headers=HEADERS, files={"image": IMG},
-        data={"model": "kraken-catmus-medieval"},
+        data={"model": "kraken-catmus_medieval"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["engine"] == "kraken"
     assert body["text"] == "hello\nworld"
-    assert body["model"] == "kraken-catmus-medieval"
+    assert body["model"] == "kraken-catmus_medieval"
     assert fake.calls[0][0] == "recognize"
 
 
@@ -130,7 +130,7 @@ def test_recognize_passes_precomputed_lines(client: TestClient, fake: FakeKraken
     lines = '[{"order": 0, "baseline": [[0,0],[5,0]], "bbox": [0,0,5,2]}]'
     resp = client.post(
         "/recognize", headers=HEADERS, files={"image": IMG},
-        data={"model": "kraken-catmus-medieval", "lines": lines},
+        data={"model": "kraken-catmus_medieval", "lines": lines},
     )
     assert resp.status_code == 200
     passed_lines = fake.calls[0][2]
@@ -140,7 +140,7 @@ def test_recognize_passes_precomputed_lines(client: TestClient, fake: FakeKraken
 def test_recognize_bad_lines_json_400(client: TestClient):
     resp = client.post(
         "/recognize", headers=HEADERS, files={"image": IMG},
-        data={"model": "kraken-catmus-medieval", "lines": "{not json"},
+        data={"model": "kraken-catmus_medieval", "lines": "{not json"},
     )
     assert resp.status_code == 400
 
@@ -218,7 +218,7 @@ def test_engine_error_becomes_502(client: TestClient, fake: FakeKrakenClient):
     fake.raise_engine_error = True
     resp = client.post(
         "/recognize", headers=HEADERS, files={"image": IMG},
-        data={"model": "kraken-catmus-medieval"},
+        data={"model": "kraken-catmus_medieval"},
     )
     assert resp.status_code == 502
 

@@ -98,7 +98,7 @@ def test_finetuning_is_not_judged_because_kraken_ignores_the_spec(settings):
     architecture decides the geometry, so refusing on this spec would refuse a
     configuration that will never be used."""
     store = JobStore(settings.jobs_root)
-    job, pipeline = _job(store, settings, base_model="kraken-early_modern_german")
+    job, pipeline = _job(store, settings, base_model="kraken-catmus_medieval")
     pipeline._guard_line_geometry(job)  # does not raise
 
 

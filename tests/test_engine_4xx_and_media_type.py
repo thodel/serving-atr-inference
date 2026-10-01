@@ -194,7 +194,7 @@ def _auth(client) -> dict:
 #: A registered kraken id. Model resolution runs first and 404s on an unknown
 #: one, which is right — the gateway checks its own contract before the payload,
 #: and both answers are 4xx, so a batch stops either way.
-MODEL = "kraken-catmus-medieval"
+MODEL = "kraken-catmus_medieval"
 
 
 def test_recognize_refuses_a_pdf_without_calling_an_engine(gateway):

@@ -93,10 +93,12 @@ def publish_curated(registry: Registry, root: str | Path, source: str | Path | N
 
     Serialised from the parsed specs rather than copied byte for byte, so the
     trainer reads what this gateway understood and not a second parser's reading
-    of the same text. The difference is real: ``config/models.yaml`` gives
-    ``kraken-printed_urdu`` its ``residency`` and ``gpu_affinity`` twice (the
-    leftover of the #30 removal below it). PyYAML keeps the last value without a
-    word; a strict YAML 1.2 reader refuses the file.
+    of the same text. The difference was real: ``config/models.yaml`` gave
+    ``kraken-printed_urdu`` its ``residency`` and ``gpu_affinity`` twice (a
+    leftover of the #30 removal) until the kraken block was rewritten in #101.
+    PyYAML keeps the last value without a word; a strict YAML 1.2 reader refuses
+    the file, so serialising from the parsed specs is what keeps the two readers
+    in agreement.
 
     Disabled entries are included. ``GET /models`` filters on ``enabled``, and a
     model this box cannot serve can still be a good base for a fine-tune.

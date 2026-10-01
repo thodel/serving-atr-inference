@@ -101,7 +101,7 @@ def test_relaunch_when_unhealthy():
 def test_non_vllm_model_raises():
     m, _ = make_manager()
     with pytest.raises(ManagerError):
-        m.ensure_resident("kraken-catmus-medieval")
+        m.ensure_resident("kraken-catmus_medieval")
     with pytest.raises(ManagerError):
         m.ensure_resident("does-not-exist")
 

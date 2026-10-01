@@ -11,7 +11,7 @@ locally — so it measures the deployed system end to end.
 export ATR_API_KEY=...        # same key the gateway uses
 .venvs/gateway/bin/python eval/run_eval.py \
     --images-dir data/test \
-    --models kraken-catmus-medieval,party,qwen3vl-8b-hebrew \
+    --models kraken-catmus_medieval,party,qwen3vl-8b-hebrew \
     --gt-dir data/test/gt \
     --gateway http://127.0.0.1:8200
 ```
@@ -49,7 +49,7 @@ training board:
   the same pages is the control that separates them. Until that runs, no CER
   produced here should be quoted or compared.
 - **#37 — old versus new.** Once a trained model is promoted it is addressed by
-  its registry id like any other, so `--models kraken-thun-v1,kraken-catmus-medieval`
+  its registry id like any other, so `--models kraken-thun-v1,kraken-catmus_medieval`
   is the whole comparison.
 
 **#55** is the caveat to keep in view when reading the table: a CTC model and an

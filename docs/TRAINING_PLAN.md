@@ -349,7 +349,8 @@ The `kraken+` spec and `cosine`/1e-4 above are the **defaults** the trainer fill
 **Zenodo DOI** (bare record ids too), resolved by
 `atr_serving.training.base_models.resolve_base_model` → `ketos train -i … --resize union`.
 The reference is validated **at submit** (#76): it used to be handed straight to
-`htrmopo` in the train stage, so `kraken-medieval_generic_b` — a real registry id — cost
+`htrmopo` in the train stage, so `kraken-medieval_generic_b` — a real registry id, renamed `kraken-prima`
+when the registry was corrected (#101) — cost
 a run before failing with "is not a valid DOI". `vllm` and `trocr` bases are HuggingFace
 repo ids instead, and the two namespaces are checked separately: a DOI happens to match
 `owner/name`, so pattern-matching alone would accept a kraken base for a VLM run.
@@ -552,7 +553,8 @@ that does not stop at the line, which scores *deletions* under this convention
 ### 9b. Confirmed by a controlled re-run (2026-08-13)
 
 Same data, same eval projects, same pipeline. Two things changed: it started from
-trained weights (`kraken-late_medieval_german`, `10.5281/zenodo.15366732`) and it got
+trained weights (`10.5281/zenodo.15366732` — registered then as
+`kraken-late_medieval_german`, now `kraken-bifrost_old_norse`, #101) and it got
 ~9× the optimizer steps (`batch_size: 16`, `epochs: 30` → 3,570).
 
 | | from scratch, 400 steps | fine-tune, 3,570 steps |
@@ -577,22 +579,26 @@ that the configuration was the problem, not which half of it. Isolating them wou
 one more run — batch 16 *from scratch*, same ~3,570 steps — and is worth doing before
 any of this is written up as a recipe.
 
-### 9c. The base matters more than the century (2026-08-13)
+### 9c. The base matters, and not for the reason recorded here first (2026-08-13)
 
 A single-variable comparison: same 1,898 training lines, same eval projects, same
 `batch_size: 16`, `epochs: 30`, `resize: union`. Only `base_model` changed.
 
-| base | script class | century | CER | ins | del | sub |
-|---|---|---|---:|---:|---:|---:|
-| — (from scratch) | — | — | 0.9838 | 11,191 | 2 | 186 |
-| `kraken-late_medieval_german` | Textura (formal book hand) | 14–16 | 0.3921 | 1,437 | 546 | 2,552 |
-| **`kraken-early_modern_german`** | **Kurrent (chancery cursive)** | 16–17 | **0.2350** | 470 | 796 | 1,452 |
+| base (DOI) | what the record says it is | CER | ins | del | sub |
+|---|---|---:|---:|---:|---:|
+| — (from scratch) | — | 0.9838 | 11,191 | 2 | 186 |
+| `kraken-bifrost_old_norse` (zenodo.15366732) | Bifrost: Old Norse manuscripts, itself a fine-tune of CATMuS Medieval | 0.3921 | 1,437 | 546 | 2,552 |
+| **`kraken-catmus_medieval`** (zenodo.15030337) | **CATMuS Medieval: Old/Middle French, Latin, Spanish, Italian, graphematic** | **0.2350** | 470 | 796 | 1,452 |
 
-**Script class beats period.** The Kurrent base is a century *later* than the Thuner
-Missiven and still cuts CER by 40 % relative against a Textura base of the right
-century. Substitutions falling 2,552 → 1,452 is the model reading better, not merely
-aligning better — a CTC network transfers letterform recognition, and Textura and
-cursive do not share letterforms however close the dates are.
+**Corrected reading (2026-10-01).** When this ran, the registry called these two bases
+`kraken-late_medieval_german` ("Textura, 14–16th c.") and `kraken-early_modern_german`
+("Kurrent, 16–17th c."), and the conclusion drawn was that script class beats period.
+Both names were invented (#101): the DOIs are an Old Norse model and CATMuS Medieval,
+and neither base is German. **The measurements stand; that explanation does not.** What
+the run compared is a generic medieval parent against its own fine-tune on an unrelated
+language, and the parent won by 40 % relative. Substitutions falling 2,552 → 1,452 does
+still say the model reads better rather than merely aligns better. Whether script class
+or period drives the transfer is untested — it needs bases whose identity is verified.
 
 **The error profile flipped.** Deletions (796) now exceed insertions (470): the model
 has gone from over-generating, through balanced, to mildly conservative — dropping
@@ -639,7 +645,8 @@ range. Extrapolating a learning curve by eye flatters it even when you think you
 discounted for the flattening; the honest read is that only the measured per-epoch rate
 is worth quoting.
 
-**Next**: more Bernese material, fine-tuned from `kraken-early_modern_german` at these
+**Next**: more Bernese material, fine-tuned from `kraken-catmus_medieval` (CATMuS
+Medieval, `zenodo.15030337`; `kraken-early_modern_german` then) at these
 settings. When sizing a selection, remember that the Thun training project skipped
 **111 of 250 pages** as untranscribed — page counts overstate usable lines by roughly
 two.
@@ -726,7 +733,8 @@ remaining lever is the corpus, and §11 is about pulling it.
 The corpus §11 planned was trained and scored. The result answers §9d's question —
 *is the data the lever?* — and the answer is more interesting than a yes.
 
-`kraken-medieval-german-v2` fine-tuned `kraken-early_modern_german` on **325,454
+`kraken-medieval-german-v2` fine-tuned **CATMuS Medieval** (`zenodo.15030337`,
+registered then as `kraken-early_modern_german`, now `kraken-catmus_medieval`) on **325,454
 lines** from four archives: Zurich council books, Bullinger's correspondence,
 Königsfelden charters, Basel protocols. It ran 44 epochs over three days and was
 **cancelled from outside** at `val_metric` 0.7741 while still improving at
@@ -1133,7 +1141,7 @@ Zwei Vorbehalte, die beim Lesen dieser Tabelle gelten:
 
 ### 10b. Betriebsnotizen
 
-* **`kraken-medieval-german-v2`** (Feintuning auf `kraken-early_modern_german`, 12.286
+* **`kraken-medieval-german-v2`** (Feintuning auf `kraken-catmus_medieval` = CATMuS Medieval, damals `kraken-early_modern_german`, 12.286
   Seiten / 325.454 Zeilen aus vier Datensätzen) wurde in Epoche 44 bei val 0.7741 von
   Hand gestoppt und als privates Repo `dh-unibe/kraken-medieval-german-v2` publiziert.
   Die `test`-Stufe lief nie, deshalb trägt die Model-Card **keinen CER** — nur die
