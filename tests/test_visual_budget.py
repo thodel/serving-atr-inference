@@ -97,14 +97,21 @@ def test_an_undecodable_image_is_passed_through_rather_than_hidden():
 
 
 def test_the_token_figure_names_its_assumption():
-    """A 32 px cell is Qwen3-VL's, not the format's (training-atr-models#135, F2).
+    """A 32 px cell is one family's, not the format's (training-atr-models#135, F2).
 
-    The budget is a pixel count; the token count printed beside it divides by a
-    32 px cell. That is right for Qwen3-VL and wrong for every family measured
-    since: olmOCR-2's cell is 28 px, so the same 262,144 pixels are 334 tokens,
-    and Gemma 4's is 48. The gateway has no processor on this path, so the honest
-    move is to keep the arithmetic and say what it assumes — an unqualified
-    "~256 visual tokens" reads as a measurement of the model being served.
+    The budget is a pixel count; the token figure printed beside it divides by a
+    32 px cell. That is right for Qwen3-VL and for Qwen3.5 — both patch 16 x merge
+    2 — and wrong for olmOCR-2, whose cell is 28 px, so these same 262,144 pixels
+    are 334 tokens there. It is wrong differently for Gemma 4, which does not
+    divide an area at all: it rounds the request up to the cheapest of five legal
+    soft-token steps and spends 140. Nemotron's per-tile cell is 32 px again, but
+    it tiles, so the division does not predict its count either.
+
+    No quantifier belongs in this docstring — the point is not that the assumption
+    is usually wrong, it is that **this line cannot tell which case it is in**,
+    because the gateway holds no processor here. So it keeps the arithmetic and
+    says what it assumes: an unqualified "~256 visual tokens" reads as a
+    measurement of the model being served.
     """
     lines: list[str] = []
     sink = logger.add(lambda m: lines.append(str(m)), level="INFO",

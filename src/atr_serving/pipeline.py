@@ -152,11 +152,13 @@ def fit_to_budget(image: bytes, content_type: str, max_pixels: int | None,
     if fitted is img:
         return image, content_type
 
-    # 32 px is Qwen3-VL's cell (patch 16 x merge 2), not a property of the format.
-    # olmOCR-2 is 28 and Gemma 4 is 48, so the same pixel budget is 256, 334 or 114
-    # visual tokens depending on the family — and this gateway holds no processor
-    # here to ask. The figure therefore names its assumption instead of presenting
-    # it as a measurement (training-atr-models#135, F2).
+    # 32 px is Qwen3-VL's cell (patch 16 x merge 2) and Qwen3.5's, not a property of
+    # the format. olmOCR-2's is 28 px, so a 262,144-pixel budget is 334 tokens there;
+    # Gemma 4's is 48 px and it does not divide an area at all — it rounds the request
+    # up to the cheapest of five legal soft-token steps, which for that budget is 140
+    # (measured on transformers 5.17.0; training-atr-models docs/BASE_MODEL_LADDER.md).
+    # This gateway holds no processor on this path, so the figure names its assumption
+    # instead of presenting it as a measurement (training-atr-models#135, F2).
     logger.info("{}: image {}x{} -> {}x{} for a {}-pixel budget "
                 "(~{} visual tokens, assuming a 32 px cell)",
                 model_id, img.width, img.height, fitted.width, fitted.height,
