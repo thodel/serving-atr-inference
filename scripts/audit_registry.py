@@ -10,10 +10,21 @@ until somebody reads a Zenodo page (#101).
     python scripts/audit_registry.py --engine kraken  # one engine only
     python scripts/audit_registry.py --check          # fail if the mismatch set grew
     python scripts/audit_registry.py --write-baseline # pin the current state
+    python scripts/audit_registry.py --offline        # the checks that need no network
 
 `--check` is the one for CI. It does not demand a clean registry, which would
 mean pinning 28 corrections nobody has made yet; it demands that the set of
 mismatched ids does not grow. The baseline is meant to shrink.
+
+`--offline` is the part a test suite can run. Resolving a DOI needs Zenodo, so
+`--check` cannot run where there is no network — and then nothing pins the
+state at all. Two of the three findings are facts about the registry file
+rather than about Zenodo, and those two run here: the DOIs claimed by more than
+one id, and whether every id in the baseline is still in the registry with a
+DOI. It corrects nothing. Which of the name and the DOI is the mistake is
+curation, and three of the mismatches resolve to models trained on the
+Inzigkofen manuscripts this project benchmarks against, where a wrong guess
+turns memorisation into a published recognition number (#100).
 """
 
 from __future__ import annotations
@@ -30,6 +41,15 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+
+from atr_serving.registry_audit import (  # noqa: E402
+    duplicate_dois,
+    load_baseline,
+    missing_from_registry,
+    normalize_zenodo_id,
+)
+
 REGISTRY = ROOT / "config" / "models.yaml"
 BASELINE = ROOT / "config" / "registry_mismatches.json"
 ZENODO = "https://zenodo.org/api/records/%s"
@@ -53,7 +73,12 @@ NOISE = {"v2", "v3", "base", "wide", "extended", "generic", "a", "b", "c", "d", 
 
 
 def record_id(zenodo_id: str) -> str:
-    return zenodo_id.rsplit(".", 1)[-1]
+    """The bare numeric record behind a DOI, a URL or a bare id.
+
+    One implementation, shared with ``scripts/discover_models.py``: two copies
+    would let the discovery and the audit disagree about the same DOI.
+    """
+    return normalize_zenodo_id(zenodo_id)
 
 
 def fetch_title(record: str, retries: int = 3) -> str:
@@ -139,6 +164,46 @@ def report(rows: list[dict]) -> None:
             print("  %-9s  %s" % (record, ", ".join(ids)))
 
 
+def offline(engine: str | None) -> int:
+    """The findings that need no network. Returns the exit code.
+
+    Non-zero only for the one thing a person has to look at: a baseline that no
+    longer describes this registry. Duplicates are printed and tolerated —
+    they are the recorded state of #101, not a regression, and nothing here
+    decides which of the two ids should go.
+    """
+    from atr_serving.registry import load_registry
+
+    specs = [s for s in load_registry(REGISTRY).all()
+             if not engine or s.engine == engine]
+    with_doi = [s for s in specs if s.zenodo_id]
+    records = {normalize_zenodo_id(str(s.zenodo_id)) for s in with_doi}
+    print("%d entries%s, %d with a DOI, %d distinct records" % (
+        len(specs), " for %s" % engine if engine else "", len(with_doi), len(records)))
+
+    dupes = duplicate_dois(with_doi)
+    if dupes:
+        by_id = {s.id: s for s in with_doi}
+        print("\nsame DOI under more than one id (%d records, %d ids):" % (
+            len(dupes), sum(len(ids) for ids in dupes.values())))
+        for record, ids in dupes.items():
+            print("  %-9s  %s" % (record, ", ".join(
+                "%s%s" % (i, "" if by_id[i].enabled else " (disabled)") for i in ids)))
+
+    baseline = load_baseline()
+    gone = missing_from_registry(baseline, specs)
+    print("\n%d ids recorded as mismatched" % len(baseline), end="")
+    if not gone:
+        print(", all still in the registry with a DOI")
+        return 0
+    print(", %d of them no longer:" % len(gone))
+    for model_id in gone:
+        print("  %s" % model_id)
+    print("\nIf that was a correction, re-record it:"
+          " scripts/audit_registry.py --write-baseline")
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--engine", help="restrict to one engine, e.g. kraken")
@@ -146,7 +211,12 @@ def main() -> int:
                         help="exit 1 if a mismatch appeared that is not in the baseline")
     parser.add_argument("--write-baseline", action="store_true",
                         help="record the current mismatch set as accepted")
+    parser.add_argument("--offline", action="store_true",
+                        help="only the checks that need no network")
     args = parser.parse_args()
+
+    if args.offline:
+        return offline(args.engine)
 
     rows = audit(args.engine)
     report(rows)
