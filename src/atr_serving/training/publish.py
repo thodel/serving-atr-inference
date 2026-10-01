@@ -299,6 +299,32 @@ def _plain(value: Any) -> str:
     return "—" if value is None else str(value)
 
 
+def _is_hub_repo(ref: str) -> bool:
+    """``owner/name`` — the only shape the hub's ``base_model:`` can resolve.
+
+    A Zenodo DOI has a slash too and is not one; a gateway registry id has none
+    and is not one either. Either in the frontmatter advertises a link that goes
+    nowhere, and worse: `kraken-medieval-german-v2` shipped
+    ``base_model: kraken-early_modern_german`` for months, a registry id whose
+    DOI was CATMuS Medieval (serving-atr-inference#101). A base belongs in the
+    card either as a resolvable link or as a plain statement — never as a name
+    the reader cannot check.
+    """
+    return "/" in ref and not ref.startswith("10.")
+
+
+def _base_cell(base: str | None) -> str:
+    """The provenance row's base: linked where a link resolves, plain otherwise."""
+    if not base:
+        return "trained from scratch"
+    if base.startswith("10."):
+        return f"[`{base}`](https://doi.org/{base})"
+    if _is_hub_repo(base):
+        return f"[`{base}`](https://huggingface.co/{base})"
+    return (f"`{base}` — a gateway registry id; `config/models.yaml` resolves it "
+            f"to the weights, and the id alone does not name them")
+
+
 def _frontmatter(model: TrainedModel, licence: str | None) -> str:
     """The card's YAML header — the part the hub reads rather than displays.
 
@@ -321,7 +347,9 @@ def _frontmatter(model: TrainedModel, licence: str | None) -> str:
     header["tags"] = [
         "htr", "ocr", "handwritten-text-recognition", "historical-documents", model.engine,
     ]
-    if model.base_model:
+    # Only a hub repo: see _is_hub_repo. A DOI or a registry id is stated in the
+    # provenance table instead, where it can be read for what it is.
+    if model.base_model and _is_hub_repo(model.base_model):
         header["base_model"] = model.base_model
     if datasets:
         # De-duplicated, order preserved: two slices of one corpus are one link.
@@ -399,10 +427,7 @@ def model_card(model: TrainedModel, repo_id: str, licence: str | None = None) ->
     """
     metrics = model.metrics
     prompt = model.metadata.get("prompt") or model.params.get("prompt")
-    base = (f"[`{model.base_model}`](https://huggingface.co/{model.base_model})"
-            if model.base_model and "/" in model.base_model
-            else f"`{model.base_model}`" if model.base_model
-            else "trained from scratch")
+    base = _base_cell(model.base_model)
 
     lines: list[str] = [
         _frontmatter(model, licence),
