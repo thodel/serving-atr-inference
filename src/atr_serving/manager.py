@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import os
 import subprocess
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -405,20 +406,53 @@ class _Resident:
     port: int
 
 
+class _Attempt:
+    """One cold start, and the callers waiting for its outcome (#164).
+
+    The first caller for a model that is not resident owns the attempt; the rest
+    wait on :attr:`done` and take whatever it produced — the same port, or the
+    same exception. Not four tries: four requests arriving together at a gateway
+    that just restarted are one cold start, and when it fails they are one
+    failure rather than four consecutive startup timeouts.
+    """
+
+    __slots__ = ("done", "error", "port")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.port: int | None = None
+        self.error: BaseException | None = None
+
+
 class _PortPool:
+    """The ports vLLM instances listen on, one to a model.
+
+    Locked in itself rather than by its callers: a port is released on the
+    shutdown path as well as on the launch path, so two threads can reach it
+    without the launch lock between them, and "both got :8101" is the kind of
+    bug that only shows up on the box.
+    """
+
     def __init__(self, base: int) -> None:
         self._base = base
         self._used: set[int] = set()
+        self._lock = threading.Lock()
 
     def acquire(self) -> int:
-        p = self._base
-        while p in self._used:
-            p += 1
-        self._used.add(p)
-        return p
+        with self._lock:
+            p = self._base
+            while p in self._used:
+                p += 1
+            self._used.add(p)
+            return p
 
     def release(self, port: int) -> None:
-        self._used.discard(port)
+        with self._lock:
+            self._used.discard(port)
+
+    def in_use(self) -> set[int]:
+        with self._lock:
+            return set(self._used)
 
 
 class ModelManager:
@@ -438,28 +472,119 @@ class ModelManager:
         # insertion/use order == LRU order (front = least recently used)
         self._resident: "OrderedDict[str, _Resident]" = OrderedDict()
         self._ports = _PortPool(settings.vllm_port_base)
+        # One launch at a time, over all models (#164). Not per model: two
+        # *different* models both passed the free-memory check before either
+        # held any, which is how four 19 200 MiB instances were launched into
+        # 33 801 MiB free on 21.09. Held across the start, so the second
+        # caller's plan sees the first one resident.
+        self._launch_lock = threading.Lock()
+        # Cold starts in flight, by model id. Guarded by ``_state_lock``.
+        self._attempts: dict[str, _Attempt] = {}
+        # Held only for the bookkeeping, never across a launch or a health
+        # probe: the fast path and /health read the resident set from other
+        # threads while a cold start holds ``_launch_lock`` for minutes.
+        self._state_lock = threading.Lock()
 
     # ── introspection ────────────────────────────────────────────────────────
     def resident_model_ids(self) -> list[str]:
-        return list(self._resident.keys())
+        with self._state_lock:
+            return list(self._resident.keys())
 
     def port_for(self, model_id: str) -> int | None:
-        r = self._resident.get(model_id)
+        with self._state_lock:
+            r = self._resident.get(model_id)
         return r.port if r else None
 
     # ── core ─────────────────────────────────────────────────────────────────
     def ensure_resident(self, model_id: str) -> int:
         """Return the port of a healthy vLLM instance for ``model_id``, starting
-        (and evicting LRU lazy models) as needed."""
+        (and evicting LRU lazy models) as needed.
+
+        Called from ``run_in_threadpool`` (``api/routes.py``), so several
+        requests are really in here at once, and before #164 nothing stopped
+        them: four concurrent requests for a cold model each planned against the
+        same free memory, each took a port, and each launched its own vLLM with
+        a budget sized as though it were alone. Together they did not fit, and
+        all four died with code 1 — the whole batch failing on the first wave
+        after every gateway restart.
+
+        So a launch is one at a time, in two layers. Per model, the first
+        caller owns the cold start and the others take its outcome
+        (:class:`_Attempt`) — the same port, or the same exception, once rather
+        than four times over. Across models, ``_launch_lock``, because the
+        failure was not only four copies of one model: two *different* models
+        both pass the free-memory check if neither has claimed memory yet, so
+        the second one's plan has to be made after the first one is on the card.
+
+        A model that is already resident and healthy costs neither lock nor
+        wait, which is the ordinary case.
+        """
         spec = self.registry.get(model_id)
         if spec is None or spec.engine != "vllm":
             raise ManagerError(f"{model_id!r} is not a vLLM model")
 
-        existing = self._resident.get(model_id)
-        if existing is not None:
-            if existing.handle.is_healthy():
-                self._resident.move_to_end(model_id)  # mark most-recently-used
-                return existing.port
+        port = self._port_if_healthy(model_id)
+        if port is not None:
+            return port
+
+        attempt, ours = self._attempt_for(model_id)
+        if not ours:
+            return self._outcome_of(model_id, attempt)
+
+        try:
+            with self._launch_lock:
+                # Asked again, now that nobody else is launching: whatever the
+                # wait was for may have put the model on the card already.
+                port = self._port_if_healthy(model_id)
+                if port is None:
+                    port = self._launch(spec)
+                attempt.port = port
+        except BaseException as exc:   # noqa: BLE001 — recorded, then re-raised
+            attempt.error = exc
+            raise
+        finally:
+            # Out of the table before the waiters are woken, so a caller
+            # arriving now opens a fresh attempt instead of joining a finished
+            # one. ``finally``, so no waiter is left on an attempt whose owner
+            # died on the way.
+            with self._state_lock:
+                if self._attempts.get(model_id) is attempt:
+                    del self._attempts[model_id]
+            attempt.done.set()
+        return port
+
+    def _attempt_for(self, model_id: str) -> tuple[_Attempt, bool]:
+        """The attempt for ``model_id``, and whether this caller owns it."""
+        with self._state_lock:
+            attempt = self._attempts.get(model_id)
+            if attempt is not None:
+                return attempt, False
+            attempt = self._attempts[model_id] = _Attempt()
+            return attempt, True
+
+    def _outcome_of(self, model_id: str, attempt: _Attempt) -> int:
+        """Wait for somebody else's cold start and take its result.
+
+        Unbounded: the owner's own wait is bounded by
+        ``vllm_startup_timeout_s``, and it sets :attr:`_Attempt.done` from a
+        ``finally``, so the only way this does not return is the process dying.
+        The exception is the owner's, traceback and all — the reason the launch
+        failed is the same reason for every caller.
+        """
+        logger.debug("vLLM {}: waiting for a cold start already under way", model_id)
+        attempt.done.wait()
+        if attempt.error is not None:
+            raise attempt.error
+        if attempt.port is None:
+            raise ManagerError(
+                f"the cold start of {model_id!r} ended with neither a port nor a "
+                "reason; see the gateway journal")
+        return attempt.port
+
+    def _launch(self, spec: ModelSpec) -> int:
+        """Plan, evict, start, wait for health. Call under ``_launch_lock``."""
+        model_id = spec.id
+        if model_id in self._resident:
             logger.warning("vLLM {} unhealthy; relaunching", model_id)
             self._drop(model_id)
 
@@ -468,14 +593,39 @@ class ModelManager:
             self._await_room(spec, evicted)
         port = self._ports.acquire()
         try:
-            handle = self.launcher.start(spec, port, self.settings.vllm_gpu, self.settings)
+            handle = self.launcher.start(spec, port, self.settings.vllm_gpu,
+                                         self.settings)
             self._wait_healthy(handle)
         except Exception:
+            # No port stays taken for a model that is not running: the next
+            # caller through here is the next attempt, not the next leak.
             self._ports.release(port)
             raise
-        self._resident[model_id] = _Resident(spec, handle, port)
-        logger.info("vLLM resident: {} on :{} (gpu {})", model_id, port, self.settings.vllm_gpu)
+        with self._state_lock:
+            self._resident[model_id] = _Resident(spec, handle, port)
+        logger.info("vLLM resident: {} on :{} (gpu {})", model_id, port,
+                    self.settings.vllm_gpu)
         return port
+
+    def _port_if_healthy(self, model_id: str) -> int | None:
+        """The port of a resident that answers, or None — the lock-free path.
+
+        ``None`` for "not resident" and for "resident but not answering" alike;
+        telling them apart needs the launch lock, because by the time this
+        caller has it another may have relaunched the model.
+
+        The health probe is an HTTP call, so it happens outside
+        ``_state_lock``: holding that over a wedged instance's timeout would
+        stall ``/health`` and every other reader.
+        """
+        with self._state_lock:
+            existing = self._resident.get(model_id)
+        if existing is None or not existing.handle.is_healthy():
+            return None
+        with self._state_lock:
+            if model_id in self._resident:
+                self._resident.move_to_end(model_id)  # mark most-recently-used
+        return existing.port
 
     # ── the card is not ours alone ───────────────────────────────────────────
     def _need_mb(self, spec: ModelSpec) -> int:
@@ -610,7 +760,8 @@ class ModelManager:
         return sum(r.spec.vram_mb for r in self._resident.values())
 
     def _drop(self, model_id: str) -> None:
-        r = self._resident.pop(model_id, None)
+        with self._state_lock:
+            r = self._resident.pop(model_id, None)
         if r is None:
             return
         try:
