@@ -125,6 +125,12 @@ models:
     scripts: [Kurrent]
     centuries: [19]
     vram_mb: 12000
+    vram_measured:
+      total_mib: 15214
+      host: srv
+      measured_at: "2026-09-29"
+      gpu: 1
+      note: "no profiling line in the journal"
     residency: lazy
     gpu_affinity: 1
     training_datasets:
