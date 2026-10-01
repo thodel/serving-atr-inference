@@ -22,7 +22,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.discover_models import (  # noqa: E402
-    _normalize_zenodo_id,
+    normalize_zenodo_id,
     diff_report,
     discover_hf_models,
     discover_zenodo_models,
@@ -68,26 +68,26 @@ def _hf_models_from_fixture() -> list:
     ]
 
 
-# ─── _normalize_zenodo_id ─────────────────────────────────────────────────────
+# ─── normalize_zenodo_id — now shared, see atr_serving.registry_audit (#101) ──
 
 class TestNormalizeZenodoId:
     def test_full_url(self):
-        assert _normalize_zenodo_id("https://zenodo.org/record/15366732") == "15366732"
+        assert normalize_zenodo_id("https://zenodo.org/record/15366732") == "15366732"
 
     def test_doi_prefix(self):
-        assert _normalize_zenodo_id("10.5281/zenodo.15366732") == "15366732"
+        assert normalize_zenodo_id("10.5281/zenodo.15366732") == "15366732"
 
     def test_bare_zenodo_prefix(self):
-        assert _normalize_zenodo_id("zenodo.15366732") == "15366732"
+        assert normalize_zenodo_id("zenodo.15366732") == "15366732"
 
     def test_bare_numeric(self):
-        assert _normalize_zenodo_id("15366732") == "15366732"
+        assert normalize_zenodo_id("15366732") == "15366732"
 
     def test_with_trailing_slash(self):
-        assert _normalize_zenodo_id("https://zenodo.org/record/15366732/") == "15366732"
+        assert normalize_zenodo_id("https://zenodo.org/record/15366732/") == "15366732"
 
     def test_strips_whitespace(self):
-        assert _normalize_zenodo_id("  15366732  ") == "15366732"
+        assert normalize_zenodo_id("  15366732  ") == "15366732"
 
 
 # ─── HF API ───────────────────────────────────────────────────────────────────

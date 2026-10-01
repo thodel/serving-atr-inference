@@ -25,6 +25,13 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+# One answer to "which record is that", shared with scripts/audit_registry.py:
+# this was a private copy here, and two copies of it would let the discovery and
+# the audit disagree about the same DOI (#101).
+from atr_serving.registry_audit import normalize_zenodo_id  # noqa: E402
+
 try:
     import requests
 except ImportError:
@@ -58,34 +65,12 @@ def _load_registry_ids() -> tuple[set[str], set[str]]:
             hf_ids.add(hf.lower())
         zd = entry.get("zenodo_id", "")
         if zd:
-            zenodo_ids.add(_normalize_zenodo_id(zd))
+            zenodo_ids.add(normalize_zenodo_id(zd))
 
     return hf_ids, zenodo_ids
 
 
 # ─── Zenodo helpers ───────────────────────────────────────────────────────────
-
-def _normalize_zenodo_id(value: str) -> str:
-    """
-    Canonicalise a Zenodo ID to its bare numeric form.
-
-    >>> _normalize_zenodo_id("10.5281/zenodo.15366732")
-    '15366732'
-    >>> _normalize_zenodo_id("zenodo.15366732")
-    '15366732'
-    >>> _normalize_zenodo_id("15366732")
-    '15366732'
-    """
-    value = value.strip()
-    prefix = "https://zenodo.org/record/"
-    if value.startswith(prefix):
-        value = value[len(prefix) :].rstrip("/")
-    if "/" in value:
-        value = value.rsplit("/", 1)[-1]
-    if value.startswith("zenodo."):
-        value = value[7:]
-    return value.strip()
-
 
 # ─── Dataclasses ──────────────────────────────────────────────────────────────
 
@@ -332,7 +317,7 @@ def discover_zenodo_models(session: requests.Session) -> tuple[list[ZenodoRecord
                     consecutive_empty = 0
                     for hit in hits:
                         metadata = hit.get("metadata", {})
-                        zid = _normalize_zenodo_id(str(hit.get("id", "")))
+                        zid = normalize_zenodo_id(str(hit.get("id", "")))
                         if not zid:
                             continue
 
@@ -398,7 +383,7 @@ def diff_report(
             report.new_hf_models.append(model)
 
     for record in report.zenodo_candidates:
-        bare = _normalize_zenodo_id(record.zenodo_id)
+        bare = normalize_zenodo_id(record.zenodo_id)
         if bare not in served_zenodo_ids:
             report.new_zenodo_models.append(record)
 
