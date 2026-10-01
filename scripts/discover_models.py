@@ -27,11 +27,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+# The repository root too, so that `scripts.audit_registry` resolves the same
+# way whether this file is run as a script or imported by a test (#115 joins
+# #101's own check on the way in; two copies of it would be two answers).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # One answer to "which record is that", shared with scripts/audit_registry.py:
 # this was a private copy here, and two copies of it would let the discovery and
 # the audit disagree about the same DOI (#101).
-from atr_serving import discoveries  # noqa: E402
+from atr_serving import base_models, discoveries  # noqa: E402
+from atr_serving.base_models import Judgement, RepoFacts  # noqa: E402
 from atr_serving.discoveries import Observation, Triage  # noqa: E402
 from atr_serving.registry_audit import normalize_zenodo_id  # noqa: E402
 
@@ -77,6 +82,11 @@ def _load_registry_ids() -> tuple[set[str], set[str]]:
 
 # ─── Dataclasses ──────────────────────────────────────────────────────────────
 
+#: Two named products and five string matches was what #115 found here. The
+#: terms could not widen before #113, because adding terms without a rejection
+#: mechanism makes the report worse: more rows, same reader, still no memory.
+#: Now a rejection sticks and most of them are written by the machine (#115),
+#: so the noise is absorbed by the catalogue instead of by whoever reads it.
 HF_SEARCH_TERMS = [
     "kraken HTR",
     "kraken handwritten text recognition",
@@ -85,6 +95,18 @@ HF_SEARCH_TERMS = [
     "handwritten-text-recognition",
     "LightOnOCR",
     "qwen-vl OCR fine-tune",
+    # The small-VLM space, which a search for "OCR" cannot see: these read text
+    # without saying so in the card, and one of them is what this project
+    # serves today.
+    "SmolVLM",
+    "Florence-2",
+    "GOT-OCR",
+    "Qwen3-VL",
+    "InternVL",
+    # And the words a palaeographer uses, which are not the words a model card
+    # uses.
+    "manuscript transcription",
+    "medieval handwriting",
 ]
 
 
@@ -128,6 +150,10 @@ class DiscoveryReport:
     #: not to read one, and then the report falls back to the old counting —
     #: which is "not served", and says so rather than calling it new.
     triage: Triage | None = field(default=None)
+    #: Why each unseen candidate can or cannot be a base_model (#115), by
+    #: catalogue key. Empty without a catalogue: judging what will be called
+    #: new again next week is work with no destination.
+    judgements: dict = field(default_factory=dict)
 
 
 # ─── HF API ───────────────────────────────────────────────────────────────────
@@ -215,6 +241,81 @@ def _search_hf(session: requests.Session, query: str, page: int = 1) -> list[HFM
         except Exception:
             continue  # skip malformed entries
     return results
+
+
+HF_MODEL_API = "https://huggingface.co/api/models/%s"
+
+
+def fetch_repo_facts(session: requests.Session, model_id: str) -> RepoFacts:
+    """What the hub says about one repository: files, config, parameters.
+
+    One call per candidate, and only for the ones the catalogue says nobody has
+    seen before (#113) — the search itself stays on ``full=false``, because
+    judging 208 repositories a week when two are new is the same waste in a
+    different place.
+
+    A hub that does not answer produces ``fetched=False`` and no exception: a
+    rate limit must not become a permanent verdict, and
+    :attr:`Judgement.automatic` is what keeps it from becoming one.
+    """
+    try:
+        resp = session.get(HF_MODEL_API % model_id, headers=_hf_headers(),
+                           timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        logger_note = f"{type(exc).__name__}"
+        print(f"  hub detail for {model_id}: {logger_note}", file=sys.stderr)
+        return RepoFacts(id=model_id, fetched=False)
+
+    config = data.get("config") or {}
+    safetensors = data.get("safetensors") or {}
+    total = safetensors.get("total")
+    return RepoFacts(
+        id=model_id,
+        files=tuple(str(s.get("rfilename", "")) for s in data.get("siblings") or ()),
+        tags=tuple(str(t) for t in data.get("tags") or ()),
+        architectures=tuple(str(a) for a in config.get("architectures") or ()),
+        parameters=int(total) if isinstance(total, (int, float)) else None,
+        config=config,
+    )
+
+
+#: Written into ``by`` for a verdict nobody made by hand, so that a reader can
+#: tell the machine's rejections from their own. #113 requires a ``by``.
+AUTOMATIC_BY = "discover_models.py"
+
+
+def judge_unseen(session: requests.Session, triage: Triage, *, today: str,
+                 fetch=fetch_repo_facts) -> dict[str, Judgement]:
+    """Judge every candidate nobody has seen before; reject what is clearly not.
+
+    Returns the judgements by catalogue key. A judgement whose reason is a fact
+    about the repository is written as ``rejected`` straight away — #115's
+    ``rejected: no weights file, only a model card`` should be written once and
+    never re-asked. A reason that is a fact about this run is reported and left
+    for a person.
+    """
+    judged: dict[str, Judgement] = {}
+    for entry in triage.unseen:
+        if entry.source != "hf":
+            # Zenodo has no file listing here. kraken's own index (htrmopo) is
+            # the check #115 names, and it needs a box with internet; until
+            # then these arrive unjudged rather than wrongly judged.
+            continue
+        verdict = judge_repo(fetch(session, entry.id))
+        judged[entry.key] = verdict
+        entry.backend = verdict.backend
+        triage.entries[entry.key].backend = verdict.backend
+        if verdict.automatic and verdict.reason:
+            discoveries.decide(triage.entries, entry.key, "rejected",
+                               by=AUTOMATIC_BY, at=today, reason=verdict.reason)
+    return judged
+
+
+def judge_repo(facts: RepoFacts) -> Judgement:
+    """Seam for the tests; the judgement itself has no network in it."""
+    return base_models.judge(facts)
 
 
 def discover_hf_models(session: requests.Session) -> tuple[list[HFModel], str | None]:
@@ -501,9 +602,46 @@ def format_catalogue_summary(triage: Triage) -> str:
         f" · **{len(triage.changed)} changed** upstream since a verdict"
         f" · **{len(triage.undecided)} awaiting a verdict** from an earlier run",
     ]
+    automatic = sum(1 for e in triage.entries.values()
+                    if e.verdict == "rejected" and e.by == AUTOMATIC_BY)
+    if automatic:
+        lines.append(f" · {automatic} rejected by the backend check, with reasons")
     if triage.missing:
         lines.append(f" · {len(triage.missing)} no longer matched by any query "
                      "(kept, with their verdicts)")
+    return "\n".join(lines) + "\n"
+
+
+def format_arrivals(report: DiscoveryReport) -> str:
+    """What arrived, and what the backend judgement made of it (#113, #115).
+
+    One table instead of the old two, because the interesting column is not
+    which API it came from: it is whether anything here could load it. A row
+    the machine rejected stays visible, with its reason — it is the week's
+    work, done, and hiding it would make the report look emptier than the
+    search was.
+    """
+    triage = report.triage
+    if triage is None or not triage.unseen:
+        return "_Nothing arrived that nobody had seen before._\n"
+    lines = ["| candidate | backend | what decided it |", "|---|---|---|"]
+    for arrival in triage.unseen:
+        entry = triage.entries[arrival.key]
+        judgement = report.judgements.get(arrival.key)
+        if entry.backend:
+            said = (judgement.evidence if judgement and judgement.evidence
+                    else "—")
+            backend = f"**{entry.backend}**"
+        elif entry.verdict == "rejected":
+            said = f"rejected: {entry.reason}"
+            backend = "—"
+        elif judgement and judgement.reason:
+            said = judgement.reason
+            backend = "?"
+        else:
+            said = "not judged (no file listing for this source)"
+            backend = "?"
+        lines.append(f"| `{arrival.key}` | {backend} | {said} |")
     return "\n".join(lines) + "\n"
 
 
@@ -559,15 +697,8 @@ def format_report_markdown(report: DiscoveryReport) -> str:
             sections.append(f"- {err}\n")
 
     if report.triage is not None:
-        unseen = {e.key for e in report.triage.unseen}
         sections.append("\n## Unseen before this run\n")
-        sections.append(format_hf_table(
-            [m for m in report.new_hf_models
-             if discoveries.key_for("hf", m.id) in unseen]))
-        sections.append("\n")
-        sections.append(format_zenodo_table(
-            [r for r in report.new_zenodo_models
-             if discoveries.key_for("zenodo", r.zenodo_id) in unseen]))
+        sections.append(format_arrivals(report))
 
         sections.append("\n## Changed since a verdict\n")
         sections.append(format_changes(report.triage.changed))
@@ -605,6 +736,7 @@ def report_to_json(report: DiscoveryReport) -> dict:
                         for c in report.triage.changed],
             "undecided": [asdict(e) for e in report.triage.undecided],
             "missing": [asdict(e) for e in report.triage.missing],
+            "judgements": {key: asdict(j) for key, j in report.judgements.items()},
         },
     }
 
@@ -648,7 +780,12 @@ def discover(
 
     # Then the catalogue: of what is left, what has nobody seen before?
     if catalogue is not None:
+        today = today or dt.date.today().isoformat()
         report.triage = triage_run(report, catalogue=catalogue, today=today)
+        # And of those, which could be a base_model at all (#115). Only the
+        # unseen: a judgement is a hub call each, and a verdict already
+        # recorded is not re-asked.
+        report.judgements = judge_unseen(session, report.triage, today=today)
 
     return report
 
@@ -854,7 +991,38 @@ def _build_parser() -> argparse.ArgumentParser:
     decide.add_argument("--verdict", choices=discoveries.VERDICTS)
     decide.add_argument("--reason", help="required for 'rejected'")
     decide.add_argument("--by", help="who decided (default: $USER)")
+    decide.add_argument(
+        "--as", dest="as_id", metavar="REGISTRY_ID",
+        help="for --verdict adopted on a Zenodo candidate: the id you mean to "
+             "give it in models.yaml. Checked against the record's own title "
+             "with the audit from #101, because 28 of 43 kraken entries got "
+             "their names this way")
     return p
+
+
+def check_the_name_against_the_record(entry, registry_id: str) -> str | None:
+    """#101's own check, on the way in. Returns a refusal, or None.
+
+    #115 is explicit about this: discovery is the intake path into the registry,
+    so adopting a candidate has to verify what the DOI *resolves to* rather
+    than trusting the name it was found under — "otherwise this issue becomes a
+    faster way to make #101 worse". The check is literally #101's
+    ``classify()``; a second one would be a second answer.
+    """
+    from scripts.audit_registry import classify
+
+    if not entry.title:
+        return (f"{entry.key} has no recorded title, so the name cannot be "
+                "checked against it. Resolve it first: "
+                "scripts/audit_registry.py --engine kraken")
+    verdict = classify(registry_id, entry.title)
+    if verdict == "mismatch":
+        return (f"{registry_id!r} has nothing in common with what that DOI is: "
+                f"{entry.title!r}. This is how #101 happened — 28 of 43 kraken "
+                "entries name something their record does not contain. Give it "
+                "a name the record supports, or record why this one is right "
+                "with --reason and adopt it without --as.")
+    return None
 
 
 def record_decision(args) -> int:
@@ -869,9 +1037,19 @@ def record_decision(args) -> int:
               "not a decision", file=sys.stderr)
         return 2
     entries = discoveries.load(args.catalogue)
+    reason = args.reason
+    if args.as_id:
+        if args.decide not in entries:
+            print(f"ERROR: {args.decide} is not in the catalogue", file=sys.stderr)
+            return 2
+        refusal = check_the_name_against_the_record(entries[args.decide], args.as_id)
+        if refusal:
+            print(f"ERROR: {refusal}", file=sys.stderr)
+            return 2
+        reason = f"{reason + '; ' if reason else ''}adopted as {args.as_id}"
     try:
         entry = discoveries.decide(entries, args.decide, args.verdict, by=who,
-                                   at=dt.date.today().isoformat(), reason=args.reason)
+                                   at=dt.date.today().isoformat(), reason=reason)
     except discoveries.CatalogueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
