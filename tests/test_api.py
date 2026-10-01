@@ -42,6 +42,21 @@ def test_models_with_key(client: TestClient):
     assert all(m.get("enabled", True) for m in models)
 
 
+def test_models_carries_each_model_s_description(client: TestClient):
+    """A consumer that lists models should be able to name them.
+
+    agentic_historian's live overlay falls back to the id when the gateway sends
+    no description, so until #198 its logs read "kraken-early_modern_german"
+    where the weights were CATMuS Medieval. For an entry with a DOI the
+    description is the Zenodo record's title, verbatim.
+    """
+    models = client.get("/models", headers={"X-API-Key": "test-key"}).json()["models"]
+
+    described = {m["id"]: m.get("description") for m in models if m.get("zenodo_id")}
+    assert described, "no model with a DOI in the test registry"
+    assert all(described.values()), [i for i, d in described.items() if not d]
+
+
 def test_models_wrong_key(client: TestClient):
     assert client.get("/models", headers={"X-API-Key": "nope"}).status_code == 401
 

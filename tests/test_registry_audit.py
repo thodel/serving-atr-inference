@@ -101,6 +101,18 @@ def test_the_inzigkofen_entries_say_what_they_were_trained_on(kraken):
         assert by_id[model_id].training_datasets, model_id
 
 
+def test_every_entry_with_a_doi_describes_itself(kraken):
+    """`/models` serves `description`, and for a DOI entry it is the record's
+    title — the one description nobody has to take on trust. The audit compares
+    the two against Zenodo on every run; this is the offline half, that none is
+    missing."""
+    missing = [s.id for s in kraken if not s.description]
+
+    assert missing == [], (
+        f"{missing} carry a DOI but describe nothing. The title is in the record: "
+        f"scripts/audit_registry.py prints it.")
+
+
 def test_a_fine_tune_of_a_served_model_says_so(kraken):
     """`kraken-bifrost_old_norse` is a fine-tune of `kraken-catmus_medieval`,
     which is served here too: two such candidates are not independent, however

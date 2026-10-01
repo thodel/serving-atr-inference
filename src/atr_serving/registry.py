@@ -68,6 +68,13 @@ class VramMeasurement(BaseModel):
 class ModelSpec(BaseModel):
     id: str
     engine: Engine
+    #: One line naming the weights, served by ``/models`` so a consumer can show
+    #: something better than an id in a log or a menu. For an entry with a DOI it
+    #: is the Zenodo record's title, **verbatim**: that is the one description
+    #: nobody has to take on trust, and `scripts/audit_registry.py` compares the
+    #: two on every run. Absent where there is no such source — an invented
+    #: description is what #101 was about.
+    description: str | None = None
     hf_repo: str | None = None
     zenodo_id: str | None = None
     # Weights on this box (a model we trained ourselves). Third accepted source
