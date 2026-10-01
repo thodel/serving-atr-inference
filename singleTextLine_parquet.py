@@ -157,4 +157,3 @@ if __name__ == "__main__":
     os.replace(temp_path, output_path)
 
     print(f"Fertig. Parquet gespeichert unter:")
-    print(output_path)
