@@ -152,7 +152,13 @@ def fit_to_budget(image: bytes, content_type: str, max_pixels: int | None,
     if fitted is img:
         return image, content_type
 
-    logger.info("{}: image {}x{} -> {}x{} for a {}-pixel budget (~{} visual tokens)",
+    # 32 px is Qwen3-VL's cell (patch 16 x merge 2), not a property of the format.
+    # olmOCR-2 is 28 and Gemma 4 is 48, so the same pixel budget is 256, 334 or 114
+    # visual tokens depending on the family — and this gateway holds no processor
+    # here to ask. The figure therefore names its assumption instead of presenting
+    # it as a measurement (training-atr-models#135, F2).
+    logger.info("{}: image {}x{} -> {}x{} for a {}-pixel budget "
+                "(~{} visual tokens, assuming a 32 px cell)",
                 model_id, img.width, img.height, fitted.width, fitted.height,
                 max_pixels, max_pixels // (32 * 32))
     return encode_png(fitted), "image/png"
