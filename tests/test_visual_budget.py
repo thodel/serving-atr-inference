@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 
 import pytest
+from loguru import logger
 from PIL import Image
 
 from atr_serving.config import Settings
@@ -93,6 +94,34 @@ def test_an_undecodable_image_is_passed_through_rather_than_hidden():
     would turn a clear 400 into a confusing 500."""
     assert fit_to_budget(b"not an image", "image/png", 2_097_152) == (
         b"not an image", "image/png")
+
+
+def test_the_token_figure_names_its_assumption():
+    """A 32 px cell is one family's, not the format's (training-atr-models#135, F2).
+
+    The budget is a pixel count; the token figure printed beside it divides by a
+    32 px cell. That is right for Qwen3-VL and for Qwen3.5 — both patch 16 x merge
+    2 — and wrong for olmOCR-2, whose cell is 28 px, so these same 262,144 pixels
+    are 334 tokens there. It is wrong differently for Gemma 4, which does not
+    divide an area at all: it rounds the request up to the cheapest of five legal
+    soft-token steps and spends 140. Nemotron's per-tile cell is 32 px again, but
+    it tiles, so the division does not predict its count either.
+
+    No quantifier belongs in this docstring — the point is not that the assumption
+    is usually wrong, it is that **this line cannot tell which case it is in**,
+    because the gateway holds no processor here. So it keeps the arithmetic and
+    says what it assumes: an unqualified "~256 visual tokens" reads as a
+    measurement of the model being served.
+    """
+    lines: list[str] = []
+    sink = logger.add(lambda m: lines.append(str(m)), level="INFO",
+                      format="{message}")
+    try:
+        fit_to_budget(png(3000, 2400), "image/png", 262_144, model_id="olmocr2-7b")
+    finally:
+        logger.remove(sink)
+    assert len(lines) == 1, lines
+    assert "~256 visual tokens, assuming a 32 px cell" in lines[0]
 
 
 def test_a_budget_has_to_be_a_positive_number_of_pixels():
