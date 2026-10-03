@@ -1089,19 +1089,22 @@ keeps the old version silently. Fix: move `TMPDIR` to local disk, `rm -rf
 ## 10. Scoring a trained model against served models
 
 After a job completes, score the trained model on the held-out Thun pages using
-the eval harness — the same way served kraken models are scored:
+the eval harness — the same way served kraken models are scored. **The harness
+moved to [`training-atr-models`](https://github.com/thodel/training-atr-models)
+with its #11** and runs on asteraix, beside the weights it scores; it reaches
+this box over `/recognize` like any other client. From a checkout there:
 
 ```bash
-# List available models (the trained model appears once promoted)
+# List available models here (the trained model appears once promoted)
 curl -s -H "X-API-Key: $(grep ^ATR_API_KEY .env | cut -d= -f2)" \
   http://localhost:8200/models | jq '.[] | select(.id | startswith("kraken-thun"))'
+```
 
-# Run eval on the Thun test pages, comparing all kraken-thun models
-python eval/run_eval.py \
+```bash
+# On asteraix, in the training repo. --gateway comes from ATR_TRAIN_GATEWAY_URL.
+.venvs/kraken-train/bin/python eval/run_eval.py \
   --images-dir ~/atr-cache/training/trained/kraken-thun-missiven-v1/eval_pages \
   --models kraken-thun-missiven-v1 \
-  --gateway http://localhost:8200 \
-  --api-key "$(grep ^ATR_API_KEY .env | cut -d= -f2)" \
   --gt-dir ~/atr-cache/training/trained/kraken-thun-missiven-v1/eval_pages
 ```
 
@@ -1113,7 +1116,7 @@ segmentation. Report both, labelled:
 | measurement | how obtained | what it tests |
 |---|---|---|
 | `ketos test CER` | `ketos test` on `.arrow` validation set | line-crop recognition only |
-| eval harness CER | `eval/run_eval.py` over pages via gateway | full pipeline: segmentation + recognition |
+| eval harness CER | `eval/run_eval.py` (training-atr-models) over pages via gateway | full pipeline: segmentation + recognition |
 
 The two numbers are not interchangeable. See TRAINING_PLAN.md §9 for the
 interpretation caveats.

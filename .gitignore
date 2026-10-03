@@ -226,9 +226,6 @@ weights/
 # agent worktrees
 .claude/
 
-# eval run outputs
-eval/outputs/
-
 # Locally trained models — the overlay registry is machine-written, never reviewed
 config/models.local.yaml
 

@@ -622,7 +622,8 @@ src/atr_serving/training/        pure, testable in the repo venv
   runner_base.py    BasePipeline: the lifecycle and the shared prepare stage
   vlm_dataset.py    pages → samples, the chat turns, the JSONL
   vlm_cmd.py        argv builders + report parsing (mirrors ketos_cmd.py)
-  textmetrics.py    CER/WER, corpus-level; also used by eval/
+  textmetrics.py    CER/WER, corpus-level (eval/ took its last other caller
+                    to training-atr-models with #11)
   settings.py       TrainerSettings, shared by both backends
   preflight.py      disk/VRAM/TMPDIR guards, shared
   prepare.py        HF → pages, shared

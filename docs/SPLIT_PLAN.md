@@ -233,6 +233,16 @@ geprüft.
 
 Der billigste Epic, und der Code stützt ihn: `eval/` hat **null** Serving-Importe.
 
+**Erledigt 03.10.2026** (training-atr-models#11, dort `aade695`; hier die
+Löschung). `eval/`, seine beiden Tests und die beiden Unwahrheiten im README
+sind drüben; `textmetrics` liegt dort seit T1.2 und hat hier nur noch die
+Konsumenten, die mit dem Paket selbst gehen (siehe T5.5, „Auszug des Pakets").
+Zwei Befunde gegen den Plan: T4.2 brauchte **kein** eigenes venv — `kraken-train`,
+das venv des Dienstes, führt `httpx` schon —, und T4.4 hat eine dritte
+Unwahrheit verschwiegen, die beim Umzug erst entsteht: die drei Issue-Nummern im
+README (`#52`, `#37`, `#55`) sind **Serving**-Nummern, alle drei geschlossen, und
+bezeichnen im Trainingsrepo anderes.
+
 | Issue | Inhalt |
 |---|---|
 | T4.1 | `eval/` und `textmetrics` ins Trainingsrepo. Danach hat `textmetrics` **keinen** Serving-Konsumenten mehr — die Frage nach einem geteilten Paket entfällt |
@@ -376,6 +386,6 @@ Stand der Epics am 16.09.2026:
 | T1 Repo grün | training-atr-models#1 | offen: #2 bis #5 und #8 geschlossen, #6 (Skripte) und #7 (`ubelix/`) offen |
 | T2 Proxy | serving#137 | geschlossen |
 | T3 Handover | serving#138, training-atr-models#14 und #5 | #14 und #5 geschlossen, serving#138 offen |
-| T4 `eval/` | training-atr-models#11 | offen |
+| T4 `eval/` | training-atr-models#11 | **erledigt 03.10.2026** |
 | T5 Cutover und Rückbau | serving#139, training-atr-models#10 | offen. Cutover (T5.3, T5.4) und der Rückbau auf beiden Seiten (T5.5) erledigt, die Trainerseite mit training-atr-models efd0f7b und aadb890, deployt um 23:08; asteraix nutzt seit 22:47 den gemeinsamen Job-Speicher; serving#139 bleibt offen bis zum Abnahmetest mit v5 (#10) |
 | T6 Ausbau | training-atr-models#12 | offen |
