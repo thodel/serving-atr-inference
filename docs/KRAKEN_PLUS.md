@@ -1,5 +1,7 @@
 # kraken+ — Ströbels HTR+-Nachbau, und was davon für uns gilt
 
+> **The code this describes lives in [training-atr-models](https://github.com/thodel/training-atr-models) since 16.09.2026** (`docs/SPLIT_PLAN.md`, #207). Kept here because it is the reasoning that produced the subsystem, not a runbook for it — a path or a module name below names the tree this repo had, and resolves in the other repo under `atr_training`.
+
 Quelle: Ströbel, *diss_stroebel_v2.pdf*, Kap. 3.6.1 (S. 93 der PDF / Druckseite 71),
 Ergebnisse in Tab. 3.1 (S. 94), Tab. 3.2 (S. 96), Tab. 3.6 (S. 100).
 

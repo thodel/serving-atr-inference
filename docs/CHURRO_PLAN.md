@@ -1,5 +1,7 @@
 # CHURRO für deutsche Handschriften des 14.–16. Jahrhunderts — Trainingsplan
 
+> **The code this describes lives in [training-atr-models](https://github.com/thodel/training-atr-models) since 16.09.2026** (`docs/SPLIT_PLAN.md`, #207). Kept here because it is the reasoning that produced the subsystem, not a runbook for it — a path or a module name below names the tree this repo had, and resolves in the other repo under `atr_training`.
+
 Stand: 11.09.2026. Ausgangspunkt ist die Literaturübersicht *„Feinabstimmung von
 Vision-Language-Modellen für historische Schriften"* (Google Doc, 2026). Alles,
 was dieser Plan über CHURRO behauptet, ist an den Primärquellen nachgeprüft —

@@ -1,5 +1,7 @@
 # Running a large VLM training on UBELIX
 
+> **The code this describes lives in [training-atr-models](https://github.com/thodel/training-atr-models) since 16.09.2026** (`docs/SPLIT_PLAN.md`, #207). Kept here because it is the reasoning that produced the subsystem, not a runbook for it — a path or a module name below names the tree this repo had, and resolves in the other repo under `atr_training`.
+
 A plan and a cost estimate for fine-tuning Qwen3-VL on the **full** medieval
 dataset (`dh-unibe/image-text_medieval-scripts_xiv-xv-xvi`), on the University
 of Bern cluster rather than on idhefix.

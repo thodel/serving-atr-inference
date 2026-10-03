@@ -46,9 +46,9 @@ fi
 # from the file the venv was actually built from, so there is no second list here
 # to drift out of step with the first.
 #
-# The import smoke tests name what the code in this repo really imports. `vlm-train`
-# checks `qwen3_vl` is a model transformers knows — that is precisely what a version
-# below 4.57 fails at, and it costs no download to ask.
+# The import smoke tests name what the code in this repo really imports. The three
+# training venvs are checked by training-atr-models' copy of this script, not here
+# (#207).
 declare -a VENV_ENTRIES=(
   # The gateway venv has NO ML deps by design (IMPLEMENTATION_PLAN §3); its deps
   # come from pyproject.toml, not a requirements.txt.
@@ -56,8 +56,6 @@ declare -a VENV_ENTRIES=(
   "kraken|kraken|engines/kraken_svc/requirements.txt|import kraken; from importlib.metadata import version; print('kraken', version('kraken'))"
   "party|party|engines/party_svc/requirements.txt|import kraken; print('party ok')"
   "trocr|trocr|engines/trocr_svc/requirements.txt|from transformers import TrOCRProcessor, VisionEncoderDecoderModel; print('trocr ok')"
-  "kraken-train|kraken-train|engines/kraken_train_svc/requirements.txt|import kraken, datasets; from importlib.metadata import version; print('kraken-train', version('kraken'))"
-  "vlm-train|vlm-train|engines/vlm_train_svc/requirements.txt|import peft, bitsandbytes, datasets; from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig, Trainer, TrainingArguments; from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES; assert 'qwen3_vl' in CONFIG_MAPPING_NAMES, 'this transformers does not know qwen3_vl'; print('vlm-train ok')"
   "vllm|vllm|engines/vllm/requirements.txt|import vllm; from importlib.metadata import version; print('vllm', version('vllm'))"
 )
 

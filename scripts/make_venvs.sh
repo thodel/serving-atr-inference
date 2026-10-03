@@ -7,7 +7,7 @@
 #
 # Usage:
 #   bash scripts/make_venvs.sh                  # ALL venvs (first provisioning)
-#   bash scripts/make_venvs.sh kraken-train     # just one (or several)
+#   bash scripts/make_venvs.sh kraken            # just one (or several)
 #
 # BUILD ONLY WHAT YOU NEED ON A LIVE BOX. Several requirement files are ranges,
 # not pins (engines/kraken_svc: `kraken>=5.0`, trocr: `transformers`), so a
@@ -40,7 +40,7 @@ case "$(stat -f -c %T "${TMPDIR:-/tmp}" 2>/dev/null || echo unknown)" in
     echo "      TMPDIR=${TMPDIR}" >&2
     ;;
 esac
-ALL=(gateway kraken party trocr kraken-train vlm-train trocr-train vllm vllm-next)
+ALL=(gateway kraken party trocr vllm vllm-next)
 TARGETS=("$@")
 [ ${#TARGETS[@]} -eq 0 ] && TARGETS=("${ALL[@]}")
 
@@ -99,44 +99,6 @@ if wanted trocr; then
   "${VENVS}/trocr/bin/pip" install -r "${ROOT}/engines/trocr_svc/requirements.txt"
 fi
 
-if wanted kraken-train; then
-  # Training gets its OWN venv: it adds the HuggingFace data stack on top of kraken
-  # and pins kraken EXACTLY (7.0.2), so a training dependency can never move the
-  # serving engine's versions under it. See docs/TRAINING_PLAN.md §2.
-  #
-  # torch first, from the cu128 index, exactly as the vllm venv does: left to the
-  # requirements file pip resolves the newest torch and pulls CUDA 12.9 wheels —
-  # gigabytes of download on a box whose root partition is the binding constraint.
-  new_venv kraken-train
-  "${VENVS}/kraken-train/bin/pip" install torch==2.8.0 torchvision==0.23.0 \
-    --index-url https://download.pytorch.org/whl/cu128
-  "${VENVS}/kraken-train/bin/pip" install -r "${ROOT}/engines/kraken_train_svc/requirements.txt"
-fi
-
-if wanted vlm-train; then
-  # QLoRA fine-tuning of Qwen3-VL. Its OWN venv, not kraken-train's: kraken 7.0.2
-  # and a transformers new enough for Qwen3-VL cannot share a dependency tree.
-  # The supervising service (atr-train) imports neither, so it spawns each job
-  # with the right interpreter — see src/atr_serving/training/backends.py.
-  #
-  # torch first from the cu128 index, same as the other GPU venvs.
-  new_venv vlm-train
-  "${VENVS}/vlm-train/bin/pip" install torch==2.8.0 torchvision==0.23.0 \
-    --index-url https://download.pytorch.org/whl/cu128
-  "${VENVS}/vlm-train/bin/pip" install -r "${ROOT}/engines/vlm_train_svc/requirements.txt"
-fi
-
-if wanted trocr-train; then
-  # TrOCR fine-tuning (#44). Its own venv for the same reason as the others: the
-  # serving trocr engine and this one pin transformers differently, and the
-  # supervising service imports neither — it spawns each job with the right
-  # interpreter (src/atr_serving/training/backends.py).
-  new_venv trocr-train
-  "${VENVS}/trocr-train/bin/pip" install torch==2.8.0 torchvision==0.23.0 \
-    --index-url https://download.pytorch.org/whl/cu128
-  "${VENVS}/trocr-train/bin/pip" install -r "${ROOT}/engines/trocr_train_svc/requirements.txt"
-fi
-
 if wanted vllm; then
   # Driver 565 / CUDA 12.7: current vLLM's *default* wheel (0.2x) is a CUDA-13 build
   # (needs libcudart.so.13 / driver >=580) and fails on this box; its cu129 build does
@@ -168,8 +130,6 @@ wanted gateway && echo "  Gateway: ${VENVS}/gateway/bin/uvicorn atr_serving.app:
 wanted kraken && echo "  Kraken:  ${VENVS}/kraken/bin/python -m uvicorn kraken_svc.app:app --host 127.0.0.1 --port 8201"
 wanted party && echo "  Party:   ${VENVS}/party/bin/python -m uvicorn party_svc.app:app --host 127.0.0.1 --port 8203"
 wanted trocr && echo "  TrOCR:   ${VENVS}/trocr/bin/python -m uvicorn trocr_svc.app:app --host 127.0.0.1 --port 8202"
-wanted kraken-train && echo "  Train:   ${VENVS}/kraken-train/bin/python -m uvicorn kraken_train_svc.app:app --host 127.0.0.1 --port 8204"
-wanted vlm-train && echo "  VLM train: no service of its own — atr-train (:8204) spawns jobs into this venv"
 wanted vllm && echo "  vLLM:    spawned on demand by the gateway's ModelManager (ports 8210+)"
 wanted vllm-next && echo "  vLLM-next: same, for models with vllm_venv: vllm-next"
 exit 0

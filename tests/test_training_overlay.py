@@ -10,6 +10,7 @@ from atr_serving.training.overlay import (
     load_overlay,
     merge,
     save_overlay,
+    set_enabled,
     upsert_entry,
 )
 
@@ -108,3 +109,28 @@ def test_models_must_be_a_list(tmp_path: Path):
     path.write_text("models: {id: x}\n", encoding="utf-8")
     with pytest.raises(OverlayError, match="must be a list"):
         load_overlay(path)
+
+
+# ── flipping an entry (#36's promotion gate used this; the gate itself left) ──
+# The gate moved to training-atr-models with the package; `set_enabled` did not,
+# because it is overlay code. These two came out of `test_training_promote.py`
+# when the rest of that file went with the gate (#207).
+def _promotable(model_id: str) -> ModelSpec:
+    return ModelSpec(id=model_id, engine="kraken", local_path=f"/w/{model_id}",
+                     enabled=False, task="htr")
+
+
+def test_promotion_flips_exactly_one_entry(tmp_path: Path):
+    overlay = tmp_path / "models.local.yaml"
+    upsert_entry(overlay, _promotable("a"))
+    upsert_entry(overlay, _promotable("b"))
+
+    assert set_enabled(overlay, "b", True) is True
+    by_id = {s.id: s.enabled for s in load_overlay(overlay)}
+    assert by_id == {"a": False, "b": True}
+
+
+def test_flipping_a_model_that_is_not_there_reports_it(tmp_path: Path):
+    overlay = tmp_path / "models.local.yaml"
+    upsert_entry(overlay, _promotable("a"))
+    assert set_enabled(overlay, "ghost", True) is False

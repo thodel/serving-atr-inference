@@ -374,3 +374,22 @@ def test_the_baseline_file_is_the_shape_the_script_writes():
 
     assert set(raw) == {"mismatched_ids"}
     assert all(isinstance(i, str) for i in raw["mismatched_ids"])
+
+
+# ── the id that cost a run, still resolvable ─────────────────────────────────
+def test_the_id_that_cost_a_run_resolves_to_a_record(kraken):
+    """`kraken-medieval_generic_b` was in `config/models.yaml` and the trainer
+    refused it after prepare and compile had already run — "is not a valid DOI".
+    It is `kraken-prima` since PR #198 renamed the registry after the records its
+    DOIs load.
+
+    The assertion came from `tests/test_training_base_models.py`, which went with
+    the training package (#207). Its subject was never the trainer: it is this
+    repository's own registry, and whether an id in it names weights. Stated
+    without `resolve_base_model`, which lives in the other repo now.
+    """
+    by_id = {s.id: s for s in kraken}
+
+    assert "kraken-prima" in by_id, "renamed away without a successor"
+    assert "kraken-medieval_generic_b" not in by_id, "the old name came back"
+    assert str(by_id["kraken-prima"].zenodo_id).startswith("10.5281/zenodo.")
