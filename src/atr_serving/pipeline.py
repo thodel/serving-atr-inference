@@ -19,7 +19,7 @@ from PIL import Image
 from atr_serving import __version__
 from atr_serving.api.schemas import Line, RecognitionResult
 from atr_serving.image_io import decode_image, encode_png, fit_pixel_budget
-from atr_serving.training.contracts import VLM_PIXEL_BUDGET
+from atr_serving.seam import VLM_PIXEL_BUDGET
 
 # async (line_image_bytes, content_type) -> recognized text
 RecognizeLine = Callable[[bytes, str], Awaitable[str]]

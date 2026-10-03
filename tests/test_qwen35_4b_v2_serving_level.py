@@ -23,7 +23,7 @@ import pytest
 from atr_serving.config import REPO_ROOT
 from atr_serving.pipeline import visual_budget
 from atr_serving.registry import load_registry
-from atr_serving.training.contracts import VLM_PIXEL_BUDGET
+from atr_serving.seam import VLM_PIXEL_BUDGET
 
 #: `max_pixels` from the model card's hyperparameters — what it saw per LINE.
 TRAINED_PIXELS = 262144

@@ -79,7 +79,7 @@ class ModelSpec(BaseModel):
     zenodo_id: str | None = None
     # Weights on this box (a model we trained ourselves). Third accepted source
     # alongside hf_repo/zenodo_id; written to the gitignored overlay registry, see
-    # atr_serving.training.overlay. The engine-side loading is #36.
+    # atr_serving.overlay. The engine-side loading is #36.
     local_path: str | None = None
     # False = registered but not yet proven servable. The promotion gate (#36)
     # flips it after one successful recognition, so /models never advertises a

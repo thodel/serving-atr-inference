@@ -599,6 +599,18 @@ Settings that exist **only on asteraix** but belong to this seam:
 | `TMPDIR` | `~/atr-cache/tmp` | local, see the CIFS rules |
 | `HF_HOME` | **unset** | the symlink routes the cache to the share |
 
+Two values are **not** settings — nobody sets them per box, and a wrong one is a
+protocol mismatch rather than a misconfiguration. They were imported across the
+seam until the training package left this repository (#207); they are now stated
+on each side, in `src/atr_serving/seam.py` here and in `atr_training` there, and
+`tests/test_seam_values.py` pins each literal so a change has to be deliberate
+on both.
+
+| here | in training-atr-models | value | if they disagree |
+|---|---|---|---|
+| `seam.VLM_PIXEL_BUDGET` | `contracts.VLM_PIXEL_BUDGET` | `{"line": 262144, "page": 2097152}` — 256 and 2048 visual tokens against Qwen3-VL's 32² grid | silent: a VLM is served images at a scale it never trained on, and answers briefly rather than failing |
+| `seam.PROMOTION_GATE_HEADER` | `promote.PROMOTION_GATE_HEADER` | `X-ATR-Promotion-Gate`, value `1` | quiet: every job completes, the gate gets `404 unknown model`, and every trained model stays disabled |
+
 ## Operations
 
 ### Deploy
@@ -748,9 +760,10 @@ no trainer supervises them.
   more goes to `job_gpu_preemptable`, but only if it can resume. asteraix registers the
   result once the Slurm job has ended.
 - **Where the tooling lives.** The sbatch files, `submit.sh`, `status.sh` and the
-  Apptainer definitions are still in this repository's [`ubelix/`](../ubelix/README.md).
-  They move with training-atr-models#7. The background is in
-  [`UBELIX_PLAN.md`](UBELIX_PLAN.md).
+  Apptainer definitions are in training-atr-models'
+  [`ubelix/`](https://github.com/thodel/training-atr-models/tree/main/ubelix) — they
+  moved with its #7 on 17.09.2026, and the copy that stayed here until #207 was
+  frozen at the split. The background is in [`UBELIX_PLAN.md`](UBELIX_PLAN.md).
 
 ## Decisions this setup rests on
 

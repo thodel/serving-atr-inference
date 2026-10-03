@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from atr_serving.registry import ModelSpec, Registry
-from atr_serving.training.overlay import (
+from atr_serving.overlay import (
     OverlayError,
     load_overlay,
     merge,

@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from atr_serving.config import get_settings  # noqa: E402
 from atr_serving.registry import Registry, load_registry  # noqa: E402
 from atr_serving.shared_registry import TRAINED_DIRNAME, combine, read_trained  # noqa: E402
-from atr_serving.training.overlay import OVERLAY_FILENAME, load_overlay  # noqa: E402
+from atr_serving.overlay import OVERLAY_FILENAME, load_overlay  # noqa: E402
 
 
 # ── is what is on disk actually servable? ────────────────────────────────────

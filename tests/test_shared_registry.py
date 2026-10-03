@@ -34,8 +34,8 @@ from atr_serving.config import Settings
 from atr_serving.kraken_loader import WeightsNotFound, resolve_weights
 from atr_serving.registry import ModelSpec, Registry, load_registry
 from atr_serving.shared_registry import combine, read_trained, trained_signature
-from atr_serving.training.promote import PROMOTION_GATE_HEADER, http_recognizer, promote
-from atr_serving.training.overlay import (
+from atr_serving.seam import PROMOTION_GATE_HEADER
+from atr_serving.overlay import (
     OverlayError,
     load_overlay,
     merge,
@@ -717,10 +717,16 @@ def test_the_promotion_gate_reaches_nothing_else(curated, share, case):
     assert client.app.state.kraken_client.models == []
 
 
-def test_the_trainers_gate_passes_through_the_gateway(curated, share, tmp_path, monkeypatch):
-    """promote.http_recognizer against the real routes: the header is the contract."""
-    import httpx
+def test_the_trainers_gate_passes_through_the_gateway(curated, share, tmp_path):
+    """What the trainer's gate does, against the real routes: the header is the
+    contract, and a non-empty transcription is the verdict.
 
+    Written out here rather than imported from `atr_training.promote`, for the
+    reason `TrainersBaseEntry` below is copied: the two repos share a protocol,
+    not a package (#207). The three lines the gate contributes — POST /ocr with
+    the header, require a 200, require text that is not blank — are cheaper to
+    restate than a cross-repo import is to keep.
+    """
     register(share, "kraken-fresh", enabled=False)
     client = gate_client(curated, share)
     page = tmp_path / "page.jpg"
@@ -728,14 +734,17 @@ def test_the_trainers_gate_passes_through_the_gateway(curated, share, tmp_path, 
     # bytes and so was never a JPEG. Nothing noticed, because nothing looked —
     # which is the failure #174 is about, one layer down.
     page.write_bytes(b"\xff\xd8\xff-fake")
-    monkeypatch.setattr(httpx, "post", lambda url, **kw: client.post(
-        url.removeprefix("http://gateway:8200"),
-        headers=kw["headers"], files=kw["files"], data=kw["data"]))
 
-    verdict = promote("kraken-fresh", page, http_recognizer("http://gateway:8200", KEY))
+    with page.open("rb") as fh:
+        response = client.post(
+            "/ocr",
+            headers={"X-API-Key": KEY, PROMOTION_GATE_HEADER: "1"},
+            files={"image": (page.name, fh, "image/jpeg")},
+            data={"model": "kraken-fresh"},
+        )
 
-    assert verdict.promoted, verdict.reason
-    assert verdict.sample == "gelesen"
+    assert response.status_code == 200, response.text
+    assert response.json()["text"].strip() == "gelesen", "an empty read is not a pass"
 
 
 # ── the contract with the trainer ────────────────────────────────────────────
@@ -750,6 +759,12 @@ class TrainersBaseEntry(BaseModel):
 
     id: str
     engine: str
+    #: Added on the trainer's side with training-atr-models f54c81e, so a model
+    #: card can resolve a base id to the weights it names rather than repeating
+    #: the id (#101). Both are in `config/models.yaml` and were being dropped by
+    #: `extra="ignore"`.
+    description: str | None = None
+    hf_repo: str | None = None
     zenodo_id: str | None = None
     local_path: str | None = None
     enabled: bool = True

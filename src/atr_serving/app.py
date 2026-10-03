@@ -20,7 +20,7 @@ from atr_serving.config import (
 from atr_serving.manager import ModelManager
 from atr_serving.registry import Registry, load_registry
 from atr_serving.shared_registry import RegistryWatch
-from atr_serving.training.overlay import load_overlay, merge
+from atr_serving.overlay import load_overlay, merge
 
 
 def _check_auth_hardening(settings: Settings) -> None:

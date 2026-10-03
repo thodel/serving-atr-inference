@@ -1,1 +1,0 @@
-"TrOCR fine-tuning engine."

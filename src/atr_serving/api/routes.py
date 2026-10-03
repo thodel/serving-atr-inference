@@ -41,7 +41,7 @@ from atr_serving.pipeline import (
     generation_budget, recognize_lines, recognize_page_vllm, visual_budget,
 )
 from atr_serving.registry import ModelSpec, Registry
-from atr_serving.training.promote import PROMOTION_GATE_HEADER
+from atr_serving.seam import PROMOTION_GATE_HEADER
 
 router = APIRouter()
 

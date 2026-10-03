@@ -26,7 +26,7 @@ from atr_serving.config import Settings
 from atr_serving.image_io import decode_image, fit_pixel_budget
 from atr_serving.pipeline import fit_to_budget, visual_budget
 from atr_serving.registry import ModelSpec
-from atr_serving.training.contracts import VLM_PIXEL_BUDGET
+from atr_serving.seam import VLM_PIXEL_BUDGET
 
 
 def spec(**kwargs) -> ModelSpec:

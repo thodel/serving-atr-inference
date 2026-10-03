@@ -46,7 +46,7 @@ from typing import Any, Callable
 import yaml
 
 from atr_serving.registry import ModelSpec, Registry
-from atr_serving.training.overlay import load_overlay, merge
+from atr_serving.overlay import load_overlay, merge
 
 try:
     from loguru import logger
@@ -330,7 +330,7 @@ def combine(tracked: Registry, local: list[ModelSpec], shared: list[ModelSpec],
     """Tracked + local overlay + shared ``trained/``, with the precedence spelled out.
 
     * **tracked vs local overlay** — a hard error, as it always was
-      (:func:`~atr_serving.training.overlay.merge`).
+      (:func:`~atr_serving.overlay.merge`).
     * **tracked vs shared** — the shared file is skipped and logged, not raised:
       one bad file on the share costs that file, not every registration beside
       it, which is what an exception here would do to each reload. Either way a
