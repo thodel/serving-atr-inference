@@ -286,7 +286,12 @@ Rückbau kam nach T5.4.
   hiesigen Kopie von `training/publish.py` gebaut, die niemand ausführt, und
   mussten zwei Wochen später nach drüben geportet werden
   (training-atr-models `f54c81e`). Zwei Bäume heissen, dass Arbeit in dem
-  landet, in dem man gerade liest.
+  landet, in dem man gerade liest. **Vollzogen am 03.10.2026** (#207): es
+  hingen vier Importe am Paket, nicht drei — `api/routes.py:44` holte den
+  Gate-Header aus `training.promote`. `overlay.py` war das einzige Modul, das
+  nie umgezogen ist, weil es Serving-Code ist; es liegt jetzt als
+  `atr_serving.overlay`, und die zwei Werte, die beide Hälften teilen, stehen
+  in `src/atr_serving/seam.py` samt Zeile in der Tabelle der geteilten Werte.
 - **Behalten:** die Platzprüfung vor jedem vLLM-Start — sie schützt vor den
   Engines und den Nachbarn —, die LRU-Verdrängung und das Autosizing.
   `GpuBusyError` bleibt als Ausnahme der Platzprüfung (503 mit `Retry-After`
@@ -388,9 +393,9 @@ Stand der Epics am 16.09.2026:
 | Epic | Issues | Stand |
 |---|---|---|
 | T0 Namen | serving#136 | offen; T0.2 (die Umbenennung in `docs/idhefix-environment.md`) ist mit #142 erledigt |
-| T1 Repo grün | training-atr-models#1 | offen, aber nur noch an einem Posten: #2 bis #8 sind geschlossen (#6 am 29.09., #7 am 17.09.), beide Suiten sind grün. Offen ist der **Auszug des Pakets** (#207, siehe T5.5) und der Ausbau T6 |
+| T1 Repo grün | training-atr-models#1 | **erledigt 03.10.2026.** #2 bis #8 und #11 geschlossen, der Auszug des Pakets mit #207: 17 057 Zeilen hier gelöscht, `overlay.py` nach `atr_serving.overlay`, die zwei geteilten Werte in `src/atr_serving/seam.py`. Gateway neu gestartet, `/models` identisch (49 IDs, keine verloren), das Gate-Header-Feld live nachgewiesen. Offen bleibt nur der Ausbau T6 |
 | T2 Proxy | serving#137 | geschlossen |
 | T3 Handover | serving#138, training-atr-models#14 und #5 | #14 und #5 geschlossen, serving#138 offen |
 | T4 `eval/` | training-atr-models#11 | **erledigt 03.10.2026** |
-| T5 Cutover und Rückbau | serving#139, training-atr-models#10 | offen. Cutover (T5.3, T5.4) und der Rückbau auf beiden Seiten (T5.5) erledigt, die Trainerseite mit training-atr-models efd0f7b und aadb890, deployt um 23:08; asteraix nutzt seit 22:47 den gemeinsamen Job-Speicher; serving#139 bleibt offen bis zum Abnahmetest mit v5 (#10). **Stand 03.10.2026:** #139 und #10 sind geschlossen; was von T5.5 bleibt, ist der Auszug des Pakets, jetzt mit eigenem Issue (#207) |
+| T5 Cutover und Rückbau | serving#139, training-atr-models#10 | offen. Cutover (T5.3, T5.4) und der Rückbau auf beiden Seiten (T5.5) erledigt, die Trainerseite mit training-atr-models efd0f7b und aadb890, deployt um 23:08; asteraix nutzt seit 22:47 den gemeinsamen Job-Speicher; serving#139 bleibt offen bis zum Abnahmetest mit v5 (#10). **Erledigt 03.10.2026:** #139 und #10 geschlossen, der Auszug des Pakets mit #207 |
 | T6 Ausbau | training-atr-models#12 | offen |
