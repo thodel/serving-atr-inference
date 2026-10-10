@@ -144,7 +144,7 @@ How a request is recognized depends on the model's engine and level:
 |---|---|---|
 | `/segment` | kraken | baseline segmentation of a page |
 | `/recognize`, `/ocr` | kraken | one call: the engine segments and transcribes the page |
-| `/recognize`, `/ocr` | trocr | the gateway segments through kraken, crops the lines and sends them to TrOCR one per call, `line_concurrency` (6) at a time, then reassembles them top to bottom |
+| `/recognize`, `/ocr` | trocr | the gateway segments through kraken, crops the lines and sends them to TrOCR one per call, `line_concurrency` (6) at a time, then reassembles them top to bottom. The segmentation is shared per page (#205): a second line-level reading of the same image reuses it instead of paying the 9 s again, and both readings carry the same `segmentation_id` |
 | `/recognize` | party | one call: the engine segments and transcribes the page |
 | `/recognize` | vllm, page level | the ModelManager starts the model if it is not resident, the gateway scales the page to the pixel budget the model was trained at and makes one call |
 | `/recognize` | vllm, line level | kraken segmentation, then one chat call per line crop |

@@ -42,6 +42,7 @@ from atr_serving.pipeline import (
     generation_budget, recognize_lines, recognize_page_vllm, visual_budget,
 )
 from atr_serving.registry import ModelSpec, Registry
+from atr_serving.segcache import segmentation_id
 from atr_serving.seam import PROMOTION_GATE_HEADER
 from atr_serving import units
 
@@ -87,6 +88,19 @@ def _engine_client(request: Request, engine: str):
     return get_engine_client(engine, _settings(request))
 
 
+def _segcache(request: Request):
+    """The process's segmentation cache, or ``None`` when sharing is off.
+
+    ``None`` rather than a disabled cache object, so the pipeline's "segment
+    every time" path is the same code an old deployment and a test take — one
+    behaviour fewer to reason about.
+    """
+    cache = getattr(request.app.state, "segcache", None)
+    if cache is None or getattr(cache, "max_entries", 0) <= 0:
+        return None
+    return cache
+
+
 def _parse_lines(lines: str | None) -> list[Line] | None:
     if not lines:
         return None
@@ -110,6 +124,7 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
     return await recognize_lines(
         raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line,
         concurrency=_settings(request).line_concurrency,
+        segcache=_segcache(request),
     )
 
 
@@ -451,13 +466,26 @@ async def segment(
     seg_mode: str | None = Form(None),  # legacy alias used by KrakenHTTPClient
 ) -> SegmentResponse:
     raw = await image.read()
+    filename = image.filename or "image"
+    ctype = image.content_type or "application/octet-stream"
+    how = seg_mode or mode
+    cache = _segcache(request)
     try:
-        return await _kraken_client(request).segment(
-            raw, image.filename or "image", image.content_type or "application/octet-stream",
-            mode=seg_mode or mode,
-        )
+        if cache is None:
+            found = await _kraken_client(request).segment(raw, filename, ctype, mode=how)
+        else:
+            # Shared with the line pipeline, both ways: a caller that segments
+            # here and then asks for a line-level reading pays for one
+            # segmentation, and the reading carries the id this answer reports.
+            found = await cache.get(
+                raw, how,
+                lambda: _kraken_client(request).segment(raw, filename, ctype, mode=how))
     except EngineError as exc:
         raise _engine_http_error(exc) from exc
+    # Filled in here rather than by the engine: the id is the gateway's statement
+    # that two readings sat on the same lines, and the engine answering /segment
+    # knows nothing about the other readings.
+    return found.model_copy(update={"segmentation_id": segmentation_id(found)})
 
 
 #: An engine's 4xx that must NOT reach the caller as itself. Authentication
@@ -654,6 +682,11 @@ async def recognize(
                 await recognize_lines(
                     raw, filename, ctype, model, "vllm", _kraken_client(request), _vllm_line,
                     concurrency=_settings(request).line_concurrency,
+                    # A line-level vLLM model reads the same lines as TrOCR, so
+                    # it shares the segmentation too — and carries the same id,
+                    # which is what makes a per-line comparison between the two
+                    # a comparison at all (#205).
+                    segcache=_segcache(request),
                 )
             )
     except EngineError as exc:

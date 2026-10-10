@@ -207,6 +207,17 @@ class Settings(BaseSettings):
     #: (agentic_historian#404). Bounded rather than unbounded — one GPU serves these,
     #: and flooding it trades latency for queueing plus a memory risk.
     line_concurrency: int = 6
+    #: Pages whose line geometry is kept, and for how long (#205). ``/segment``
+    #: is 9.0s for a 79-line page, and an ensemble page asks several line-level
+    #: engines to read it — the missiven run of 2026-10-09 planned three TrOCR
+    #: models per page, so the same pixels were segmented three times before a
+    #: line was read. 0 entries switches the sharing off.
+    segcache_entries: int = 64
+    #: The geometry of a page does not change, but the *segmenter* behind the
+    #: gateway can. The TTL is what keeps a kraken upgrade from being masked
+    #: until the next gateway restart, and it is far longer than one page's
+    #: engines need.
+    segcache_ttl_s: float = 900.0
     #: Generation ceiling for a **line** crop. Ample there, and short for a page —
     #: which is why it is no longer the answer for both (#131). A page-level model
     #: gets ``vllm_max_new_tokens_page`` unless its registry entry declares its own

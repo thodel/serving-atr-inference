@@ -19,6 +19,7 @@ from atr_serving.config import (
 )
 from atr_serving.manager import ModelManager
 from atr_serving.registry import Registry, load_registry
+from atr_serving.segcache import SegmentationCache
 from atr_serving.shared_registry import RegistryWatch
 from atr_serving.overlay import load_overlay, merge
 
@@ -119,6 +120,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.registry = registry
     app.state.model_manager = manager
     app.state.registry_watch = watch
+    # One segmentation per page rather than one per line-level engine (#205).
+    # Per process, because that is the scope in which one page's recognitions
+    # run; a request-scoped cache would not help at all, since the duplicate
+    # segmentations arrive as separate requests.
+    app.state.segcache = SegmentationCache(
+        max_entries=settings.segcache_entries, ttl_s=settings.segcache_ttl_s)
     if watch is not None:
         watch.start(app.state)
     app.include_router(router)
