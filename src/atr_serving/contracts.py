@@ -35,6 +35,10 @@ class Region(BaseModel):
 class SegmentResponse(BaseModel):
     lines: list[Line]
     segmented_by: str
+    #: Short id of this geometry (#205). Set by the gateway, which is where the
+    #: segmentation is shared; an engine answering ``/segment`` directly leaves
+    #: it empty, and the gateway fills it in from the content.
+    segmentation_id: str | None = None
     regions: list[Region] = Field(default_factory=list)
     #: The segmenter's own reading order, as indices into ``lines``. kraken
     #: computes one and this pipeline threw it away; a segmenter that offers none
@@ -72,6 +76,16 @@ class RecognitionResult(BaseModel):
     confidence: float | None = None
     timing_ms: int = 0
     segmented_by: str | None = None
+    #: Short id of the **line geometry** this reading was made from (#205).
+    #:
+    #: Two readings carry the same id if and only if they sat on the same lines,
+    #: which is what decides whether comparing them *per line* means anything.
+    #: ``None`` says these lines did not come from a shared segmentation — which
+    #: is a different fact from "from a different one", and is the honest answer
+    #: for an engine that segments inside itself (kraken's ``/ocr``) or does not
+    #: segment at all (party, a page-level vLLM). Reported rather than filled in,
+    #: because it is the measurement the open decision in #205 needs.
+    segmentation_id: str | None = None
     version: str
     #: The model stopped because it hit the token ceiling, not because the text
     #: ended. Page-level generation makes this reachable: a page is many times

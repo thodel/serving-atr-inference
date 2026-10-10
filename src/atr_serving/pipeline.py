@@ -20,6 +20,7 @@ from atr_serving import __version__
 from atr_serving.api.schemas import Line, RecognitionResult
 from atr_serving.image_io import decode_image, encode_png, fit_pixel_budget
 from atr_serving.seam import VLM_PIXEL_BUDGET
+from atr_serving.segcache import segmentation_id
 
 # async (line_image_bytes, content_type) -> recognized text
 RecognizeLine = Callable[[bytes, str], Awaitable[str]]
@@ -265,6 +266,7 @@ def order_lines(seg) -> list[int]:
 async def recognize_lines(
     image, filename, content_type, model_id, engine, segmenter, recognize_line: RecognizeLine,
     concurrency: int = 1,
+    segcache=None,
 ) -> RecognitionResult:
     """Engine-agnostic line pipeline: segment -> crop each line -> recognize ->
     assemble. ``recognize_line`` runs one line image through whichever backend
@@ -282,9 +284,24 @@ async def recognize_lines(
     Which index, though, is `order_lines`: the segmenter's own reading order when
     it offers one, else region by region. Cropping follows that sequence, so the
     assembled page reads in it.
+
+    ``segcache`` segments one page once rather than once per line-level engine
+    (#205): ``/segment`` is 9.0s for a 79-line page, and an ensemble page asks
+    for several readings of it. Nothing about a segmentation depends on which
+    model will read the lines. Passing ``None`` segments every time, which is
+    what the tests of this function's own behaviour do.
     """
     t0 = time.perf_counter()
-    seg = await segmenter.segment(image, filename, content_type, mode="baseline")
+    if segcache is None:
+        seg = await segmenter.segment(image, filename, content_type, mode="baseline")
+    else:
+        seg = await segcache.get(
+            image, "baseline",
+            lambda: segmenter.segment(image, filename, content_type, mode="baseline"))
+    # From the content, not from the cache key: an id derived from the image
+    # would claim two readings share geometry whenever they share a page, which
+    # is the thing that needs proving.
+    seg_id = segmentation_id(seg)
     pil = decode_image(image)
 
     # Crop first, synchronously: cropping is CPU-bound and shares one PIL image, so
@@ -319,5 +336,5 @@ async def recognize_lines(
     return RecognitionResult(
         model=model_id, engine=engine, text="\n".join(texts), lines=out_lines,
         timing_ms=int((time.perf_counter() - t0) * 1000),
-        segmented_by=seg.segmented_by, version=__version__,
+        segmented_by=seg.segmented_by, segmentation_id=seg_id, version=__version__,
     )

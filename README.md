@@ -555,7 +555,7 @@ multipart `image` field.
 |---|---|---|
 | `POST /ocr` | `{text, confidence, model, version}` | Full-page transcription, minimal shape (the `agentic_historian` `KrakenHTTPClient` UX). |
 | `POST /recognize` | full `RecognitionResult` (`text`, per-line `lines[]`, `segmented_by`, `timing_ms`, `version`) | Full-page transcription with per-line detail. |
-| `POST /segment` | `{lines: [{order, bbox, baseline, …}], segmented_by}` | Baselines/polygons only (kraken) — for client-side orchestration. |
+| `POST /segment` | `{lines: [{order, bbox, baseline, …}], segmented_by, segmentation_id}` | Baselines/polygons only (kraken) — for client-side orchestration. |
 
 ### Full-page TrOCR — auto-segment (the supported path)
 
@@ -579,6 +579,37 @@ gateway auto-segments). Other engines (party, line-level vLLM) return `400` — 
 `/recognize`, which auto-segments those too and returns the full per-line result.
 
 ### Manual line-level (optional)
+
+### One segmentation per page, and a name for it (#205)
+
+`/segment` costs **9.0 s for a 79-line page** (measured on tei,
+agentic_historian#404), and a line-level reading pays it. An ensemble page asks
+for several — the `missiven` run of 2026-10-09 planned *three* TrOCR models for
+one page, so the same pixels were segmented three times before a line was read.
+
+Nothing about a segmentation depends on which model will read the lines, so the
+gateway keeps it per page (`segcache_entries`, `segcache_ttl_s`; `0` entries
+switches sharing off). It is **single-flight**, not merely a cache: a caller's
+ensemble runs its engines concurrently, so two line-level readings of one page
+start within milliseconds, and a plain cache would have both miss and save
+nothing in exactly the case it was built for.
+
+Every reading names the geometry it was made from, in `segmentation_id`:
+
+* two readings carry the **same** id if and only if they sat on the same lines —
+  which is what decides whether comparing them *per line* means anything;
+* `null` says these lines did not come from a shared segmentation. That is a
+  different fact from "from a different one", and it is the honest answer for an
+  engine that segments inside itself (kraken's `/ocr`) or not at all (party, a
+  page-level vLLM).
+
+The `null` is the useful part of an unfinished story. kraken's internal
+segmentation is the one its recognition quality was measured on, so this change
+does **not** replace it — that would be an unmeasured change to kraken's
+results. Until that decision is taken (#205), a kraken reading and a TrOCR
+reading of the same page carry different ids, which is precisely the fact that
+makes a per-line comparison between them meaningless today. It is now visible
+instead of implicit.
 
 To own segmentation/cropping yourself: `POST /segment` for ordered baselines,
 crop the lines, then send each line image to `POST /recognize` with the `trocr-*`
