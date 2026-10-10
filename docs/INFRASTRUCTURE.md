@@ -697,6 +697,36 @@ fails with a `502`. The trainer checks its allowlist even before it serves its o
 `/health`, so a gateway outside `ATR_TRAIN_ALLOWED_CLIENTS` sees a `403` there too.
 `GET /train/jobs` is the check that uses the key and the allowlist.
 
+### When an engine is down
+
+`atr-kraken.service` and its siblings carry `Restart=on-failure`, which does not cover
+the two cases that happen: systemd does not restart a process that exits 0, and once a
+unit has burned its start-limit burst systemd gives up and leaves it in `failed` until
+something clears it. In both states the gateway stays up and answers every call to that
+engine with a `502` naming the loopback port, which is exactly what a `missiven` run saw
+on 09.10.2026 — 16 of 20 recognitions lost to
+`kraken engine unreachable at http://127.0.0.1:8201/recognize`.
+
+On the box this is `systemctl --user reset-failed atr-kraken && systemctl --user restart
+atr-kraken`. No client can reach that: tei and the ATR-MCP see `:8200` and nothing else
+(§[Network and trust](#network-and-trust)). So the gateway offers it, keyed (#209):
+
+```bash
+curl -s -X POST -H "X-API-Key: $ATR_API_KEY" localhost:8200/engines/kraken/restart
+# {"engine":"kraken","unit":"atr-kraken.service","restarted":true,
+#  "reachable":true,"detail":"kraken answers /health again"}
+```
+
+| the status | what it means |
+|---|---|
+| `404` | the name is not a recognition engine of this gateway. `gateway` and `train` are 404 by construction: the allowlist is `Settings.engine_urls()`. The gateway must not restart itself from a request it is answering, and the trainer lives on asteraix |
+| `409` | the engine is **busy** — it accepted the connection and has not answered `/health` yet, which since #149 means working, not down. A restart would abort the page it is reading. Nothing was started |
+| `502` | `systemctl` exited non-zero; `detail` carries its output, and names `reset-failed`'s too when both failed (a unit that is not installed fails both) |
+| `200` with `"reachable": false` | the unit was restarted and the engine had not answered `/health` within 15 s. A model cold start can take longer than that, so this is an unfinished measurement, not a failed restart — probe `/health` again |
+
+`restarted` says only that `systemctl` exited 0. Whether the engine serves again is the
+separate `reachable` field, measured by probing its own `/health` afterwards.
+
 ### When `/train/*` fails
 
 The bot passes the gateway's answer on as `URL answered STATUS: DETAIL`. The detail

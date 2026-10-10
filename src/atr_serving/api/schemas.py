@@ -23,6 +23,7 @@ from atr_serving.registry import ModelSpec
 __all__ = [
     "Line", "OcrResponse", "RecognitionResult", "SecondOpinion", "SegmentResponse",
     "EngineStatus", "HealthResponse", "ModelInfo", "ModelsResponse",
+    "EngineRestartResponse",
 ]
 
 
@@ -46,6 +47,25 @@ class HealthResponse(BaseModel):
     resident_models: list[str] = Field(default_factory=list)
     engines: list[EngineStatus] = Field(default_factory=list)
 
+
+
+# ── /engines/{name}/restart ───────────────────────────────────────────────
+class EngineRestartResponse(BaseModel):
+    """What the restart did, and separately what the engine now answers.
+
+    ``restarted`` is about ``systemctl``: it exited 0, the unit was told to
+    start. ``reachable`` is about the engine: its own ``/health`` answered again
+    within the verification window. The two are deliberately separate fields
+    because they fail apart — a model cold start can outlast the window, which
+    leaves ``restarted: true`` with ``reachable: false``, and that is an
+    unfinished measurement rather than a failure. ``None`` means not probed.
+    """
+
+    engine: str
+    unit: str
+    restarted: bool
+    reachable: bool | None = None
+    detail: str = ""
 
 # ── /models ───────────────────────────────────────────────────────────────
 class ModelInfo(ModelSpec):
