@@ -23,6 +23,7 @@ from atr_serving import __version__
 from atr_serving import gpu as gpu_probe
 from atr_serving.api.auth import require_api_key
 from atr_serving.api.schemas import (
+    EngineRestartResponse,
     EngineStatus,
     HealthResponse,
     Line,
@@ -42,6 +43,7 @@ from atr_serving.pipeline import (
 )
 from atr_serving.registry import ModelSpec, Registry
 from atr_serving.seam import PROMOTION_GATE_HEADER
+from atr_serving import units
 
 router = APIRouter()
 
@@ -162,6 +164,101 @@ async def health(request: Request) -> HealthResponse:
         model_count=len(registry),
         resident_models=_manager(request).resident_model_ids(),
         engines=list(results),
+    )
+
+
+#: How long to keep asking an engine's /health after a restart before reporting
+#: what it says. Uvicorn is up in a second or two; a model cold start can take
+#: longer than this, and that case is reported as ``reachable: false``, not as a
+#: failed restart. Bounded well under the callers' own timeouts
+#: (agentic_historian's atr_status.TIMEOUT_S is 30 s).
+RESTART_VERIFY_S = 15.0
+#: Gap between verification probes.
+RESTART_POLL_S = 1.0
+
+
+async def _verify_engine(name: str, url: str, *, deadline_s: float) -> bool | None:
+    """Ask ``url``'s /health until it answers or the window closes.
+
+    ``None`` would mean "not probed"; this function always probes, so it returns
+    a bool. It is the route's job not to call it when there is nothing to verify.
+    """
+    end = time.monotonic() + deadline_s
+    async with httpx.AsyncClient(timeout=HEALTH_PROBE_TIMEOUT_S) as client:
+        while True:
+            status = await _probe_engine(client, name, url)
+            # busy counts as up: it accepted the connection (#149).
+            if status.reachable:
+                return True
+            if time.monotonic() >= end:
+                return False
+            await asyncio.sleep(RESTART_POLL_S)
+
+
+@router.post(
+    "/engines/{name}/restart",
+    response_model=EngineRestartResponse,
+    tags=["meta"],
+    dependencies=[Depends(require_api_key)],
+)
+async def restart_engine(name: str, request: Request) -> EngineRestartResponse:
+    """Restart one recognition engine's systemd unit (#209).
+
+    Keyed, because ``:8200`` is reached from tei and from VPN clients
+    (INFRASTRUCTURE.md §305) and an unkeyed route here would be a remote kill
+    switch. The guards, in the order they run:
+
+    * **the name must be an engine this gateway serves.** ``Settings.engine_urls()``
+      is the allowlist, so ``gateway`` and ``train`` are 404 by construction and
+      not by a blocklist someone must remember to extend. Restarting the gateway
+      from a gateway request would cut off its own answer; the trainer has lived
+      on asteraix since 16.09.2026 and a restart there belongs on that box.
+    * **busy is not down (#149).** A read timeout means the engine accepted the
+      connection and is working — on 17.09. party read pages for 30-80 s each
+      and probed as unreachable throughout. Restarting on that signal would
+      abort a live recognition mid-page, so a busy engine is refused with 409
+      *before* anything is started.
+
+    What comes back separates the two questions it can answer: ``restarted`` is
+    ``systemctl``'s exit status, ``reachable`` is the engine's own ``/health``
+    afterwards.
+    """
+    settings = _settings(request)
+    engines = settings.engine_urls()
+    unit = units.unit_of(name, engines)
+    if unit is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{name!r} is not a recognition engine of this gateway; "
+                   f"known: {', '.join(sorted(engines))}",
+        )
+    url = engines[name]
+
+    async with httpx.AsyncClient(timeout=HEALTH_PROBE_TIMEOUT_S) as client:
+        before = await _probe_engine(client, name, url)
+    if before.busy:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{name} is busy — it accepted the connection and is still "
+                   f"working (#149). Restarting now would abort the page it is "
+                   f"reading. Ask again once it answers /health.",
+        )
+
+    logger.info("restart requested for {} ({})", name, unit)
+    result = await run_in_threadpool(units.restart_unit, unit)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.detail)
+
+    reachable = await _verify_engine(name, url, deadline_s=RESTART_VERIFY_S)
+    detail = (
+        f"{name} answers /health again"
+        if reachable
+        else f"{unit} was restarted; {name} did not answer /health within "
+             f"{RESTART_VERIFY_S:.0f}s — a model cold start can take longer"
+    )
+    logger.info("restart of {} done: reachable={}", name, reachable)
+    return EngineRestartResponse(
+        engine=name, unit=unit, restarted=True, reachable=reachable, detail=detail,
     )
 
 
