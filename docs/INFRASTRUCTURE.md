@@ -764,6 +764,11 @@ no trainer supervises them.
   [`ubelix/`](https://github.com/thodel/training-atr-models/tree/main/ubelix) — they
   moved with its #7 on 17.09.2026, and the copy that stayed here until #207 was
   frozen at the split. The background is in [`UBELIX_PLAN.md`](UBELIX_PLAN.md).
+- **How the two training places are used together.** Who does what, what asteraix
+  and UBELIX share on the research share and what they do not, and the hand
+  procedure that brings weights trained on UBELIX into `trained/` and the registry
+  on this side, are in training-atr-models'
+  [`docs/ASTERAIX_AND_UBELIX.md`](https://github.com/thodel/training-atr-models/blob/main/docs/ASTERAIX_AND_UBELIX.md).
 
 ## Decisions this setup rests on
 
