@@ -498,7 +498,9 @@ again, so a person decides what happens next:
 
 1. **vllm only: merge first**, on idhefix, as in
    [`DEPLOY.md` §8](DEPLOY.md#8-training-is-not-on-this-box), which also says which
-   venv to use: `scripts/merge_loras.py --only ID`.
+   venv to use: `scripts/merge_loras.py --only ID`. The merge writes the merged
+   weights' size into the registration as `vram_mb` (#216), so the launch is sized
+   from the registry and not from the 0.70 fallback.
 2. **Try the model before anyone sees it** (kraken and trocr). A disabled trained
    registration without a `disabled_reason` answers the gate's own request:
 
