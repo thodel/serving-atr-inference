@@ -462,14 +462,16 @@ def report(models: list[dict]) -> None:
     print(f"{'model':<38} {'vram_mb':>8} {'weights':>8} {'kv':>8} {'ratio':>6}  source")
     for spec in models:
         measured = spec.get("vram_measured")
+        # An entry without vram_mb prints a dash, not a 0 (#214): nobody said.
+        declared = spec.get("vram_mb") or "—"
         if not measured:
-            print(f"{spec['id']:<38} {spec.get('vram_mb', 0):>8} "
+            print(f"{spec['id']:<38} {declared:>8} "
                   f"{'—':>8} {'—':>8} {'—':>6}  estimate, never measured")
             continue
         weights = measured.get("weights_mib")
         kv = measured.get("kv_cache_mib")
         ratio = f"{(weights + kv) / weights:.2f}" if weights and kv else "—"
-        print(f"{spec['id']:<38} {spec.get('vram_mb', 0):>8} "
+        print(f"{spec['id']:<38} {declared:>8} "
               f"{weights or '—':>8} {kv or '—':>8} {ratio:>6}  "
               f"{measured.get('measured_at')} {measured.get('host')}")
     print(f"\nKV_HEADROOM in manager.py is {KV_HEADROOM}. The ratio column is "
@@ -495,7 +497,9 @@ def check(models: list[dict]) -> int:
             continue
         measured_count += 1
         weights = measured.get("weights_mib")
-        declared = spec.get("vram_mb", 0)
+        # A measured entry that declares nothing is as under-declared as one
+        # declaring 0 was: the launch sizes it from the fallback, not the weights.
+        declared = spec.get("vram_mb") or 0
         if weights is None:
             continue
         drift = weights - declared

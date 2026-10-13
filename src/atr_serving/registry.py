@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 Engine = Literal["vllm", "trocr", "kraken", "party"]
 
@@ -97,7 +97,13 @@ class ModelSpec(BaseModel):
     languages: list[str] = Field(default_factory=list)
     scripts: list[str] = Field(default_factory=list)
     centuries: list[int] = Field(default_factory=list)
-    vram_mb: int = 0
+    #: The weights in MiB, or None when nobody has said (#214). Until #214 the
+    #: default was ``0``, and ``/models`` showed that 0 to every consumer while
+    #: the arithmetic below already read ``<= 0`` as "no vram_mb in the registry":
+    #: one field, two meanings, and each reader guessing which. A 0 read from a
+    #: file is that legacy (the trainer wrote it for every registration before
+    #: training-atr-models#225) and becomes None; a declared value is positive.
+    vram_mb: int | None = Field(default=None, gt=0)
     #: The measurement behind ``vram_mb``, when there is one (#130). Absent means
     #: the value was estimated and never checked against a card — which is the
     #: honest reading of every entry written before this field existed, and the
@@ -137,6 +143,14 @@ class ModelSpec(BaseModel):
     # every model registered before it existed, so absence means "not recorded",
     # never "trained on nothing".
     training_datasets: list[str] = Field(default_factory=list)
+
+    @field_validator("vram_mb", mode="before")
+    @classmethod
+    def _zero_vram_is_unrecorded(cls, value: object) -> object:
+        # "vram_mb: 0" in a file never meant zero MiB; it meant the writer had
+        # no number. Read it as such, so every registration from before
+        # training-atr-models#225 still loads and serves, without the 0.
+        return None if value == 0 else value
 
     @model_validator(mode="after")
     def _check_source(self) -> "ModelSpec":
