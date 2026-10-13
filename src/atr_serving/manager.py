@@ -159,7 +159,7 @@ def _floor2(value: float) -> float:
 
 
 def plan_gpu_budget(
-    vram_mb: int,
+    vram_mb: int | None,
     free_mb: int,
     total_mb: int,
     *,
@@ -181,7 +181,9 @@ def plan_gpu_budget(
     reaching the same conclusion, and its message names neither the model nor what
     is holding the memory.
     """
-    if vram_mb <= 0 or total_mb <= 0:
+    # None is the registry's "nobody said" (#214); 0 was the same thing before
+    # #214 and is kept as a guard for a caller that still passes it.
+    if not vram_mb or vram_mb <= 0 or total_mb <= 0:
         return Budget(fallback, f"no vram_mb in the registry; configured default {fallback}")
 
     ceiling_mb = free_mb - reserve_mb
@@ -226,6 +228,11 @@ def vram_provenance(spec: ModelSpec) -> str:
     where = f"measured {measured.measured_at} on {measured.host}"
     if measured.weights_mib is None:
         return where
+    if spec.vram_mb is None:
+        # Measured, but the registry entry never took the number over: the
+        # arithmetic above ran on the configured fallback, not on these weights.
+        return (f"{where}: {measured.weights_mib} MiB of weights, and the registry "
+                "declares no vram_mb — the budget used the fallback")
     drift = measured.weights_mib - spec.vram_mb
     if abs(drift) <= VRAM_DRIFT_TOLERANCE_MB:
         return f"{where}: {measured.weights_mib} MiB of weights"
@@ -268,7 +275,7 @@ def gpu_budget(spec: ModelSpec, gpu: int, settings: Settings) -> Budget:
     )
     if budget is None:
         raise ManagerError(
-            f"{spec.id} needs at least {int(spec.vram_mb * MIN_HEADROOM)} MiB on gpu "
+            f"{spec.id} needs at least {int((spec.vram_mb or 0) * MIN_HEADROOM)} MiB on gpu "
             f"{gpu}, which has {free_mb} of {total_mb} MiB free "
             f"(reserving {settings.vllm_vram_reserve_mb} MiB; "
             f"{vram_provenance(spec)}). Free the card — "
@@ -644,12 +651,14 @@ class ModelManager:
         asteraix), so there is no one to ask: the free memory decides, for any
         ``train_url``.
         """
-        return math.ceil(spec.vram_mb * MIN_HEADROOM) + self.settings.vllm_vram_reserve_mb
+        # No vram_mb (#214) counts as 0 here, as the 0 did before: the card's
+        # free memory then has to cover the reserve alone, and the launch decides.
+        return math.ceil((spec.vram_mb or 0) * MIN_HEADROOM) + self.settings.vllm_vram_reserve_mb
 
     def _refusal(self, spec: ModelSpec, free_mb: int, need: int, note: str = "") -> GpuBusyError:
         return GpuBusyError(
             f"GPU {self.settings.vllm_gpu} has {free_mb} MB free, {spec.id} needs "
-            f"{need} MB (model {spec.vram_mb} x {MIN_HEADROOM} + "
+            f"{need} MB (model {spec.vram_mb or 0} x {MIN_HEADROOM} + "
             f"{self.settings.vllm_vram_reserve_mb} reserve).{note} Not launching into "
             "a card that cannot hold it; `GET /gpu` names what is holding it."
         )
@@ -688,20 +697,21 @@ class ModelManager:
         cards = self._inspect() if lazy and free_mb is not None and free_mb < need else None
         budget = vram_budget(self.settings, cards)
 
+        wanted = spec.vram_mb or 0     # no vram_mb: the budget cannot see this model
         used, freed, victims = self._used_mb(), 0, []
         for mid, r in lazy:
-            over_budget = used + spec.vram_mb > budget.mb
+            over_budget = used + wanted > budget.mb
             if not over_budget and (free_mb is None or free_mb + freed >= need):
                 break
             victims.append(mid)
-            used -= r.spec.vram_mb
+            used -= r.spec.vram_mb or 0
             freed += self._footprint(r, cards)
 
         if free_mb is not None and free_mb + freed < need:
             note = (f" Evicting {', '.join(victims)} would give back {freed} MB, not "
                     "enough, so nothing was evicted." if victims else "")
             raise self._refusal(spec, free_mb, need, note)
-        if used + spec.vram_mb > budget.mb:
+        if used + wanted > budget.mb:
             logger.warning("vLLM budget {} exceeded by {} and no lazy model to evict; "
                            "launching anyway", budget.reason, spec.id)
         for mid in victims:
@@ -734,7 +744,7 @@ class ModelManager:
                        for p in card.processes if gpu_probe.descends_from(p.pid, pid))
             if held:
                 return held
-        return resident.spec.vram_mb
+        return resident.spec.vram_mb or 0
 
     def _await_room(self, spec: ModelSpec, evicted: list[str]) -> None:
         """Give evicted memory :data:`EVICTION_SETTLE_READS` reads to come back.
@@ -757,7 +767,7 @@ class ModelManager:
             f"{EVICTION_SETTLE_READS} reads.")
 
     def _used_mb(self) -> int:
-        return sum(r.spec.vram_mb for r in self._resident.values())
+        return sum(r.spec.vram_mb or 0 for r in self._resident.values())
 
     def _drop(self, model_id: str) -> None:
         with self._state_lock:

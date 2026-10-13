@@ -191,3 +191,13 @@ def test_a_card_that_cannot_hold_the_model_raises_and_names_the_numbers(monkeypa
     assert "qwen3vl-german-xix-v1" in message
     assert "8000" in message and str(TOTAL) in message
     assert "/gpu" in message, "the operator needs to be told where to look"
+
+
+def test_no_vram_mb_means_the_fallback_and_says_so():
+    """None is the registry's "nobody said" since #214; the budget cannot size a
+    model it has no number for, and the reason names that, not a 0."""
+    budget = plan_gpu_budget(None, 44000, TOTAL)
+    assert budget is not None
+    assert budget.utilisation == 0.70
+    assert "no vram_mb in the registry" in budget.reason
+    assert plan_gpu_budget(0, 44000, TOTAL).reason == budget.reason

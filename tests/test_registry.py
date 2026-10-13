@@ -137,3 +137,36 @@ def test_german_xix_models_record_their_training_corpora(model_id: str, _base: s
         "image-text_kurrent-xix",
     ):
         assert corpus in joined, f"{model_id}: {corpus} missing from training_datasets"
+
+
+# ── vram_mb: a number or nothing, never 0 (#214) ────────────────────────────
+def test_vram_mb_is_none_when_absent_or_zero_and_a_declared_value_is_positive():
+    """0 never meant zero MiB; it meant nobody said. /models used to show that 0
+    to every consumer while the manager already read <= 0 as missing."""
+    bare = ModelSpec(id="kraken-bare", engine="kraken", local_path="/x/w.mlmodel")
+    assert bare.vram_mb is None
+    legacy = ModelSpec.model_validate(
+        {"id": "kraken-legacy", "engine": "kraken", "local_path": "/x/w.mlmodel", "vram_mb": 0})
+    assert legacy.vram_mb is None, "a 0 in a file from before training-atr-models#225 loads as none"
+    sized = ModelSpec(id="kraken-sized", engine="kraken", local_path="/x/w.mlmodel", vram_mb=16)
+    assert sized.vram_mb == 16
+    with pytest.raises(ValueError, match="vram_mb"):
+        ModelSpec(id="kraken-neg", engine="kraken", local_path="/x/w.mlmodel", vram_mb=-1)
+
+
+def test_models_answers_null_not_zero_for_an_undeclared_vram_mb():
+    """What /models serialises is ModelInfo built from the spec's dump; a model
+    without vram_mb comes out as null, which a consumer can read as "unknown"."""
+    from atr_serving.api.schemas import ModelInfo
+
+    spec = ModelSpec(id="kraken-bare", engine="kraken", local_path="/x/w.mlmodel")
+    info = ModelInfo(**spec.model_dump(), resident=False)
+    assert info.model_dump()["vram_mb"] is None
+    assert info.model_dump_json().count('"vram_mb":null') == 1
+
+
+def test_the_curated_registry_declares_a_positive_vram_mb_for_every_entry():
+    """The curated file is the one place a 0 would be typed by hand."""
+    reg = load_registry(REPO_ROOT / "config" / "models.yaml")
+    undeclared = [spec.id for spec in reg.all() if spec.vram_mb is None]
+    assert undeclared == [], undeclared
