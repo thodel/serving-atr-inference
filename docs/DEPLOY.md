@@ -172,7 +172,14 @@ its base. This needs the vLLM venv and downloads missing bases:
 ```
 
 The gateway's ModelManager serves the merged full model automatically (setting
-`vllm_merged_dir`). Note the pinned vLLM setting `max_model_len=16384` in `Settings`:
+`vllm_merged_dir`). The merge also records the merged weights' size as `vram_mb` in the
+model's registration on the share (`registry/trained/ID.yaml`, written the way the
+trainer writes it), because that number sizes every launch of the model (see
+[How much of the card a model gets](#how-much-of-the-card-a-model-gets)) and the merge
+is the first place it exists (#216). A curated entry in `config/models.yaml` is not
+written to; the script prints the line to add. A model merged before this existed gets
+its size on the next run, which skips the merge as already done but still sizes it.
+Note the pinned vLLM setting `max_model_len=16384` in `Settings`:
 Qwen3-VL's default of 262k runs the KV cache out of memory. kraken and party download
 their Zenodo models on demand through htrmopo.
 
@@ -349,7 +356,8 @@ cd ~/Repo/serving-atr-inference              # .env there names ATR_REGISTRY_ROO
 .venvs/vlm-train/bin/python scripts/merge_loras.py --only ID
 ```
 
-The merged model is still registered `enabled: false`. Enabling it is described in
+The merged model is still registered `enabled: false`; its `vram_mb` is now in the same
+file (§4). Enabling it is described in
 [INFRASTRUCTURE.md § When the gate did not promote a model](INFRASTRUCTURE.md#when-the-gate-did-not-promote-a-model).
 
 **The in-repo trainer stays retired.** It is disabled and stopped, and its unit file

@@ -9,6 +9,9 @@ LoRA machinery, preserving both vision and language adaptation.
 
 Output: <vllm_merged_dir>/<model_id>/  (Settings.vllm_merged_dir, default
 ~/atr-cache/vllm-merged). The ModelManager's launcher serves that dir if present.
+The merged weights' size goes into the model's registration as `vram_mb` (#216),
+which is what sizes its vLLM launch; a registration this script cannot write gets
+the line to add by hand.
 
 Run in a venv with torch + transformers + peft — but **which** venv is not a
 detail. peft writes its own version into `adapter_config.json`, and reading an
@@ -30,13 +33,20 @@ Honors HF_HOME (source weights) — set it in the shell first (`. ./.env`).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import math
+import os
+import socket
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from atr_serving.config import get_settings  # noqa: E402
-from atr_serving.registry import Registry, load_registry  # noqa: E402
+from atr_serving.registry import ModelSpec, Registry, load_registry  # noqa: E402
 from atr_serving.shared_registry import TRAINED_DIRNAME, combine, read_trained  # noqa: E402
 from atr_serving.overlay import OVERLAY_FILENAME, load_overlay  # noqa: E402
 
@@ -363,6 +373,115 @@ def merge_one(spec, out_dir: Path) -> None:
     print(f"[{spec.id}] DONE -> {out_dir}")
 
 
+# ── what the merge weighs ────────────────────────────────────────────────────
+#
+# A VLM adapter is registered without `vram_mb` on purpose (training-atr-models#225):
+# what the gateway serves is base plus adapter, merged here, and the adapter alone
+# would understate it by the size of the base. So this script is the first place
+# the number exists — and until #216 it printed DONE and dropped it, leaving every
+# merged VLM on the launcher's 0.70 fallback and `/models` answering null for it.
+#
+# `vram_mb` is the weights in MiB by the registry's own definition (the header of
+# config/models.yaml, `VramMeasurement`): the checkpoint on the card, on top of
+# which vLLM adds its KV cache. After the merge that is the sum of the weight
+# files in the output directory, rounded up — the rule the trainer applies to a
+# kraken or trocr model at registration (`atr_training.registration.weights_mib`).
+
+#: The globs that count as weights: the same ones `merged_state` requires.
+WEIGHT_GLOBS: tuple[str, ...] = dict(REQUIRED_ARTIFACTS)["weights"]
+
+
+def weights_mib(out_dir: Path) -> int | None:
+    """The weight files under ``out_dir`` in MiB, rounded up — or None.
+
+    None when there is nothing to size, because "could not measure" is not
+    "needs nothing": a 0 would be read as a declared size, and before #214 it was.
+    """
+    total = 0
+    for glob in WEIGHT_GLOBS:
+        for path in out_dir.glob(glob):
+            if path.is_file():
+                total += path.stat().st_size
+    return math.ceil(total / 2**20) if total else None
+
+
+def record_vram_mb(spec: ModelSpec, out_dir: Path, registry_root: Path | None) -> str:
+    """Put the merged weights' size into ``spec``'s registration; return one line.
+
+    Writes only to a registration on the share (``<registry_root>/trained/<id>.yaml``):
+    that is where the trainer registered the adapter, the file a person edits by
+    hand to enable the merged model anyway, and the gateway picks the change up
+    at its next look (``RegistryWatch``). A curated entry is a reviewed file and
+    gets the line to add instead; so does an entry the gateway does not read.
+
+    Never lowers a value that is there, and never touches a registration that
+    carries ``vram_measured``: a number measured on a card beats one sized on
+    disk, and ``scripts/measure_vram.py`` owns it. Never raises — the merge has
+    succeeded by the time this runs, and a registration that could not be
+    written is said, with the line to add by hand, not worn as a failure of the
+    merge.
+    """
+    size = weights_mib(out_dir)
+    if size is None:
+        return f"weights: nothing to size in {out_dir} — vram_mb left as it is"
+    line = f"vram_mb: {size}"
+    if spec.vram_measured is not None:
+        return (f"weights: {size} MiB; registered vram_mb {spec.vram_mb} is measured "
+                "(vram_measured) and stays — scripts/measure_vram.py owns it")
+    if spec.vram_mb is not None and spec.vram_mb >= size:
+        return f"weights: {size} MiB; registered vram_mb {spec.vram_mb} stays"
+
+    target = None
+    if registry_root is not None:
+        candidate = Path(registry_root) / TRAINED_DIRNAME / f"{spec.id}.yaml"
+        if candidate.is_file():
+            target = candidate
+    if target is None:
+        where = ("config/models.yaml" if spec.hf_repo or spec.zenodo_id
+                 else "its registration")
+        return f"weights: {size} MiB — not on the share; add `{line}` to {where} by hand"
+
+    try:
+        _set_registered_vram_mb(target, size)
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        return (f"weights: {size} MiB — could not write {target} ({type(exc).__name__}: "
+                f"{exc}); add `{line}` by hand with the trainer's writer "
+                "(docs/INFRASTRUCTURE.md, \"When the gate did not promote a model\")")
+    was = "" if spec.vram_mb is None else f" (was {spec.vram_mb})"
+    return f"weights: {size} MiB -> {line} written to {target}{was}"
+
+
+def _set_registered_vram_mb(target: Path, size: int) -> None:
+    """Rewrite one ``trained/<id>.yaml`` with ``vram_mb: size``, atomically.
+
+    The trainer's own convention (training-atr-models ``registration.py``): the
+    leading comment lines are kept, the mapping is re-serialised in its order, and
+    the result is validated as a ``ModelSpec`` named like the file *before* a
+    sibling tmp file replaces the target — the gateway may read it at any moment,
+    and `_is_registration` ignores the dotted tmp name while it is being written.
+    """
+    text = target.read_text(encoding="utf-8")
+    raw = yaml.safe_load(text)
+    if not isinstance(raw, dict):
+        raise TypeError(f"expected ONE model as a mapping, got {type(raw).__name__}")
+    raw["vram_mb"] = size
+    spec = ModelSpec.model_validate(raw)
+    if spec.id != target.stem:
+        raise ValueError(f"it declares id {spec.id!r}, so it must be named {spec.id}.yaml")
+    header = "".join(line for line in text.splitlines(keepends=True)
+                     if line.startswith("#"))
+    body = yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
+    unique = f"{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    tmp = target.with_name(f".{target.name}.{unique}.tmp")
+    try:
+        tmp.write_text(header + body, encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
+
+
 def _adapter_config_quietly(adapter: str) -> dict:
     """``_adapter_config`` that answers {} instead of raising.
 
@@ -429,6 +548,9 @@ def main() -> int:
         exists, missing = merged_state(out)
         if exists and not missing and not args.force:
             print(f"[{spec.id}] already merged at {out} (use --force to redo)")
+            # A model merged before #216 never had its size recorded; the skip is
+            # the only time this script sees it again.
+            print(f"[{spec.id}] {record_vram_mb(spec, out, settings.registry_root)}")
             continue
         if exists and missing:
             # Re-merge rather than skip: a half-written directory is the one case
@@ -456,6 +578,8 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"[{spec.id}] FAILED: {exc!r}", file=sys.stderr)
             failed.append(spec.id)
+            continue
+        print(f"[{spec.id}] {record_vram_mb(spec, out, settings.registry_root)}")
 
     if failed:
         print(f"\n{len(failed)} failed: {', '.join(failed)}", file=sys.stderr)
