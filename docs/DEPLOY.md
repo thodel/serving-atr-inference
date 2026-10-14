@@ -397,7 +397,9 @@ systemctl --user restart atr-gateway
 - **A gateway restart drops every resident vLLM model.** The models run as children of
   the unit. The next request for a model reloads it, which takes about 45 s for the 4B
   xix. The registry is read again: the curated models from the checkout, the trained
-  ones from the share, and the legacy overlay `config/models.local.yaml`
+  ones from the share, and the legacy overlay `config/models.local.yaml` only when
+  `ATR_MODELS_OVERLAY` names it (#143; `scripts/merge_loras.py` reads the same three
+  since #219)
   ([INFRASTRUCTURE.md § Where a model is registered](INFRASTRUCTURE.md#where-a-model-is-registered)).
 - **Engines** are restarted individually:
   `systemctl --user restart atr-kraken` (or `atr-trocr`, `atr-party`).

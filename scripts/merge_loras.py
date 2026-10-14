@@ -13,6 +13,10 @@ The merged weights' size goes into the model's registration as `vram_mb` (#216),
 which is what sizes its vLLM launch; a registration this script cannot write gets
 the line to add by hand.
 
+What is merged is what the gateway reads (#219): the tracked registry and the
+shared `trained/`, plus the retired overlay only when `ATR_MODELS_OVERLAY` names
+it, exactly as the gateway. A merge for an id nothing serves has no consumer.
+
 Run in a venv with torch + transformers + peft — but **which** venv is not a
 detail. peft writes its own version into `adapter_config.json`, and reading an
 adapter with an older peft than wrote it fails deep inside `LoraConfig` with an
@@ -48,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from atr_serving.config import get_settings  # noqa: E402
 from atr_serving.registry import ModelSpec, Registry, load_registry  # noqa: E402
 from atr_serving.shared_registry import TRAINED_DIRNAME, combine, read_trained  # noqa: E402
-from atr_serving.overlay import OVERLAY_FILENAME, load_overlay  # noqa: E402
+from atr_serving.overlay import load_overlay  # noqa: E402
 
 
 # ── is what is on disk actually servable? ────────────────────────────────────
@@ -174,8 +178,10 @@ def peft_blocker(adapter_version: str | None, installed: str | None) -> Blocker 
         f"{adapter_version}. The newer fields in its adapter_config.json are read "
         f"into the wrong shape by {installed}, and the merge fails with an "
         f"AttributeError that names neither peft nor a version.\n"
-        f"    Merge in a venv whose peft is >= {adapter_version} (on idhefix that "
-        f"is usually .venvs/vlm-train, which trained it), or upgrade peft here."
+        f"    Merge in a venv whose peft is >= {adapter_version}. asteraix's .venvs/vlm-train "
+        f"wrote the adapter; on idhefix, upgrade peft in .venvs/vlm-train "
+        f"(TMPDIR=/tmp .venvs/vlm-train/bin/pip install 'peft>={adapter_version}') "
+        f"or use a venv that already has it."
     ))
 
 
@@ -265,6 +271,29 @@ def _supported_archs() -> set[str]:
         return set()
 
 
+def local_adapter_blocker(adapter: str) -> Blocker | None:
+    """Fatal when the adapter is a local path with no ``adapter_config.json``.
+
+    Met on 14.10.2026: four registrations whose ``local_path`` had no adapter in
+    it. ``_adapter_config`` fell through to the hub, whose "Repo id must be in
+    the form …" read as "not checked", and each one then loaded the 8B base
+    (the first after a 17 GB download) to fail on the missing file. The check
+    is a stat; it belongs before anything is imported.
+
+    A hub id is not a path and is left to the download. A relative path is not
+    judged here either — the registry refuses it before this script sees it.
+    """
+    path = Path(adapter)
+    if not path.is_absolute() or (path / "adapter_config.json").is_file():
+        return None
+    what = "has no adapter_config.json in it" if path.is_dir() else "does not exist"
+    return Blocker(True, (
+        f"adapter directory {path} {what}, so there is nothing to merge. The "
+        "registration names weights that are not there (moved, purged, or never "
+        "written); fix the registration or withdraw it."
+    ))
+
+
 def preflight(spec) -> list[Blocker]:
     """Everything knowable about this merge before the first gigabyte is read.
 
@@ -272,6 +301,11 @@ def preflight(spec) -> list[Blocker]:
     working merge into a broken one. What it could not check, it does not report.
     """
     blockers: list[Blocker] = []
+
+    # First and alone: without an adapter nothing below has anything to say,
+    # and this one needs no import.
+    if (b := local_adapter_blocker(adapter_of(spec))):
+        return [b]
 
     try:
         import peft
@@ -500,12 +534,16 @@ def registered_models(settings) -> Registry:
 
     Trained adapters are written `enabled: false` precisely because they are not
     servable until merged — so include_disabled is not a loophole here, it is the
-    whole point. They come from two places while the old trainer is still
-    running: the gitignored local overlay, and the shared registry's `trained/`
-    (#138) when `ATR_REGISTRY_ROOT` is set. Precedence is the gateway's.
+    whole point. The sources are the gateway's, no more (#219): the tracked
+    registry, the shared `trained/` (#138) when `ATR_REGISTRY_ROOT` is set, and
+    the retired overlay `config/models.local.yaml` only when `ATR_MODELS_OVERLAY`
+    names it (#143). Until #219 this script read the overlay unconditionally, as
+    the gateway had before #143, and on 14.10.2026 four of its leftover entries —
+    ids nothing serves — cost three base loads and one 17 GB download before
+    failing on adapters that are not there. Precedence is the gateway's.
     """
     reg = load_registry(settings.models_config)
-    overlay_path = Path(settings.models_config).parent / OVERLAY_FILENAME
+    local = [] if settings.models_overlay is None else load_overlay(settings.models_overlay)
     shared = []
     if settings.registry_root is not None:
         shared = read_trained(settings.registry_root)
@@ -516,7 +554,7 @@ def registered_models(settings) -> Registry:
                   "registered on the share are missing from this run. Is it mounted?",
                   file=sys.stderr)
             shared = []
-    return combine(reg, load_overlay(overlay_path), shared, include_disabled=True)
+    return combine(reg, local, shared, include_disabled=True)
 
 
 def main() -> int:
