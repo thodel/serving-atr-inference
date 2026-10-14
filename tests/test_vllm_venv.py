@@ -111,11 +111,18 @@ def test_max_num_seqs_only_for_vllm_models():
         ModelSpec(id="t", engine="trocr", hf_repo="org/t", max_num_seqs=8)
 
 
-def test_registry_only_qwen35_v2_uses_the_second_vllm():
-    """Moving a proven model to another vLLM is a decision, not a side effect."""
+def test_only_the_qwen35_models_use_the_second_vllm():
+    """Moving a proven model to another vLLM is a decision, not a side effect.
+
+    The list grows only for a model that cannot run on the default vLLM at all:
+    both entries below are Qwen3.5 bases, and `.venvs/vllm-next` is the only venv
+    here whose transformers knows `qwen3_5`. A model appearing here for any other
+    reason is the side effect this test exists to catch.
+    """
     registry = load_registry(REPO_ROOT / "config" / "models.yaml")
     on_next = sorted(s.id for s in registry.all() if s.vllm_venv == "vllm-next")
-    assert on_next == ["qwen3.5-4b-german-xix-v2"]
+    assert on_next == ["qwen3.5-4b-german-kurrent-xvi-xix-page-v1",
+                       "qwen3.5-4b-german-xix-v2"]
 
 
 def test_make_venvs_knows_every_venv_the_registry_names():
