@@ -813,12 +813,18 @@ def test_merge_loras_sees_the_shared_registrations(curated, share):
 
     with_share = registered_models(Settings(models_config=curated, registry_root=share))
     without = registered_models(Settings(models_config=curated, registry_root=None))
+    named = registered_models(Settings(models_config=curated, registry_root=share,
+                                       models_overlay=local))
 
     lora = {s.id for s in with_share.by_engine("vllm") if s.base_model}
-    assert lora == {"qwen-disabled", "qwen-idhefix", "qwen-asteraix"}
-    # Unset, it reads exactly what it read before.
-    assert without.all() == merge(load_registry(curated), load_overlay(local),
-                                  include_disabled=True).all()
+    # The overlay beside the registry is not read (#143, #219): the gateway does
+    # not read it either, so a merge for qwen-idhefix would have no consumer.
+    assert lora == {"qwen-disabled", "qwen-asteraix"}
+    # Named by the setting, it is read again — the gateway's rule, nothing else.
+    assert {s.id for s in named.by_engine("vllm") if s.base_model} == {
+        "qwen-disabled", "qwen-idhefix", "qwen-asteraix"}
+    # Without a share, the tracked registry alone.
+    assert without.all() == merge(load_registry(curated), [], include_disabled=True).all()
 
 
 def test_merge_loras_still_imports_without_loguru(share):
