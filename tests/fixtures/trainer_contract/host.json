@@ -1,29 +1,25 @@
 {
-  "host": "asteraix",
-  "ram": {
-    "total_mib": 257844,
-    "available_mib": 237216
-  },
-  "disks": [
-    {
-      "role": "arrow",
-      "path": "/home/tobias/Repo/training-atr-models/data/arrow",
-      "total_gib": 1832.1,
-      "free_gib": 536.4,
-      "free_pct": 70
+  "host": "dhserver03",
+  "volumes": {
+    "jobs_root": {
+      "free_gb": 536.42,
+      "path": "/home/tobias/Repo/training-atr-models/jobs"
     },
-    {
-      "role": "checkpoints",
-      "path": "/home/tobias/Repo/training-atr-models/checkpoints",
-      "total_gib": 1832.1,
-      "free_gib": 536.4,
-      "free_pct": 70
+    "checkpoint_root": {
+      "free_gb": 536.42,
+      "path": "/home/tobias/Repo/training-atr-models/checkpoints"
+    },
+    "artefact_cache_root": {
+      "free_gb": 1204.8,
+      "path": "/home/tobias/.cache/atr-artefacts"
+    },
+    "trained_root": {
+      "free_gb": 536.42,
+      "path": "/home/tobias/Repo/training-atr-models/trained"
     }
-  ],
-  "load": {
-    "1m": 4.21,
-    "5m": 3.84,
-    "15m": 2.13
   },
-  "cpu_count": 32
+  "ram": {
+    "total_gb": 257.84,
+    "available_gb": 237.22
+  }
 }

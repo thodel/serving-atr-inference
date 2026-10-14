@@ -577,6 +577,22 @@ def test_host_is_the_trainers_reading_and_nothing_is_added(no_local_reading):
     assert trainer.paths() == [("GET", "/host")]
 
 
+def test_host_is_the_trainers_own_shape_and_not_one_invented_here(no_local_reading):
+    """The contract fixture must be the trainer's real answer.
+
+    It was not, when this route was first written: the fixture described
+    `disks` as a list of roles with `total_gib`/`free_gib`/`free_pct`, plus
+    `load` and `cpu_count`. The trainer has answered `/host` since #40/#64 with
+    `volumes` keyed by setting name and `free_gb` — so the contract pinned a
+    shape nothing serves, in a proxy whose whole job is to forward faithfully.
+    Written down here because a fixture is only a contract when both sides hold
+    the same file.
+    """
+    assert set(HOST) == {"host", "volumes", "ram"}
+    assert "disks" not in HOST and "cpu_count" not in HOST
+    assert set(HOST["ram"]) == {"total_gb", "available_gb"}
+
+
 def test_host_does_not_serve_the_cards(no_local_reading):
     """`/train/gpu` carries them. One fact from two endpoints is how the two
     drift apart, and a caller that reads cards here would eventually read
@@ -588,17 +604,23 @@ def test_host_does_not_serve_the_cards(no_local_reading):
 
 
 def test_host_carries_what_a_job_record_cannot(no_local_reading):
-    """The two facts that decided every compile diagnosis in #366: free space on
-    the arrow volume and available RAM. Neither is in a job record, and a stage
-    field said `compile` for nine hours through all of it."""
+    """The facts that decided every compile diagnosis in #366: free space on the
+    volumes a run writes to, and available RAM. Neither is in a job record, and
+    a stage field said `compile` for nine hours through all of it.
+
+    The shape is the trainer's own (`/host`, training-atr-models #40/#64) and not
+    one invented here: `volumes` keyed by the **setting** that names them, so a
+    caller asks for "where checkpoints go" instead of parsing a path.
+    """
     trainer = Trainer({("GET", "/host"): (200, HOST)})
     payload = make_client(trainer).get("/train/host", headers=AUTH).json()
 
-    assert payload["ram"]["available_mib"] > 0
-    roles = {d["role"] for d in payload["disks"]}
-    assert {"arrow", "checkpoints"} <= roles, (
-        "the arrow volume is where extract writes and the checkpoints volume is "
+    assert payload["ram"]["available_gb"] > 0
+    assert {"jobs_root", "checkpoint_root"} <= set(payload["volumes"]), (
+        "jobs_root is where extract writes its arrow and checkpoint_root is "
         "where a run dies of a full disk; both or neither is useful")
+    for volume in payload["volumes"].values():
+        assert "free_gb" in volume and "path" in volume
 
 
 @pytest.mark.parametrize("url,key", [(ASTERAIX, TRAINER_KEY), (LOCAL, "")],
@@ -614,9 +636,11 @@ def test_a_trainer_without_host_is_a_502(no_local_reading, url, key):
     assert f"{url} has no /host" in detail
     assert "different machine" in detail, (
         "the message has to say why the gateway cannot simply answer itself")
-    assert "training-atr-models#250" in detail, (
-        "the message names the issue that adds the endpoint; a reader who hits "
-        "this 502 needs somewhere to go, and a wrong number sends them nowhere")
+    assert "#40/#64" in detail, (
+        "the message has to say the endpoint exists and this trainer is old — "
+        "it first claimed an issue would 'add' /host, which was wrong: the "
+        "trainer has answered it since #40/#64, and a reader sent to a issue "
+        "for work already done looks in the wrong place")
     assert trainer.paths() == [("GET", "/host")]
 
 
@@ -647,27 +671,39 @@ def test_train_host_never_reads_this_box(no_local_reading, url, key, failure, st
         assert url in resp.json()["detail"]
 
 
-def test_a_value_the_trainer_could_not_read_stays_null(no_local_reading):
+def test_a_reading_the_trainer_could_not_take_stays_missing(no_local_reading):
     """The seam must not turn "I could not read it" into a number.
 
-    A host probe fails in parts — a volume that is not mounted, a load average
-    the kernel does not expose. The trainer says ``null`` for those, and a
-    gateway that substituted ``0`` would report a full disk or an idle box. It
-    is the defect this project has removed five times (#119, #595, #631, #633,
-    #649), here at the one place where two machines meet.
+    The trainer answers **partially** by design: an unreadable `/proc/meminfo`
+    omits `ram` entirely, and a volume that is not a mount point is left out of
+    `volumes` — "unknown is absent, never invented", pinned by its own tests
+    (training-atr-models#40). A gateway that filled the gap with `0` would
+    report a full disk or a box with no memory, which is the defect this project
+    has removed five times (#119, #595, #631, #633, #649) and is at its most
+    expensive where two machines meet.
     """
-    partial = {"host": "asteraix",
-               "ram": {"total_mib": 257844, "available_mib": None},
-               "disks": [{"role": "arrow", "path": "/data/arrow",
-                          "total_gib": None, "free_gib": None, "free_pct": None}],
-               "load": None, "cpu_count": 32}
+    partial = {"host": "dhserver03",
+               "volumes": {"jobs_root": {"free_gb": 12.5, "path": "/jobs"}}}
     trainer = Trainer({("GET", "/host"): (200, partial)})
     payload = make_client(trainer).get("/train/host", headers=AUTH).json()
 
-    assert payload["ram"]["available_mib"] is None
-    assert payload["disks"][0]["free_gib"] is None
-    assert payload["load"] is None
+    assert "ram" not in payload, "the gateway invented a memory reading"
+    assert set(payload["volumes"]) == {"jobs_root"}, (
+        "the gateway invented a volume the trainer left out")
     assert payload == partial, "the gateway rewrote a reading it only forwards"
+
+
+def test_an_explicit_null_is_forwarded_as_a_null(no_local_reading):
+    """The other half of the same rule: where the trainer *does* use null —
+    `available_gb` when MemTotal parsed and MemAvailable did not — it must
+    arrive as null and not as a zero."""
+    partial = {"host": "dhserver03", "volumes": {},
+               "ram": {"total_gb": 257.84, "available_gb": None}}
+    trainer = Trainer({("GET", "/host"): (200, partial)})
+    payload = make_client(trainer).get("/train/host", headers=AUTH).json()
+
+    assert payload["ram"]["available_gb"] is None
+    assert payload == partial
 
 
 def test_host_needs_the_key():

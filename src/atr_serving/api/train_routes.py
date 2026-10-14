@@ -290,8 +290,9 @@ async def host(request: Request) -> dict:
             raise HTTPException(
                 status_code=502,
                 detail=(f"the training service at {train_url} has no /host "
-                        "(training-atr-models#250 adds it). This gateway runs on "
-                        "a different machine, so it cannot answer with its own "
+                        "(training-atr-models has answered it since #40/#64, so "
+                        "this is an older trainer). This gateway runs on a "
+                        "different machine, so it cannot answer with its own "
                         "disks and RAM."),
             ) from exc
         raise _http_error(exc) from exc

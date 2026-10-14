@@ -493,9 +493,15 @@ class TrainerClient:
 
         Deliberately **not** the cards: :meth:`gpu` carries those, and serving
         one fact from two endpoints is how the two drift apart. What is here is
-        what ``/gpu`` cannot say — free space on the arrow and checkpoint
-        volumes, and available RAM, the two facts that decided every compile
-        diagnosis in #366 and that no job record contains.
+        what ``/gpu`` cannot say — free space on the volumes a run writes to and
+        available RAM, the facts that decided every compile diagnosis in #366
+        and that no job record contains.
+
+        The trainer answers **partially** by design: an unreadable
+        ``/proc/meminfo`` omits ``ram`` and an unmeasurable volume is left out
+        of ``volumes`` — "unknown is absent, never invented"
+        (training-atr-models#40). Forwarded as it comes; filling a gap with
+        ``0`` here would report a full disk.
         """
         return await self._request("GET", "/host")
 
