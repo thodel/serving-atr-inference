@@ -260,6 +260,43 @@ async def gpu(request: Request) -> dict:
         raise _http_error(exc) from exc
 
 
+@router.get("/host")
+async def host(request: Request) -> dict:
+    """The training box's RAM, disks and load — what a job record cannot say (#366).
+
+    Every diagnosis in #366 was made over ssh with ``/proc``, ``nvidia-smi`` and
+    ``du``, and the facts that decided them are host facts: RSS climbing 2 GB a
+    minute meant *parse*; RSS flat at 63.8 GB with a temp arrow growing meant
+    *extract* and an ETA; 129 GB used against 76 GB free meant a kill in
+    minutes. A stage field said ``compile`` for nine hours through all three.
+
+    **Not the cards.** ``GET /train/gpu`` carries those, and serving one fact
+    from two endpoints is how the two drift apart — the failure this repository
+    has met often enough to name it. A caller that wants the whole board asks
+    both and composes; the composition is a rendering decision and belongs where
+    the rendering is.
+
+    Forwarded, never measured here. The gateway runs on idhefix and the training
+    runs on asteraix: this box's free disk and RAM are a different machine's, and
+    answering with them would be the wrong-host diagnosis that #81 fixed for the
+    engines and that ``/train/gpu``'s docstring spells out for pids. A trainer
+    without ``/host`` is therefore a 502 naming its URL, not a local reading.
+    """
+    train_url = request.app.state.settings.train_url
+    try:
+        return await _client(request).host()
+    except EngineError as exc:
+        if isinstance(exc, TrainerError) and exc.status_code == 404:
+            raise HTTPException(
+                status_code=502,
+                detail=(f"the training service at {train_url} has no /host "
+                        "(training-atr-models#250 adds it). This gateway runs on "
+                        "a different machine, so it cannot answer with its own "
+                        "disks and RAM."),
+            ) from exc
+        raise _http_error(exc) from exc
+
+
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(request: Request, job_id: str) -> dict:
     return await _forward(_client(request).cancel(job_id))

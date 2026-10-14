@@ -39,6 +39,7 @@ CALLER_TIMEOUT_S = 30
 FIXTURES = Path(__file__).parent / "fixtures" / "trainer_contract"
 HEALTH = json.loads((FIXTURES / "health.json").read_text())
 GPU = json.loads((FIXTURES / "gpu.json").read_text())
+HOST = json.loads((FIXTURES / "host.json").read_text())
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "atr_serving"
 REPO = "dh-unibe/image-text_medieval-scripts_xiv-xv-xvi"
@@ -563,6 +564,143 @@ def test_train_gpu_never_reads_this_box(no_local_reading, url, key, failure, sta
         assert (url in detail) is (url == ASTERAIX)
     else:
         assert url in resp.json()["detail"]
+
+
+# ── /train/host ─────────────────────────────────────────────────────────────
+def test_host_is_the_trainers_reading_and_nothing_is_added(no_local_reading):
+    """The gateway runs on idhefix and the training on asteraix, so this box's
+    disks and RAM are a different machine's numbers."""
+    trainer = Trainer({("GET", "/host"): (200, HOST)})
+    resp = make_client(trainer).get("/train/host", headers=AUTH)
+    assert resp.status_code == 200
+    assert resp.json() == HOST
+    assert trainer.paths() == [("GET", "/host")]
+
+
+def test_host_does_not_serve_the_cards(no_local_reading):
+    """`/train/gpu` carries them. One fact from two endpoints is how the two
+    drift apart, and a caller that reads cards here would eventually read
+    different ones than it reads there."""
+    trainer = Trainer({("GET", "/host"): (200, HOST)})
+    payload = make_client(trainer).get("/train/host", headers=AUTH).json()
+    assert "cards" not in payload
+    assert trainer.paths() == [("GET", "/host")]      # and no /gpu either
+
+
+def test_host_carries_what_a_job_record_cannot(no_local_reading):
+    """The two facts that decided every compile diagnosis in #366: free space on
+    the arrow volume and available RAM. Neither is in a job record, and a stage
+    field said `compile` for nine hours through all of it."""
+    trainer = Trainer({("GET", "/host"): (200, HOST)})
+    payload = make_client(trainer).get("/train/host", headers=AUTH).json()
+
+    assert payload["ram"]["available_mib"] > 0
+    roles = {d["role"] for d in payload["disks"]}
+    assert {"arrow", "checkpoints"} <= roles, (
+        "the arrow volume is where extract writes and the checkpoints volume is "
+        "where a run dies of a full disk; both or neither is useful")
+
+
+@pytest.mark.parametrize("url,key", [(ASTERAIX, TRAINER_KEY), (LOCAL, "")],
+                         ids=["remote", "loopback"])
+def test_a_trainer_without_host_is_a_502(no_local_reading, url, key):
+    """Same rule as /gpu: whatever answers 404 is not a reason to describe this
+    machine instead."""
+    trainer = Trainer()                                  # /host → 404
+    resp = make_client(trainer, train_url=url, train_api_key=key).get(
+        "/train/host", headers=AUTH)
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert f"{url} has no /host" in detail
+    assert "different machine" in detail, (
+        "the message has to say why the gateway cannot simply answer itself")
+    assert "training-atr-models#250" in detail, (
+        "the message names the issue that adds the endpoint; a reader who hits "
+        "this 502 needs somewhere to go, and a wrong number sends them nowhere")
+    assert trainer.paths() == [("GET", "/host")]
+
+
+@pytest.mark.parametrize("url,key", [(ASTERAIX, TRAINER_KEY), (LOCAL, "")],
+                         ids=["remote", "loopback"])
+@pytest.mark.parametrize("failure,status", [
+    (httpx.ConnectError("refused"), 502),
+    (httpx.ReadTimeout(""), 504),
+    ((503, {"detail": "psutil is not installed"}), 503),
+    ((200, HOST), 200),
+    ((404, {"detail": "Not Found"}), 502),
+], ids=["refused", "timeout", "trainer-503", "answers", "no-host"])
+def test_train_host_never_reads_this_box(no_local_reading, url, key, failure, status):
+    """Every outcome, either kind of trainer: the trainer's reading or an error
+    naming it — never idhefix's disks."""
+    trainer = Trainer({("GET", "/host"): failure})
+    resp = make_client(trainer, train_url=url, train_api_key=key).get(
+        "/train/host", headers=AUTH)
+    assert resp.status_code == status
+    assert trainer.paths() == [("GET", "/host")]
+    if status == 200:
+        assert resp.json() == HOST
+    elif status == 503:
+        detail = resp.json()["detail"]
+        assert detail.endswith("psutil is not installed")
+        assert (url in detail) is (url == ASTERAIX)
+    else:
+        assert url in resp.json()["detail"]
+
+
+def test_a_value_the_trainer_could_not_read_stays_null(no_local_reading):
+    """The seam must not turn "I could not read it" into a number.
+
+    A host probe fails in parts — a volume that is not mounted, a load average
+    the kernel does not expose. The trainer says ``null`` for those, and a
+    gateway that substituted ``0`` would report a full disk or an idle box. It
+    is the defect this project has removed five times (#119, #595, #631, #633,
+    #649), here at the one place where two machines meet.
+    """
+    partial = {"host": "asteraix",
+               "ram": {"total_mib": 257844, "available_mib": None},
+               "disks": [{"role": "arrow", "path": "/data/arrow",
+                          "total_gib": None, "free_gib": None, "free_pct": None}],
+               "load": None, "cpu_count": 32}
+    trainer = Trainer({("GET", "/host"): (200, partial)})
+    payload = make_client(trainer).get("/train/host", headers=AUTH).json()
+
+    assert payload["ram"]["available_mib"] is None
+    assert payload["disks"][0]["free_gib"] is None
+    assert payload["load"] is None
+    assert payload == partial, "the gateway rewrote a reading it only forwards"
+
+
+def test_host_needs_the_key():
+    trainer = Trainer({("GET", "/host"): (200, HOST)})
+    assert make_client(trainer).get("/train/host").status_code == 401
+    assert trainer.paths() == []
+
+
+# ── the other half of #366 needs no gateway change, and that is a claim ─────
+def test_new_runtime_detail_on_a_job_record_passes_through_untouched(no_local_reading):
+    """#366 also wants compile phase, trend values, it/s and the early-stop
+    counter **on the job record**. The proxy forwards that record whole, so no
+    gateway change is needed — but "no change needed" is a claim, and this is it
+    checked: a record with fields this repository has never heard of arrives
+    byte-identical.
+    """
+    enriched = dict(JOB)
+    enriched["runtime"] = {
+        "compile_phase": "extract",
+        "compile_progress": {"arrow_gib": 41.0, "arrow_gib_expected": 102.0},
+        "rss_mib": 65331,
+        "rss_trend": "flat",
+        "it_per_s": 3.21,
+        "early_stop": {"since": 0, "patience": 15},
+        "last_epoch": {"epoch": 12, "cer": 0.61, "cer_previous": 0.63},
+    }
+    trainer = Trainer({("GET", f"/jobs/{JOB_ID}"): (200, enriched)})
+    resp = make_client(trainer).get(f"/train/jobs/{JOB_ID}", headers=AUTH)
+
+    assert resp.status_code == 200
+    assert resp.json() == enriched, (
+        "the proxy dropped or rewrote a field it does not know — then every "
+        "future trainer field needs a gateway release before it reaches a bot")
 
 
 def test_the_gpu_fixture_has_the_shape_of_the_gateways_own_reading(monkeypatch):

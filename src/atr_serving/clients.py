@@ -488,6 +488,17 @@ class TrainerClient:
         """The trainer's own reading of its cards (#137). Older trainers answer 404."""
         return await self._request("GET", "/gpu")
 
+    async def host(self) -> dict:
+        """The training box's RAM, disks and load (#366). Older trainers answer 404.
+
+        Deliberately **not** the cards: :meth:`gpu` carries those, and serving
+        one fact from two endpoints is how the two drift apart. What is here is
+        what ``/gpu`` cannot say — free space on the arrow and checkpoint
+        volumes, and available RAM, the two facts that decided every compile
+        diagnosis in #366 and that no job record contains.
+        """
+        return await self._request("GET", "/host")
+
     async def curve(self, job_id: str) -> dict:
         return await self._request("GET", f"/jobs/{job_id}/curve")
 
