@@ -37,6 +37,20 @@ run df -h /
 # Where model weights / HF cache will live — need lots of space (8B models are ~16GB each)
 note "HF cache default: ${HF_HOME:-$HOME/.cache/huggingface}  (override with HF_HOME)"
 echo "  HF_HOME=${HF_HOME:-<unset>}  HUGGINGFACE_HUB_CACHE=${HUGGINGFACE_HUB_CACHE:-<unset>}"
+# The one cache both training places share is hf_hub/hub/ on the research share
+# (training-atr-models#207, 11.10.2026). A link to the bare hf_hub/ is the old form:
+# a cache nobody else reads, in the shape the share's cleanup deletes (#221). The
+# 14.10.2026 merge run found idhefix still there, and nothing but a transformers
+# warning in the middle of a 17 GB download said so.
+hub_link="$(readlink "$HOME/.cache/huggingface/hub" 2>/dev/null || true)"
+echo "  ~/.cache/huggingface/hub -> ${hub_link:-<not a symlink>}"
+case "$hub_link" in
+  */hf_hub/hub) echo "  hub link: OK (hf_hub/hub, the shared level)" ;;
+  */hf_hub)     echo "  hub link: WARNING — points at the bare hf_hub/ (old form, #221). Fix:"
+                echo "    ln -sfn ${hub_link}/hub ~/.cache/huggingface/hub" ;;
+  "")           echo "  hub link: WARNING — not a symlink; downloads land on the local disk (#48)" ;;
+  *)            echo "  hub link: WARNING — points somewhere else; expected …/hf_hub/hub" ;;
+esac
 
 # ── GPU / driver / CUDA ─────────────────────────────────────────────────────
 sec "GPU / NVIDIA driver / CUDA"

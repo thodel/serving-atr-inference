@@ -85,9 +85,18 @@ Set these in `.env`. The values that must match asteraix are listed in
 - **Do NOT set `HF_HOME`.** Older revisions of this file told you to point it at
   `~/atr-cache/hf`, which put about 26 GB of weights on the root partition that later
   filled up. `~/.cache/huggingface/hub` is a symlink to
-  `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub`, so the standard path already
-  resolves to the research share. That cache is shared with asteraix and with
-  `lassberg/vlm_training`.
+  `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub/hub`, so the standard path already
+  resolves to the research share. That cache is shared with asteraix, UBELIX and
+  `lassberg/vlm_training` — at the `hub/` level, since 11.10.2026
+  (training-atr-models#207; the history is in its
+  [`ASTERAIX_AND_UBELIX.md`](https://github.com/thodel/training-atr-models/blob/main/docs/ASTERAIX_AND_UBELIX.md)).
+  A link to the bare `hf_hub/` is the old form: a cache nobody else reads, which the
+  share's cleanup treats as reconstructible (#221). Check and fix with:
+
+  ```bash
+  readlink ~/.cache/huggingface/hub        # must end in /hf_hub/hub
+  ln -sfn /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub/hub ~/.cache/huggingface/hub
+  ```
 
 Before any later edit, back up `.env` to `~/atr-cache/env-backups/` at mode 600. Never
 commit it, or any copy of it: `.gitignore` covers `.env.*` because a backup once sat
@@ -137,7 +146,7 @@ One of those limitations applies on this box as well.
 On both machines, `~/.cache/huggingface/hub` is a symlink to a CIFS share:
 
 ```
-~/.cache/huggingface/hub → /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub
+~/.cache/huggingface/hub → /mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub/hub
 ```
 
 CIFS does not support the `chmod` and `symlink` operations that `huggingface_hub` uses

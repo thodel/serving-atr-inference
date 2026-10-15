@@ -83,9 +83,13 @@ A trained model never travels over the network. Its weights and its registration
 
 **Hugging Face is the one outside place data comes from and goes to.** Datasets
 (`dh-unibe/image-text_*`), base models and the VLM weights idhefix serves are
-downloaded on first use into `hf_hub/` on the share: `~/.cache/huggingface/hub` is a
-symlink to it on both machines, and no service sets `HF_HOME`, so whatever one machine
-fetched, the other and UBELIX reuse. The TrOCR engine is the exception: it passes its
+downloaded on first use into `hf_hub/hub/` on the share: `~/.cache/huggingface/hub` is a
+symlink to it on both machines (the `hub/` level, since 11.10.2026 — UBELIX writes the
+same directory through `HF_HOME=…/hf_hub`, training-atr-models#207), and no service
+sets `HF_HOME`, so whatever one machine fetched, the other and UBELIX reuse. A link to
+the bare `hf_hub/` is the old form: a cache nobody else reads, in the shape the
+share's cleanup deletes (#221) — `bash scripts/probe_host.sh` warns about it. The
+TrOCR engine is the exception: it passes its
 own `cache_dir` and keeps its weights in `engines/trocr_svc/models_cache` inside the
 checkout on idhefix's local disk. Uploads are always private repositories under `dh-unibe`: trained models through
 the trainer's auto-publish (off unless `ATR_TRAIN_AUTO_PUBLISH_MIN_ACCURACY` is set) or
@@ -360,7 +364,7 @@ Paths are relative to `/mnt/wbkolleg_dh_1/Textrecognition_Training/`.
 | `training_folder/jobs/JOB/` | the trainer: `job.json`, `logs/`, `data/`, `spawn.claim` | the trainer, which acts only on its own jobs; the gateway reads none of it (logs and curves go over HTTP) | the single shared job store: 51 records on 16.09., of which 48 are legacy records from idhefix without `host` and 3 carry `host: asteraix` |
 | `training_folder/trained/MODEL/` | the trainer's register stage: weights, then `metadata.json` last | on idhefix: the kraken engine and the trocr engine, which are handed the registration's absolute `local_path`; `scripts/merge_loras.py`, which takes a trained VLM adapter from there; `scripts/publish_to_hub.py` | 12 directories on 16.09. |
 | `trained-ubelix/` | UBELIX training | — | weights trained on UBELIX |
-| `hf_hub/` | both hosts and `lassberg/vlm_training`, through `~/.cache/huggingface/hub`, which is a symlink to it on both hosts | both hosts | 1.8 T; **never set `HF_HOME`**, it routes around the symlink |
+| `hf_hub/hub/` | both hosts and `lassberg/vlm_training`, through `~/.cache/huggingface/hub`, which is a symlink to it on both hosts; UBELIX through `HF_HOME=…/hf_hub` | both hosts and UBELIX | 1.8 T; **never set `HF_HOME`** here, it routes around the symlink; the link must point at the `hub/` level, not at `hf_hub/` (#221) |
 
 The trainer removes a directory under `trained/` (at startup and after a `DELETE`)
 only if all of the following hold:
@@ -599,7 +603,7 @@ Settings that exist **only on asteraix** but belong to this seam:
 | `ATR_TRAIN_JOBS_ROOT` | `/mnt/wbkolleg_dh_1/Textrecognition_Training/training_folder/jobs` | the shared job store, used since 16.09. 22:47 |
 | `ATR_TRAIN_GPU` | `1` | a physical index, as nvidia-smi counts |
 | `TMPDIR` | `~/atr-cache/tmp` | local, see the CIFS rules |
-| `HF_HOME` | **unset** | the symlink routes the cache to the share |
+| `HF_HOME` | **unset** | the symlink routes the cache to `hf_hub/hub/` on the share (#221) |
 
 Two values are **not** settings — nobody sets them per box, and a wrong one is a
 protocol mismatch rather than a misconfiguration. They were imported across the
