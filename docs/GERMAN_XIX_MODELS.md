@@ -328,6 +328,32 @@ retrying on top of it.
 
 ## What is servable on idhefix
 
+**Update 2026-10-14/15 (#216–#221):** the first full `scripts/merge_loras.py` run after
+#217 (which makes the merge write the merged size as `vram_mb`) went over every vLLM
+LoRA entry in `.venvs/vlm-train`. What it found, per model:
+
+| model | 2026-10-14 | what follows |
+|---|---|---|
+| `qwen3vl-8b-old-church-slavonic`, `qwen3vl-8b-hebrew` | merged; weights 16 723 MiB, registry says 18 000 | nothing: the registered value is larger and stays |
+| `qwen3vl-german-xix-v1`, `-v2`, `qwen3vl-medieval-german-v3`, `-v1` | merged; weights 8 465 MiB, registry 12 000 / 10 000 | nothing (v1 is measured, #130) |
+| `qwen3.5-4b-german-xix-v2` | merged; weights 8 659 MiB, registry 12 000 | nothing |
+| `lightonocr-catmus-caroline` | re-merged (the directory had no tokenizer) — **blind**: transformers 4.57.6 loaded the base as `Mistral3ForConditionalGeneration`, found no vision tower or projector under those names and initialised them at random; the merge said DONE | directory parked as `vllm-merged/lightonocr-catmus-caroline.blind-2026-10-14`, so the pinned launch fails loudly again; since #223 such a load is `FAILED: the base loaded blind`. To try: `.venvs/vllm-next` (#220) |
+| `vlm-xix-effective-batch-01-noise-s42…s45`, `…-r0-3de4c2e3aef1` | **blocked**: the adapters were written by peft 0.21.0 on asteraix, idhefix's `vlm-train` has 0.20.0 | `TMPDIR=/tmp .venvs/vlm-train/bin/pip install 'peft>=0.21.0'`, then `--only` each (#219's hint says so now) |
+| `qwen3.5-4b-german-xix-v1`, `qwen3.5-2b-german-xix-v1` | blocked, as on 09-14: no `qwen3_5` in this transformers | `.venvs/vllm-next`, as for v2 |
+| `qwen3vl-thun-smoke`, `qwen3vl-german-medieval-v1`, `qwen3vl-sg-missiven-v1`, `qwen3vl-german-pages-v3` | ghosts from the retired overlay (#143): three base loads and one 17 GB download, then "Can't find adapter_config.json" | gone since #222: the script reads the gateway's sources, and a missing local adapter is a preflight blocker |
+
+Two things the log showed on the side. The downloads went to
+`…/hf_hub/models--*`: idhefix's `~/.cache/huggingface/hub` still pointed at the bare
+`hf_hub/`, not at `hf_hub/hub/`, the level asteraix and UBELIX share since 11.10.2026
+(#221, #224). The link was moved on 2026-10-15 and the old form cleaned up: of 21
+entries, 8 were moved into `hub/` (LightOnOCR base and adapter, bytellama, yolov9,
+swin, `qwen3.5-4b-german-kurrent-xvi-xix-page-v1`), 13 were duplicates or stubs of a
+few KB and were deleted — among them, by a mistake in the cleanup command, the only
+full copy of the `qwen3.5-4b-german-xix-v1` adapter (325 MB), which the next merge
+re-downloads from the private Hub repo. Eight dataset stubs without any download had
+been written by a host other than idhefix: check `readlink ~/.cache/huggingface/hub`
+on tei and lassberg. And `scripts/probe_host.sh` now reports the link level.
+
 **Update 2026-09-21 (#157, #132 closed):** everything below the table was true on
 2026-09-14 and its conclusion — "serving them is a driver upgrade" — was not. The
 driver bound only the *default* vLLM wheel; the cu129 build runs on driver 565, in
