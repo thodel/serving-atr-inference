@@ -770,3 +770,32 @@ def test_the_doc_says_the_overlay_is_no_longer_read():
     section = _section(INFRA.read_text(encoding="utf-8"), "The research share")
 
     assert "no longer read" in section
+
+
+# ── the HF cache symlink level (#221) ────────────────────────────────────────
+
+HF_CACHE_DOCS = ("docs/INFRASTRUCTURE.md", "docs/DEPLOY.md", "README.md", ".env.example")
+
+
+def test_the_docs_name_the_hf_cache_at_the_hub_level():
+    """`~/.cache/huggingface/hub` points at `hf_hub/hub/`, the one cache both
+    training places share since 11.10.2026 (training-atr-models#207). This repo
+    documented the bare `hf_hub/` in four places and idhefix was still linked
+    there on 14.10.2026 (#221): every download went to a cache nobody else reads,
+    in the form the share's cleanup deletes. A path that stops at `hf_hub` is
+    allowed only where the text says it is the old form."""
+    bare = re.compile(r"Textrecognition_Training/hf_hub(?!/hub)")
+    wrong = []
+    for rel in HF_CACHE_DOCS:
+        for n, line in enumerate(_doc(rel).splitlines(), 1):
+            if bare.search(line) and "old form" not in line and "HF_HOME=" not in line:
+                wrong.append(f"{rel}:{n}: {line.strip()}")
+    assert not wrong, "the cache path must end in hf_hub/hub (#221):\n" + "\n".join(wrong)
+
+
+def test_the_probe_checks_the_hub_link_level():
+    """The merge log was the only thing that noticed the wrong level; the host
+    probe says it in one line, with the fix."""
+    probe = _doc("scripts/probe_host.sh")
+    assert "readlink" in probe and "*/hf_hub/hub)" in probe and "*/hf_hub)" in probe
+    assert "ln -sfn" in probe

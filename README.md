@@ -329,8 +329,8 @@ bash scripts/probe_host.sh | tee idhefix-probe.txt
   HuggingFace cache to the research share. After the cleanup in #143 it was at 71 %
   (16.09.2026). **Do not set `HF_HOME`** —
   `~/.cache/huggingface/hub` is a symlink to
-  `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub`, so the *standard* path already
-  resolves there and the cache is shared. Setting `HF_HOME` re-routes downloads to a
+  `/mnt/wbkolleg_dh_1/Textrecognition_Training/hf_hub/hub`, so the *standard* path already
+  resolves there and the cache is shared (the `hub/` level, #221). Setting `HF_HOME` re-routes downloads to a
   second location and re-downloads models that are already on disk (this cost 16 GB on
   2026-08-08 — **#48**).
 - **The share is CIFS**, which refuses `chmod`, `utime` and symlinks to a non-owner.
