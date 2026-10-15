@@ -179,6 +179,11 @@ trainer writes it), because that number sizes every launch of the model (see
 is the first place it exists (#216). A curated entry in `config/models.yaml` is not
 written to; the script prints the line to add. A model merged before this existed gets
 its size on the next run, which skips the merge as already done but still sizes it.
+A base whose load leaves weights "newly initialized" (transformers found them under
+other names, or not at all) is refused before anything is written, and the line names
+the blocks (#220): a merge on random weights cannot see, and a complete directory of one
+would be served. Try another venv's transformers, or disable the entry with a
+`disabled_reason`.
 Note the pinned vLLM setting `max_model_len=16384` in `Settings`:
 Qwen3-VL's default of 262k runs the KV cache out of memory. kraken and party download
 their Zenodo models on demand through htrmopo.
