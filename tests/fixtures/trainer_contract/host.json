@@ -1,0 +1,25 @@
+{
+  "host": "dhserver03",
+  "volumes": {
+    "jobs_root": {
+      "free_gb": 536.42,
+      "path": "/home/tobias/Repo/training-atr-models/jobs"
+    },
+    "checkpoint_root": {
+      "free_gb": 536.42,
+      "path": "/home/tobias/Repo/training-atr-models/checkpoints"
+    },
+    "artefact_cache_root": {
+      "free_gb": 1204.8,
+      "path": "/home/tobias/.cache/atr-artefacts"
+    },
+    "trained_root": {
+      "free_gb": 536.42,
+      "path": "/home/tobias/Repo/training-atr-models/trained"
+    }
+  },
+  "ram": {
+    "total_gb": 257.84,
+    "available_gb": 237.22
+  }
+}
