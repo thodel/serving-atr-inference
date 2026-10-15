@@ -631,6 +631,14 @@ empty `text` with `lines: 0` means the page genuinely had no detected lines. A
 registered id (see `GET /models`) or a raw Zenodo ref (`10.xxxx/zenodo.NNNN`,
 or a bare record id) is accepted; anything else is a `404`.
 
+## The client consumers install
+
+`clients/python/` is the `atr-client` package — the one client `agentic_historian`
+and `outremer` install, pinned to a commit of this repository (see
+[`clients/python/README.md`](clients/python/README.md)). It is tested here against
+the real app, so a route change that would break a consumer fails this
+repository's CI first.
+
 ## Security
 
 Three machines on the university network (tei, idhefix and asteraix), no TLS. Two

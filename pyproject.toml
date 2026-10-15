@@ -38,8 +38,10 @@ dev = ["pytest>=8.0", "ruff==0.15.20", "requests>=2.31"]
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", ".", "engines"]
-testpaths = ["tests"]
+# clients/python: the shared gateway client (atr-client) is tested here, against
+# the real app, because this repository owns the contract it implements.
+pythonpath = ["src", ".", "engines", "clients/python"]
+testpaths = ["tests", "clients/python/tests"]
 
 [tool.ruff]
 line-length = 100
