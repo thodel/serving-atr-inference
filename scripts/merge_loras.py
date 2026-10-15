@@ -37,12 +37,14 @@ Honors HF_HOME (source weights) — set it in the shell first (`. ./.env`).
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import math
 import os
 import socket
 import sys
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -381,6 +383,83 @@ def processor_source(base_model: str, adapter: str, adapter_cfg: dict) -> str:
     return base_model
 
 
+# ── a base that loaded blind ─────────────────────────────────────────────────
+#
+# 14.10.2026, lightonocr-catmus-caroline in .venvs/vlm-train (transformers 4.57.6):
+# the base loaded as Mistral3ForConditionalGeneration, and transformers said
+#
+#     Some weights of Mistral3ForConditionalGeneration were not initialized from
+#     the model checkpoint at lightonai/LightOnOCR-2-1B-base and are newly
+#     initialized: ['model.multi_modal_projector.linear_1.weight', …,
+#     'model.vision_tower.transformer.layers.23.ffn_norm.weight']
+#
+# — the whole vision side, random. peft then warned that the adapter's vision
+# LoRA had no weights to attach to, the merge ran, every required file landed,
+# and the line said DONE. The curated entry is enabled and pinned, so the next
+# gateway start would have served a model that cannot see, with a 200 on every
+# line. "Complete and blind" is worse than the incomplete directory it replaced,
+# which at least failed loudly. So: a base with newly initialised weights is a
+# refusal, before anything is written, and the message says which blocks.
+
+
+class MergeRefused(RuntimeError):
+    """The merge must not be written; the message says why, for an operator."""
+
+
+def loading_failure(missing: list[str], unexpected: list[str]) -> str | None:
+    """Why a base whose load left ``missing`` weights must not be merged, or None.
+
+    ``missing`` is what transformers reports as newly initialised; ``unexpected``
+    are checkpoint tensors the model had no place for — usually the same weights
+    under the names the checkpoint actually uses, which is the whole diagnosis.
+    Pure, so the incident is a test.
+    """
+    if not missing:
+        return None
+    blocks = sorted({_block(k) for k in missing})
+    text = (f"the base loaded blind: {len(missing)} weights were not in its checkpoint "
+            f"under the names this transformers expects and were newly initialised "
+            f"(blocks: {', '.join(blocks)}; e.g. {', '.join(missing[:2])}). A merge on "
+            f"random weights cannot see, so nothing was written.")
+    if unexpected:
+        text += (f" {len(unexpected)} checkpoint tensors went unused (e.g. "
+                 f"{', '.join(unexpected[:2])}) — the same weights under other names, "
+                 f"most likely.")
+    text += (" Load the base with a transformers that knows it natively (another venv), "
+             "or disable the model in the registry with a disabled_reason.")
+    return text
+
+
+def _block(key: str) -> str:
+    parts = key.split(".")
+    if parts and parts[0] == "model" and len(parts) > 1:
+        parts = parts[1:]
+    return parts[0] if parts else key
+
+
+def adapter_keys_summary(message: str) -> str:
+    """One line for peft's "Found missing adapter keys" warning, with the count.
+
+    The warning carries the whole key list — 192 names for one 24-layer vision
+    tower — and scrolls past as a transformers-style UserWarning. The count and
+    the first names are what an operator can read; what it means is that the
+    adapter's config targets modules the adapter has no weights for, so those
+    merge as no-ops (B = 0) and the adapter adapts less than its config says.
+    """
+    keys: list[str] = []
+    start, end = message.find("["), message.rfind("]")
+    if 0 <= start < end:
+        with contextlib.suppress(ValueError, SyntaxError):
+            parsed = ast.literal_eval(message[start:end + 1])
+            keys = [str(k) for k in parsed] if isinstance(parsed, list) else []
+    if not keys:
+        return "peft: " + message.strip()[:300]
+    blocks = sorted({_block(k.removeprefix("base_model.model.")) for k in keys})
+    return (f"peft found {len(keys)} adapter keys with no weights in the adapter "
+            f"(blocks: {', '.join(blocks)}; e.g. {keys[0]}); they merge as no-ops, so the "
+            f"adapter adapts less than its config says.")
+
+
 def merge_one(spec, out_dir: Path) -> None:
     import torch
     from peft import PeftModel
@@ -389,11 +468,24 @@ def merge_one(spec, out_dir: Path) -> None:
     adapter = adapter_of(spec)
     print(f"[{spec.id}] base={spec.base_model} adapter={adapter}")
     print(f"[{spec.id}] loading base (bf16, CPU) …")
-    base = AutoModelForImageTextToText.from_pretrained(
-        spec.base_model, dtype=torch.bfloat16, low_cpu_mem_usage=True
+    base, info = AutoModelForImageTextToText.from_pretrained(
+        spec.base_model, dtype=torch.bfloat16, low_cpu_mem_usage=True,
+        output_loading_info=True,
     )
+    if (why := loading_failure(list(info.get("missing_keys", [])),
+                               list(info.get("unexpected_keys", [])))):
+        raise MergeRefused(why)
     print(f"[{spec.id}] applying + merging adapter …")
-    merged = PeftModel.from_pretrained(base, adapter).merge_and_unload()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        peft_model = PeftModel.from_pretrained(base, adapter)
+    for w in caught:
+        text = str(w.message)
+        if "missing adapter keys" in text:
+            print(f"[{spec.id}] WARNING: {adapter_keys_summary(text)}", file=sys.stderr)
+        else:
+            print(f"[{spec.id}] {w.category.__name__}: {text}", file=sys.stderr)
+    merged = peft_model.merge_and_unload()
     out_dir.mkdir(parents=True, exist_ok=True)
     merged.save_pretrained(out_dir, safe_serialization=True)
     # Tokenizer/processor: from the base unless the adapter changed the vocabulary
@@ -613,6 +705,10 @@ def main() -> int:
 
         try:
             merge_one(spec, out)
+        except MergeRefused as exc:
+            print(f"[{spec.id}] FAILED: {exc}", file=sys.stderr)
+            failed.append(spec.id)
+            continue
         except Exception as exc:  # noqa: BLE001
             print(f"[{spec.id}] FAILED: {exc!r}", file=sys.stderr)
             failed.append(spec.id)
