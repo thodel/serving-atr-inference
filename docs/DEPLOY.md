@@ -91,7 +91,10 @@ Set these in `.env`. The values that must match asteraix are listed in
   (training-atr-models#207; the history is in its
   [`ASTERAIX_AND_UBELIX.md`](https://github.com/thodel/training-atr-models/blob/main/docs/ASTERAIX_AND_UBELIX.md)).
   A link to the bare `hf_hub/` is the old form: a cache nobody else reads, which the
-  share's cleanup treats as reconstructible (#221). Check and fix with:
+  share's cleanup treats as reconstructible (#221). idhefix was linked there until
+  2026-10-15 (found by the merge run of 14.10., see
+  [GERMAN_XIX_MODELS.md](GERMAN_XIX_MODELS.md#what-is-servable-on-idhefix)). Check and
+  fix with:
 
   ```bash
   readlink ~/.cache/huggingface/hub        # must end in /hf_hub/hub
@@ -360,9 +363,12 @@ This box needs only three things for training to work:
 **Merging an adapter trained on asteraix.** peft writes its own version into the
 adapter, and an older peft misreads it with an `AttributeError` that names neither
 peft nor a version. Merge in a venv whose peft is at least as new as the one in
-asteraix's `.venvs/vlm-train`. On this box that is usually `.venvs/vlm-train`, not
-`.venvs/vllm`. The script's preflight compares the two versions and stops before
-loading anything if the venv is too old:
+asteraix's `.venvs/vlm-train`. On this box that was `.venvs/vlm-train` until the two
+drifted apart: on 2026-10-14 asteraix's adapters said peft 0.21.0 and idhefix's
+`vlm-train` had 0.20.0, so every adapter from asteraix was blocked. The fix is the
+one the preflight prints (#219): `TMPDIR=/tmp .venvs/vlm-train/bin/pip install
+'peft>=0.21.0'` — `TMPDIR` local, as the CIFS rules require. The script's preflight
+compares the two versions and stops before loading anything if the venv is too old:
 
 ```bash
 cd ~/Repo/serving-atr-inference              # .env there names ATR_REGISTRY_ROOT, so trained/ is read
