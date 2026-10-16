@@ -1,0 +1,24 @@
+{
+  "_note": "A pinned vector for the weights digest of serving-atr-inference#200. Byte-identical in training-atr-models, whose promotion gate measures the same thing and cannot import atr_serving. The digest is sha256 over the lines '<relative name> <sha256> <size>', sorted by name, over the files listed in 'hashed' only — config.json and metadata.json are not weights. If this value changes, every recorded digest in both repos means something else: change it only with that in mind.",
+  "files": {
+    "model-00001-of-00002.safetensors": "the first shard, byte for byte\n",
+    "model-00002-of-00002.safetensors": "the second shard, byte for byte\n",
+    "config.json": "{\"not\": \"weights\"}\n",
+    "metadata.json": "{\"also not\": \"weights\"}\n"
+  },
+  "hashed": [
+    "model-00001-of-00002.safetensors",
+    "model-00002-of-00002.safetensors"
+  ],
+  "per_file": {
+    "model-00001-of-00002.safetensors": {
+      "sha256": "ffd46590619846adacc2e073df71e5e39c2a299072ef012c3a19dbef57417ffe",
+      "size_bytes": 31
+    },
+    "model-00002-of-00002.safetensors": {
+      "sha256": "53784e5e3520ccbe4702da9401a4661c613e460f9fd6f0b1f71e8a31acfe4e56",
+      "size_bytes": 32
+    }
+  },
+  "sha256": "ae1e3d04ac3d9723546a1c73cf71531785bed92779d2b47f033da295c9125108"
+}
