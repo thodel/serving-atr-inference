@@ -243,6 +243,14 @@ def _base_config(base_model: str) -> dict:
     return cfg or {}
 
 
+def _base_config_quietly(base_model: str) -> dict:
+    """``_base_config`` that answers {} instead of raising — no renaming then."""
+    try:
+        return _base_config(base_model)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _adapter_config(adapter: str) -> dict:
     """The adapter's ``adapter_config.json``, from a local path or the hub."""
     import json
@@ -406,6 +414,51 @@ class MergeRefused(RuntimeError):
     """The merge must not be written; the message says why, for an operator."""
 
 
+#: Bases whose checkpoint names the weights differently from the class transformers
+#: builds for their ``model_type``, keyed by the ``architectures`` entry of their
+#: config. Each value is a ``key_mapping`` for ``from_pretrained`` (regex → name),
+#: applied in order, first match wins — and it *replaces* the class's own
+#: ``_checkpoint_conversion_mapping`` for the base load, so an entry must cover
+#: every rename that base needs. The blind check below is what proves it does.
+#:
+#: LightOnOCR-2 (#226): its config says ``architectures: [LightOnOCRForConditionalGeneration]``
+#: (written by transformers 5.0.0.dev0) but ``model_type: mistral3``, so the Auto class
+#: builds a Mistral3 and looks for ``model.vision_tower.*`` / ``model.multi_modal_projector.*``.
+#: The checkpoint has the same 218 + 4 tensors as ``model.vision_encoder.*`` /
+#: ``model.vision_projection.*`` (read from the safetensors header, 17.10.2026); without
+#: this, the whole vision side was initialised at random (#220).
+KEY_MAPPINGS: dict[str, dict[str, str]] = {
+    "LightOnOCRForConditionalGeneration": {
+        r"^model\.vision_encoder\.": "model.vision_tower.",
+        r"^model\.vision_projection\.": "model.multi_modal_projector.",
+    },
+}
+
+
+def key_mapping_for(base_cfg: dict) -> dict[str, str] | None:
+    """The renaming this base needs, from its config's ``architectures``, or None."""
+    for arch in base_cfg.get("architectures") or []:
+        if arch in KEY_MAPPINGS:
+            return dict(KEY_MAPPINGS[arch])
+    return None
+
+
+def adapter_key_mapping(base_mapping: dict[str, str], base_model) -> dict[str, str]:
+    """The mapping for the adapter: the base's renames, then the loaded class's own.
+
+    peft applies the class's ``_checkpoint_conversion_mapping`` by itself when no
+    mapping is passed; passing one replaces it, so it is appended here. The two do
+    not overlap for any entry in :data:`KEY_MAPPINGS` (first match wins in both
+    libraries), and peft strips ``base_model.model.`` before matching, so the same
+    patterns serve the adapter as the base.
+    """
+    merged = dict(base_mapping)
+    for pattern, replacement in (getattr(base_model, "_checkpoint_conversion_mapping", None)
+                                 or {}).items():
+        merged.setdefault(pattern, replacement)
+    return merged
+
+
 def loading_failure(missing: list[str], unexpected: list[str]) -> str | None:
     """Why a base whose load left ``missing`` weights must not be merged, or None.
 
@@ -425,8 +478,10 @@ def loading_failure(missing: list[str], unexpected: list[str]) -> str | None:
         text += (f" {len(unexpected)} checkpoint tensors went unused (e.g. "
                  f"{', '.join(unexpected[:2])}) — the same weights under other names, "
                  f"most likely.")
-    text += (" Load the base with a transformers that knows it natively (another venv), "
-             "or disable the model in the registry with a disabled_reason.")
+    text += (" If the unused tensors are the same weights under another prefix, add the "
+             "renaming to KEY_MAPPINGS in this script (#226); otherwise load the base with a "
+             "transformers that knows it natively (another venv), or disable the model in "
+             "the registry with a disabled_reason.")
     return text
 
 
@@ -467,18 +522,24 @@ def merge_one(spec, out_dir: Path) -> None:
 
     adapter = adapter_of(spec)
     print(f"[{spec.id}] base={spec.base_model} adapter={adapter}")
+    mapping = key_mapping_for(_base_config_quietly(spec.base_model))
+    load_kwargs = {} if mapping is None else {"key_mapping": mapping}
+    if mapping:
+        print(f"[{spec.id}] renaming checkpoint keys: "
+              + ", ".join(f"{k} -> {v}" for k, v in mapping.items()))
     print(f"[{spec.id}] loading base (bf16, CPU) …")
     base, info = AutoModelForImageTextToText.from_pretrained(
         spec.base_model, dtype=torch.bfloat16, low_cpu_mem_usage=True,
-        output_loading_info=True,
+        output_loading_info=True, **load_kwargs,
     )
     if (why := loading_failure(list(info.get("missing_keys", [])),
                                list(info.get("unexpected_keys", [])))):
         raise MergeRefused(why)
     print(f"[{spec.id}] applying + merging adapter …")
+    peft_kwargs = {} if mapping is None else {"key_mapping": adapter_key_mapping(mapping, base)}
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        peft_model = PeftModel.from_pretrained(base, adapter)
+        peft_model = PeftModel.from_pretrained(base, adapter, **peft_kwargs)
     for w in caught:
         text = str(w.message)
         if "missing adapter keys" in text:

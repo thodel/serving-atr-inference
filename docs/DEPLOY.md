@@ -194,8 +194,10 @@ its size on the next run, which skips the merge as already done but still sizes 
 A base whose load leaves weights "newly initialized" (transformers found them under
 other names, or not at all) is refused before anything is written, and the line names
 the blocks (#220): a merge on random weights cannot see, and a complete directory of one
-would be served. Try another venv's transformers, or disable the entry with a
-`disabled_reason`.
+would be served. When the unused checkpoint tensors are the same weights under another
+prefix (the message shows both sides), the script's `KEY_MAPPINGS` renames them on the
+base and the adapter load (#226; LightOnOCR-2 is the first entry). Otherwise try another
+venv's transformers, or disable the entry with a `disabled_reason`.
 Note the pinned vLLM setting `max_model_len=16384` in `Settings`:
 Qwen3-VL's default of 262k runs the KV cache out of memory. kraken and party download
 their Zenodo models on demand through htrmopo.
