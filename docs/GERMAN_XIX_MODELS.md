@@ -350,9 +350,12 @@ entries, 8 were moved into `hub/` (LightOnOCR base and adapter, bytellama, yolov
 swin, `qwen3.5-4b-german-kurrent-xvi-xix-page-v1`), 13 were duplicates or stubs of a
 few KB and were deleted — among them, by a mistake in the cleanup command, the only
 full copy of the `qwen3.5-4b-german-xix-v1` adapter (325 MB), which the next merge
-re-downloads from the private Hub repo. Eight dataset stubs without any download had
-been written by a host other than idhefix: check `readlink ~/.cache/huggingface/hub`
-on tei and lassberg. And `scripts/probe_host.sh` now reports the link level.
+re-downloads from the private Hub repo. Eight dataset stubs without any download were
+among them. Which host wrote them is not settled: tei is ruled out (checked 2026-10-20:
+no symlink, no HF variable, its downloads stay in a local 1.3 GB cache), and the only
+other hosts are idhefix and asteraix, both linked to the old level until 15.10. and
+11.10. respectively. lassberg is not a host but the `lassberg/vlm_training` project.
+And `scripts/probe_host.sh` now reports the link level.
 
 **Update 2026-09-21 (#157, #132 closed):** everything below the table was true on
 2026-09-14 and its conclusion — "serving them is a driver upgrade" — was not. The
