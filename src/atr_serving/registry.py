@@ -14,6 +14,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from atr_serving.weights import WeightsDigest
+
 Engine = Literal["vllm", "trocr", "kraken", "party"]
 
 
@@ -137,6 +139,15 @@ class ModelSpec(BaseModel):
     #: Mamba cache blocks (130)", measured 2026-09-21). The gateway sends a
     #: handful of requests at a time, so a lower ceiling costs nothing here.
     max_num_seqs: int | None = Field(default=None, ge=1)
+    #: The weights' own identity, measured on the box that serves them (#200).
+    #: ``zenodo_id`` carries a version; ``hf_repo`` and ``local_path`` do not, so
+    #: without this a published reading can say nothing checkable about the
+    #: weights behind every model we trained ourselves. Absent means nobody has
+    #: measured these weights — not that they are unversioned, and never a digest
+    #: over an empty file. ``scripts/measure_weights.py`` produces it and
+    #: ``--check`` re-measures; a value that does not follow from the files it
+    #: lists refuses to load, so a digest nobody took cannot reach a caller.
+    weights_digest: WeightsDigest | None = None
     # Corpora this model was trained on, as DOIs or repository URLs. A model that
     # aggregates dozens of datasets cannot be checked for overlap with a test set
     # from its name or its score — only from this list. Optional, and empty for
