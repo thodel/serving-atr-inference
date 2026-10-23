@@ -118,11 +118,56 @@ def test_the_idle_card_holding_memory_is_visible(monkeypatch, procs):
     assert cards[1].utilisation_pct == 97
 
 
-def test_not_supported_values_do_not_crash_the_probe(monkeypatch, procs):
-    """nvidia-smi writes '[N/A]' where a number belongs."""
-    monkeypatch.setattr(gpu, "_smi", _smi_stub([["4242", "[N/A]", "GPU-aaa"]]))
+def test_memory_nvidia_smi_cannot_read_is_unmeasured_not_zero(monkeypatch, procs):
+    """nvidia-smi writes '[N/A]' where a number belongs. That used to become 0
+    and be summed: a card that may be full reading ``unaccounted_mib: 0``, the
+    silent zero (training-atr-models#24). Now the row says None and so does
+    every total that would have to count it."""
+    monkeypatch.setattr(gpu, "_smi", _smi_stub([["4242", "[N/A]", "GPU-aaa"],
+                                                ["5151", "1600", "GPU-aaa"],
+                                                ["6262", "3000", "GPU-bbb"]]))
     procs[4242] = ("tobias", 1.0, "x", 1)
-    assert gpu.inspect({})[0].processes[0].used_mib == 0
+    procs[5151] = ("tobias", 1.0, "trocr", 1, "atr-trocr.service")
+    procs[6262] = ("tobias", 1.0, "y", 1)
+    cards = gpu.inspect({})
+    assert cards[0].processes[0].used_mib is None
+    assert cards[0].processes[0].orphaned is False, "the pid is in /proc"
+    first, second = gpu.as_rows(cards)
+    assert first["unaccounted_mib"] is None, "a sum with an unmeasured term is not a sum"
+    assert first["service_mib"] == 1600, "the engine's row is measured"
+    assert first["orphaned_mib"] == 0, "no row is orphaned; that much is known"
+    assert (second["unaccounted_mib"], second["service_mib"], second["orphaned_mib"]) == (3000, 0, 0)
+
+
+def test_a_pid_nvidia_smi_cannot_name_is_not_an_orphan(monkeypatch, procs):
+    """'[N/A]' in the pid column used to become pid 0, which /proc has not, so the
+    row came back *orphaned* — the one alarm, raised for a process nvidia-smi
+    merely could not name. Now nothing is looked up and nothing is claimed."""
+    looked_up: list = []
+    monkeypatch.setattr(gpu, "_proc_info", lambda pid: looked_up.append(pid) or (None, None, None))
+    monkeypatch.setattr(gpu, "_smi", _smi_stub([["[N/A]", "27530", "GPU-aaa"]]))
+    cards = gpu.inspect({})
+    held = cards[0].processes[0]
+    assert held.pid is None and held.used_mib == 27530
+    assert held.orphaned is None and held.registered is False and held.service is None
+    assert looked_up == []
+    row = gpu.as_rows(cards)[0]
+    assert row["unaccounted_mib"] == 27530, "measured, and nobody explains it"
+    assert row["orphaned_mib"] is None, "whether an orphan holds it is not known"
+
+
+def test_a_row_on_a_card_nvidia_smi_does_not_list_is_logged_not_dropped(monkeypatch, procs):
+    from loguru import logger
+    seen: list[str] = []
+    sink = logger.add(lambda m: seen.append(m.record["message"]), level="WARNING")
+    monkeypatch.setattr(gpu, "_smi", _smi_stub([["2743851", "27530", "MIG-dead-beef"]]))
+    try:
+        cards = gpu.inspect({})
+    finally:
+        logger.remove(sink)
+    assert all(card.processes == [] for card in cards)
+    assert any("MIG-dead-beef" in line and "fits no card" in line for line in seen), seen
+    assert any("orphaned=True" in line and "card=None" in line for line in seen), seen
 
 
 # ── GET /gpu: this box's cards (#139) ────────────────────────────────────────

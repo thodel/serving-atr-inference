@@ -751,7 +751,7 @@ def test_the_gpu_fixture_has_the_shape_of_the_gateways_own_reading(monkeypatch):
     monkeypatch.setattr(gpu_probe, "inspect", lambda *a, **k: [card])
     monkeypatch.setattr(gpu_probe, "descends_from", lambda pid, ancestor: False)
     local = make_client(Trainer()).get("/gpu", headers=AUTH).json()
-    assert set(GPU) - {"job_attribution_available", "known_job_pids"} \
+    assert set(GPU) - {"job_attribution_available", "known_job_pids", "unplaced_processes"} \
         == set(local) - {"vllm"} == {"host", "cards"}
     assert set(GPU["cards"][0]) == set(local["cards"][0])
     assert set(GPU["cards"][0]["processes"][0]) == set(local["cards"][0]["processes"][0])
