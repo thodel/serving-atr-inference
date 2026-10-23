@@ -41,6 +41,7 @@
       "orphaned_mib": 0
     }
   ],
+  "unplaced_processes": [],
   "job_attribution_available": true,
   "known_job_pids": 1
 }

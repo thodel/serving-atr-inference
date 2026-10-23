@@ -27,6 +27,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
+from loguru import logger
+
 #: Give up rather than hang a request on a wedged driver.
 TIMEOUT_S = 8
 
@@ -42,11 +44,18 @@ APP_QUERY = "pid,used_gpu_memory,gpu_uuid"
 
 @dataclass
 class Process:
-    pid: int
-    used_mib: int
+    #: None when nvidia-smi wrote ``[N/A]`` in the pid column. Not 0: pid 0 is a
+    #: number, looked up in ``/proc`` and found missing, which would turn
+    #: "nvidia-smi cannot name it" into "orphaned" (training-atr-models#24).
+    pid: int | None
+    #: None when nvidia-smi wrote ``[N/A]`` for the memory. Not 0: a 0 is summed
+    #: into the card's totals, and the row holding the card reads as holding
+    #: nothing. ``as_rows`` answers None for a total that would include it.
+    used_mib: int | None
     #: No ``/proc`` entry. The process is gone but its memory is not: this is the
-    #: ``[Not Found]`` row, and it is the one worth waking someone for.
-    orphaned: bool = False
+    #: ``[Not Found]`` row, and it is the one worth waking someone for. None when
+    #: the pid itself is unknown: nothing was looked up, so nothing is known.
+    orphaned: bool | None = False
     #: It is, or descends from, a pid the trainer recorded for a job. Descent
     #: matters: a data-loader worker of a healthy run is a child, not a stray, and
     #: flagging every one of them would bury the signal.
@@ -89,11 +98,23 @@ def _smi(query: str, *, per_app: bool) -> list[list[str]]:
 
 
 def _int(value: str) -> int:
-    """nvidia-smi writes '[N/A]' and '[Not Supported]' where a number belongs."""
+    """nvidia-smi writes '[N/A]' and '[Not Supported]' where a number belongs.
+
+    For the **card** fields. The process row goes through :func:`_int_or_none`:
+    there a 0 is a measurement of nothing (training-atr-models#24).
+    """
     try:
         return int(float(value))
     except ValueError:
         return 0
+
+
+def _int_or_none(value: str) -> int | None:
+    """The number, or None for ``[N/A]``/``[Not Supported]``/``[Not Found]``."""
+    try:
+        return int(float(value))
+    except ValueError:
+        return None
 
 
 def _age_seconds(pid: int) -> float | None:
@@ -221,22 +242,50 @@ def inspect(job_pids: dict | None = None) -> list:
 
     for row in _smi(APP_QUERY, per_app=True):
         pid_s, used_s, uuid = (row + [""] * 3)[:3]
-        pid = _int(pid_s)
-        user, age, command = _proc_info(pid)
-        chain = _ancestors(pid)
-        job_id = next((job_pids[p] for p in chain if p in job_pids), None)
-        unit = _unit_of(pid)
+        pid = _int_or_none(pid_s)
+        used = _int_or_none(used_s)
+        if pid is None:
+            # Nothing to look up — and not "orphaned" either, which is a
+            # statement about a known pid.
+            user = age = command = unit = job_id = None
+            orphaned = None
+        else:
+            user, age, command = _proc_info(pid)
+            chain = _ancestors(pid)
+            job_id = next((job_pids[p] for p in chain if p in job_pids), None)
+            unit = _unit_of(pid)
+            orphaned = user is None
         process = Process(
-            pid=pid, used_mib=_int(used_s), orphaned=user is None,
+            pid=pid, used_mib=used, orphaned=orphaned,
             registered=job_id is not None, job_id=job_id,
             service=unit,
             own_service=bool(unit and unit.startswith(OWN_UNIT_PREFIXES)),
             user=user, age_s=None if age is None else round(age, 1),
             command=command)
         card = by_uuid.get(uuid)
-        if card is not None:
+        if card is None:
+            # The trainer's GET /gpu returns such rows as ``unplaced_processes``
+            # (training-atr-models#24); here, where nothing trains, the log
+            # line is the record — a dropped row is a full card reading as free.
+            logger.warning("nvidia-smi names a card no --query-gpu row has: {!r} "
+                           "(known: {}); the row fits no card", row, sorted(by_uuid))
+        else:
             card.processes.append(process)
+        if orphaned or pid is None or used is None:
+            logger.warning("nvidia-smi compute-apps row {!r}: pid={} used_mib={} "
+                           "orphaned={} card={}", row, pid, used, orphaned,
+                           None if card is None else card.index)
     return cards
+
+
+def _total(values) -> int | None:
+    """A sum, or None when a term is None: an unmeasured row is not a 0."""
+    total = 0
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
 
 
 def as_rows(cards: list) -> list:
@@ -259,13 +308,15 @@ def as_rows(cards: list) -> list:
         # cannot have. Whether it is also an alarm is the reader's call, from the
         # row — atr_status._classify calls a row with a unit "foreign", and only
         # an orphan or a row without a unit "unexplained".
-        row["unaccounted_mib"] = sum(
+        # Each total is None, not 0, when a row it must count has no memory
+        # figure; orphaned_mib is None when a row's orphan state is unknown.
+        row["unaccounted_mib"] = _total(
             p["used_mib"] for p in procs
             if not p["registered"] and not p["own_service"])
-        row["service_mib"] = sum(
+        row["service_mib"] = _total(
             p["used_mib"] for p in procs if p["own_service"])
-        row["orphaned_mib"] = sum(
-            p["used_mib"] for p in procs if p["orphaned"])
+        row["orphaned_mib"] = (None if any(p["orphaned"] is None for p in procs)
+                               else _total(p["used_mib"] for p in procs if p["orphaned"]))
         out.append(row)
     return out
 
