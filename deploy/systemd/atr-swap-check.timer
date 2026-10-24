@@ -1,0 +1,12 @@
+# Weekly, so a second reading a week after the first can tell idle from busy.
+# Like every user unit here it runs only while linger is on (or tobias is
+# logged in) — install_user_units.sh warns when it is off.
+[Unit]
+Description=ATR: weekly swap-holder check (#213)
+
+[Timer]
+OnCalendar=Mon 07:13
+Persistent=true
+
+[Install]
+WantedBy=timers.target

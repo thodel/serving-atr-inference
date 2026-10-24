@@ -217,6 +217,7 @@ installed by `scripts/install_user_units.sh`. Each one reads the checkout's `.en
 | `atr-kraken` | 8201 | `127.0.0.1` | `.venvs/kraken` (2.10.0+cu128) | `CUDA_VISIBLE_DEVICES=1` | `on-failure` after 5 s; default `KillMode` |
 | `atr-trocr` | 8202 | `127.0.0.1` | `.venvs/trocr` (2.8.0+cu128) | `CUDA_VISIBLE_DEVICES=1` | `on-failure` after 5 s; default `KillMode` |
 | `atr-party` | 8203 | `127.0.0.1` | `.venvs/party` (2.10.0+cu128) | `CUDA_VISIBLE_DEVICES=1` | `on-failure` after 5 s; default `KillMode` |
+| `atr-swap-check` | none | none | system `python3`, stdlib only | none | `oneshot`, weekly by `atr-swap-check.timer`; exits 1 when a swap holder is stale (#213, [`idhefix-environment.md`](idhefix-environment.md#the-rule-on-a-timer)) |
 | vLLM, one process per resident model (not a unit) | 8210 and up (`ATR_VLLM_PORT_BASE`) | `127.0.0.1` | `.venvs/vllm` (2.8.0+cu128) | `ATR_VLLM_GPU`, default 1 | started and stopped by the gateway |
 
 **vLLM is started by the gateway, not by systemd.** The gateway's `ModelManager` runs

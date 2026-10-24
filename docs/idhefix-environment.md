@@ -141,6 +141,33 @@ sudo python3 scripts/swap_holders.py       # also other users' open files on the
 Per holder: swapped and resident MiB, state, user, age, command, and the files
 open under `/mnt/wbkolleg_dh_1`. A process swapped out almost entirely and
 asleep for months is one somebody decides about; the script never signals.
+### The rule, on a timer
+
+The June run was found by accident, four months late. `--rule` finds the next
+one within two weeks:
+
+| a holder is | when |
+|---|---|
+| a **candidate** | swapped >= 256 MiB with resident <= 5 % of that, not running, older than 14 days |
+| **stale** | a candidate whose CPU time has not moved for 7 days |
+
+Idleness needs two readings, so `--rule` keeps per process (pid and start time)
+its CPU ticks in `~/.local/state/atr/swap_holders.json`. On a first reading, or
+with that file unreadable, a holder is a candidate and never stale. A file on the
+share that a holder keeps open for writing and that has not changed for 14 days
+is named beside it. The 11.10. reading under this rule: the June run and the boot
+vLLM are stale, and the `change` gunicorn workers are not candidates (8 GiB
+resident each, running).
+
+`atr-swap-check.timer` runs it weekly (Monday 07:13, `Persistent=true`), installed
+and enabled by `scripts/install_user_units.sh`. A stale holder makes the unit exit
+1, so it shows in `systemctl --user --failed` with the finding in
+`journalctl --user -u atr-swap-check`. The rule never ends a process. Ending one
+is decided per pid, as in #213: for a training run, first decide on its output on
+the share, then `kill <pid>`; for someone else's or root's process, first find who
+started it and what points to it. Like every user unit here, the timer only runs
+while linger is on.
+
 Whether 10 GiB of swap at `swappiness=60` is the right shape for a 251 GiB box
 that keeps models resident is the open question of #213 — lowering swappiness
 (`vm.swappiness=10`) keeps cold pages of resident models in RAM longer, at the

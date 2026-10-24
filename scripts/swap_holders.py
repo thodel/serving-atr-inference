@@ -4,6 +4,7 @@
     python3 scripts/swap_holders.py                 # every process with swap, largest first
     python3 scripts/swap_holders.py --top 8 --share /mnt/wbkolleg_dh_1
     sudo python3 scripts/swap_holders.py            # also other users' open files
+    python3 scripts/swap_holders.py --rule          # only the stale ones; exit 1 if any
 
 Read-only; stdlib only; runs on idhefix as it runs on asteraix. Nothing here
 kills, signals or writes — the finding is for a person.
@@ -22,11 +23,29 @@ under ``--share`` (``/proc/<pid>/fd``, readable for one's own processes, or as
 root — a process whose fds this user may not read says so rather than "none").
 Plus the machine's swap total and ``/proc/pressure/memory``, so "full" and
 "under pressure" are kept apart: the first was the case, the second was not.
+
+**The rule** (``--rule``), so the next such process is found by a timer and not
+by accident. A holder is a *candidate* when all three hold:
+
+* swapped >= 256 MiB and resident <= 5 % of that — swapped out almost whole;
+* not running (state S, D, T or I);
+* older than 14 days.
+
+It is **stale** when, in addition, its CPU time has not moved for 7 days. That
+needs a reading from before: ``--state`` keeps, per process (pid *and* start
+time, so a reused pid is a new process), its CPU ticks and since when they have
+not changed. On the first reading idleness is unknown — the holder is listed
+as a candidate, never as stale. A file on the share it holds open *for writing*
+and that has not changed for 14 days is named with it: that is the June run's
+``0497440.arrow``. ``--rule`` exits 1 when anything is stale, so the weekly
+``atr-swap-check`` timer shows up in ``systemctl --user --failed``. It writes
+only its state file and signals nothing; who ends what stays a person's call.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pwd
 import sys
@@ -36,6 +55,15 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 DEFAULT_SHARE = "/mnt/wbkolleg_dh_1"
+DEFAULT_STATE = "~/.local/state/atr/swap_holders.json"
+
+#: The rule. Each number is the June run with a margin: 6057 MiB swapped against
+#: 14 MiB resident, asleep, 122 days old — and the vLLM from the boot, 563 MiB
+#: against 11 MiB. The live gunicorn workers (8 GiB resident) fail the first test.
+RULE_MIN_SWAP_MIB = 256
+RULE_MAX_RESIDENT_SHARE = 0.05
+RULE_MIN_AGE_DAYS = 14
+RULE_IDLE_DAYS = 7
 
 
 @dataclass
@@ -49,6 +77,16 @@ class Holder:
     command: str
     #: Files open under the share, or None when this user may not read the fds.
     share_files: Optional[List[str]] = field(default=None)
+    #: Of those, the ones open for writing (O_WRONLY/O_RDWR in fdinfo).
+    share_writing: Optional[List[str]] = field(default=None)
+    #: utime + stime in clock ticks, and the start time — together with the pid
+    #: the identity of a process across two readings. None when unreadable.
+    cpu_ticks: Optional[int] = None
+    start_ticks: Optional[int] = None
+
+    @property
+    def key(self) -> str:
+        return "%d:%s" % (self.pid, self.start_ticks)
 
     @property
     def mib(self) -> float:
@@ -113,6 +151,18 @@ def _age_of(proc: Path, pid: int, boot_time: Optional[float], now: float,
     return max(0.0, now - (boot_time + start_ticks / ticks))
 
 
+def _ticks(proc: Path, pid: int):
+    """``(utime + stime, starttime)`` in clock ticks, or ``(None, None)``."""
+    stat = _read(proc / str(pid) / "stat")
+    if stat is None:
+        return None, None
+    try:
+        fields = stat.rsplit(")", 1)[1].split()
+        return int(fields[11]) + int(fields[12]), int(fields[19])
+    except (IndexError, ValueError):
+        return None, None
+
+
 def _boot_time(proc: Path) -> Optional[float]:
     stat = _read(proc / "stat")
     if stat is None:
@@ -126,15 +176,17 @@ def _boot_time(proc: Path) -> Optional[float]:
     return None
 
 
-def _share_files(proc: Path, pid: int, share: str) -> Optional[List[str]]:
+def _share_files(proc: Path, pid: int, share: str):
+    """``(open, open for writing)`` under the share; ``(None, None)`` when this
+    user may not read the fds."""
     fd_dir = proc / str(pid) / "fd"
     try:
         names = os.listdir(fd_dir)
     except PermissionError:
-        return None
+        return None, None
     except OSError:
-        return []
-    found = []
+        return [], []
+    found, writing = [], []
     for name in names:
         try:
             target = os.readlink(fd_dir / name)
@@ -142,7 +194,15 @@ def _share_files(proc: Path, pid: int, share: str) -> Optional[List[str]]:
             continue
         if target.startswith(share.rstrip("/") + "/"):
             found.append(target)
-    return sorted(set(found))
+            info = _read(proc / str(pid) / "fdinfo" / name) or ""
+            flags = next((line.split()[1] for line in info.splitlines()
+                          if line.startswith("flags:")), None)
+            try:
+                if flags is not None and int(flags, 8) & 3 in (1, 2):
+                    writing.append(target)
+            except ValueError:
+                pass
+    return sorted(set(found)), sorted(set(writing))
 
 
 def holders(proc: Path = Path("/proc"), share: str = DEFAULT_SHARE, *,
@@ -164,11 +224,13 @@ def holders(proc: Path = Path("/proc"), share: str = DEFAULT_SHARE, *,
             continue
         cmdline = _read(proc / entry / "cmdline") or ""
         command = cmdline.replace("\0", " ").strip() or f"[{_field(status, 'Name')}]"
+        files, writing = _share_files(proc, pid, share)
+        cpu, start = _ticks(proc, pid)
         out.append(Holder(
             pid=pid, swap_kib=swap, rss_kib=_kib(status, "VmRSS"),
             state=(_field(status, "State") or "?")[:1], user=_user(status),
             age_s=_age_of(proc, pid, boot, now, ticks), command=command,
-            share_files=_share_files(proc, pid, share)))
+            share_files=files, share_writing=writing, cpu_ticks=cpu, start_ticks=start))
     return sorted(out, key=lambda h: -h.swap_kib)
 
 
@@ -188,14 +250,118 @@ def swap_summary(proc: Path = Path("/proc")) -> Dict[str, Optional[float]]:
             "pressure_some": some}
 
 
+def load_state(path: Path) -> Dict[str, Dict[str, float]]:
+    """The previous readings; empty when there are none or they are unreadable
+    — which makes every holder's idleness unknown, not "idle"."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return {k: v for k, v in raw.items() if isinstance(v, dict)}
+    except (OSError, ValueError):
+        return {}
+
+
+def update_state(rows: List[Holder], previous: Dict[str, Dict[str, float]],
+                 now: float) -> Dict[str, Dict[str, float]]:
+    """Per holder its CPU ticks and since when they have not moved.
+
+    Unchanged ticks keep the earlier ``since``; changed ones restart it. A
+    process gone since the last reading drops out, so a reused pid starts from
+    nothing (the key carries the start time as well).
+    """
+    out = {}
+    for h in rows:
+        if h.cpu_ticks is None or h.start_ticks is None:
+            continue
+        before = previous.get(h.key)
+        since = before["since"] if before and before.get("cpu") == h.cpu_ticks else now
+        out[h.key] = {"cpu": h.cpu_ticks, "since": since}
+    return out
+
+
+def judge(h: Holder, previous: Dict[str, Dict[str, float]], now: float):
+    """``("stale" | "candidate" | None, reasons)`` for one holder under the rule."""
+    if h.swap_kib < RULE_MIN_SWAP_MIB * 1024:
+        return None, []
+    if h.rss_kib > RULE_MAX_RESIDENT_SHARE * h.swap_kib:
+        return None, []
+    if h.state == "R":
+        return None, []
+    if h.age_s is None or h.age_s < RULE_MIN_AGE_DAYS * 86400:
+        return None, []
+    reasons = ["%.0f MiB swapped, %.0f MiB resident" % (h.mib, h.rss_kib / 1024),
+               "state %s" % h.state, "%s old" % _age(h.age_s)]
+    before = previous.get(h.key)
+    if h.cpu_ticks is None or before is None:
+        reasons.append("CPU time not read before — idleness unknown, not idle")
+        return "candidate", reasons
+    if before.get("cpu") != h.cpu_ticks:
+        return None, []
+    idle = now - float(before["since"])
+    if idle < RULE_IDLE_DAYS * 86400:
+        reasons.append("CPU time unchanged for %s (stale from %d days)" % (_age(idle), RULE_IDLE_DAYS))
+        return "candidate", reasons
+    reasons.append("CPU time unchanged for %s" % _age(idle))
+    return "stale", reasons
+
+
+def _old_writes(files: Optional[List[str]], now: float) -> List[str]:
+    """Files open for writing that have not changed for the rule's age."""
+    out = []
+    for path in files or []:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if now - st.st_mtime >= RULE_MIN_AGE_DAYS * 86400:
+            out.append("%s (%.1f GiB, unchanged %s)" % (path, st.st_size / 2**30,
+                                                       _age(now - st.st_mtime)))
+    return out
+
+
+def rule(rows: List[Holder], state_path: Path, now: float) -> int:
+    previous = load_state(state_path)
+    stale = 0
+    for h in rows:
+        verdict, reasons = judge(h, previous, now)
+        if verdict is None:
+            continue
+        stale += verdict == "stale"
+        print("%-9s pid %d (%s) %s" % (verdict.upper(), h.pid, h.user, h.command[:90]))
+        print("          " + "; ".join(reasons))
+        for line in _old_writes(h.share_writing, now):
+            print("          holds open for writing: " + line)
+        if h.share_writing is None:
+            print("          its open files: not readable (run as root)")
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(update_state(rows, previous, now), indent=1) + "\n",
+                              encoding="utf-8")
+    except OSError as exc:
+        print("state not written (%s): the next reading cannot tell idle from busy" % exc)
+    if stale:
+        print("\n%d stale holder(s). Nothing was signalled — decide per process, by pid "
+              "(docs/idhefix-environment.md, #213)" % stale)
+        return 1
+    print("no stale swap holder")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--share", default=DEFAULT_SHARE,
                         help="prefix of the share whose open files are listed per process")
     parser.add_argument("--top", type=int, default=0, help="only the N largest holders")
+    parser.add_argument("--rule", action="store_true",
+                        help="list only candidates and stale holders; exit 1 if any is stale")
+    parser.add_argument("--state", default=DEFAULT_STATE,
+                        help="where --rule keeps the CPU readings between runs")
     parser.add_argument("--proc", default="/proc", help=argparse.SUPPRESS)
+    parser.add_argument("--now", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     proc = Path(args.proc)
+    if args.rule:
+        now = time.time() if args.now is None else args.now
+        return rule(holders(proc, args.share, now=now), Path(args.state).expanduser(), now)
 
     summary = swap_summary(proc)
     if summary["total_mib"] is None:

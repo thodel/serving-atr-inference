@@ -26,11 +26,18 @@ START=1
 # the shared trained/. A routine re-run of this script used to do exactly that.
 UNITS=(atr-kraken atr-trocr atr-party atr-gateway)
 RETIRED=(atr-train)
+# Read-only checks that run on a timer, not as services (#213).
+TIMERS=(atr-swap-check)
 
 mkdir -p "${UNIT_DST}"
 for u in "${UNITS[@]}"; do
   cp "${UNIT_SRC}/${u}.service" "${UNIT_DST}/${u}.service"
   echo "installed ${u}.service"
+done
+for t in "${TIMERS[@]}"; do
+  cp "${UNIT_SRC}/${t}.service" "${UNIT_DST}/${t}.service"
+  cp "${UNIT_SRC}/${t}.timer" "${UNIT_DST}/${t}.timer"
+  echo "installed ${t}.timer"
 done
 
 systemctl --user daemon-reload
@@ -53,6 +60,9 @@ fi
 for u in "${UNITS[@]}"; do
   systemctl --user enable "${u}.service"
 done
+for t in "${TIMERS[@]}"; do
+  systemctl --user enable --now "${t}.timer"
+done
 
 if [ "${START}" -eq 1 ]; then
   # Start engines first, gateway last.
@@ -64,6 +74,7 @@ fi
 echo
 echo "Status:"
 systemctl --user --no-pager --plain list-units 'atr-*' || true
+systemctl --user --no-pager list-timers 'atr-*' || true
 echo
 echo "Logs:   journalctl --user -u atr-gateway -f"
 echo "Health: curl -s localhost:8200/health"
