@@ -115,6 +115,37 @@ newer vLLM is a decision to take with a measurement, not a side effect of a buil
 So neither the driver upgrade nor cuda-compat is needed for a model newer than 0.11
 supports; check for a cu12x wheel first.
 
+## Swap: full is not the same as busy (#213)
+
+Measured 11.10.2026: 92 % of the 10 GiB swap partition taken, `vmstat` si/so at
+0, `/proc/pressure/memory` at 0.00 — the swap had filled over 32 weeks and was
+never touched again. Two thirds of it belonged to two processes that did
+nothing: a `train.py prepare` from the 10th of June (6 GiB swapped, 14 MiB
+resident, a 7.4 GiB `.arrow` on the research share still open for writing, in a
+tmux whose socket was dead) and a vLLM from the February boot (owned by root, no
+unit, still answering on `127.0.0.1:8000`). The live `gunicorn` workers of the
+neighbours' RAG service hold the rest and are not ours to touch.
+
+Why it counts without an OOM in sight: the swap is the reserve for the moment a
+run has to push cold pages out. With 830 MiB left, that moment is not swapping
+but harder reclaim, and in a unit with `MemoryHigh` that is throttling — the
+mechanism behind ch-h-bot#467.
+
+Read it, repeatably and without touching anything:
+
+```bash
+python3 scripts/swap_holders.py            # swap in use, pressure, every holder largest first
+sudo python3 scripts/swap_holders.py       # also other users' open files on the share
+```
+
+Per holder: swapped and resident MiB, state, user, age, command, and the files
+open under `/mnt/wbkolleg_dh_1`. A process swapped out almost entirely and
+asleep for months is one somebody decides about; the script never signals.
+Whether 10 GiB of swap at `swappiness=60` is the right shape for a 251 GiB box
+that keeps models resident is the open question of #213 — lowering swappiness
+(`vm.swappiness=10`) keeps cold pages of resident models in RAM longer, at the
+price of less file cache; nothing here changes it.
+
 ## Open confirmations (need admin / info)
 - Two-server topology: **idhefix** (`srv`, `130.92.59.240`) runs this stack; the
   client is **agentic_historian on `tei.dh.unibe.ch`**. Confirm `ufw status` and the
