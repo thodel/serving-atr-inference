@@ -139,6 +139,12 @@ class ModelSpec(BaseModel):
     #: Mamba cache blocks (130)", measured 2026-09-21). The gateway sends a
     #: handful of requests at a time, so a lower ceiling costs nothing here.
     max_num_seqs: int | None = Field(default=None, ge=1)
+    #: Further ``vllm serve`` flags this model needs and no other does, e.g.
+    #: Apertus 1.5's ``--chat-template-content-format string``. Never the flags
+    #: the launcher owns (host, port, name, memory share): those are the
+    #: manager's bookkeeping, and a registry entry overriding them would serve on
+    #: a port or with a budget the manager does not know about.
+    vllm_args: list[str] = Field(default_factory=list)
     #: The weights' own identity, measured on the box that serves them (#200).
     #: ``zenodo_id`` carries a version; ``hf_repo`` and ``local_path`` do not, so
     #: without this a published reading can say nothing checkable about the
@@ -179,6 +185,16 @@ class ModelSpec(BaseModel):
                     raise ValueError(
                         f"model '{self.id}': {field} is only meaningful for engine vllm"
                     )
+            if self.vllm_args:
+                raise ValueError(
+                    f"model '{self.id}': vllm_args is only meaningful for engine vllm"
+                )
+        owned = {a.split("=", 1)[0] for a in self.vllm_args} & _LAUNCHER_OWNED_ARGS
+        if owned:
+            raise ValueError(
+                f"model '{self.id}': vllm_args may not set {sorted(owned)}; "
+                "the launcher sets those itself"
+            )
         if self.vllm_venv is None:
             return self
         # A directory name under .venvs/, nothing that could climb out of it.
@@ -191,6 +207,9 @@ class ModelSpec(BaseModel):
 
 
 _VENV_NAME = re.compile(r"[A-Za-z0-9._-]+")
+_LAUNCHER_OWNED_ARGS = frozenset({
+    "--host", "--port", "--served-model-name", "--gpu-memory-utilization",
+})
 
 
 class Registry:

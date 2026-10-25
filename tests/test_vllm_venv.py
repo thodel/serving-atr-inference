@@ -131,3 +131,34 @@ def test_make_venvs_knows_every_venv_the_registry_names():
     for venv in {s.vllm_venv for s in registry.all() if s.vllm_venv}:
         assert f" {venv})" in script or f" {venv} " in script, venv
         assert (Path(REPO_ROOT) / "engines" / venv / "requirements.txt").exists(), venv
+
+
+def test_vllm_args_reach_the_command(monkeypatch):
+    monkeypatch.setattr(manager, "gpu_budget",
+                        lambda spec, gpu, settings: manager.Budget(0.5, "test"))
+    monkeypatch.setattr(manager, "resolve_model_path", lambda spec, settings: "/merged/m")
+    launched = []
+    monkeypatch.setattr(manager.subprocess, "Popen",
+                        lambda cmd, **kw: launched.append(cmd) or object())
+    spec = _spec(vllm_args=["--chat-template-content-format", "string"])
+    manager.VllmLauncher().start(spec, 8210, 1, Settings())
+    assert launched[0][-2:] == ["--chat-template-content-format", "string"]
+
+
+@pytest.mark.parametrize("owned", ["--port", "--gpu-memory-utilization=0.9", "--host"])
+def test_vllm_args_cannot_take_the_launchers_flags(owned):
+    with pytest.raises(ValidationError, match="the launcher sets those itself"):
+        _spec(vllm_args=[owned, "1"])
+
+
+def test_vllm_args_only_for_vllm_models():
+    with pytest.raises(ValidationError, match="vllm_args is only meaningful"):
+        ModelSpec(id="t", engine="trocr", hf_repo="org/t", vllm_args=["--x"])
+
+
+def test_apertus_is_the_only_model_on_its_vllm():
+    registry = load_registry(REPO_ROOT / "config" / "models.yaml")
+    on_apertus = sorted(s.id for s in registry.all() if s.vllm_venv == "vllm-apertus")
+    assert on_apertus == ["apertus-1.5-8b"]
+    spec = registry.get("apertus-1.5-8b")
+    assert spec.vllm_args == ["--chat-template-content-format", "string"]

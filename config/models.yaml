@@ -1058,6 +1058,41 @@ models:
     residency: lazy
     gpu_affinity: 1
 
+  # Apertus 1.5 (swiss-ai, Oct 2026), the first multimodal Apertus: a general
+  # instruction model, NOT an HTR fine-tune. Registered for a first look at what
+  # an open Swiss base model reads on our pages, and as the candidate base for a
+  # fine-tune if it reads anything at all.
+  #
+  # What to expect, from its config rather than from hope: images enter through a
+  # *discrete* vision tokenizer (a VQ codebook, 16 px per token), not a ViT
+  # encoder as in Qwen3-VL. Its card reports DocVQA and OmniDocBench, but nothing
+  # on handwriting, and nobody has measured it on a historical page. The 1.96 MP
+  # ceiling is its own processor's `max_pixels`, set here so the gateway does not
+  # resize to a budget the model would resize again.
+  #
+  # Its own vLLM: swiss-ai's fork on cu129 kernels (engines/vllm-apertus/), with
+  # the content format the fork's card prescribes. The weights are gated (auto-
+  # approved): the HF token on the serving box must have accepted the terms.
+  - id: apertus-1.5-8b
+    engine: vllm
+    vllm_venv: vllm-apertus
+    vllm_args: ["--chat-template-content-format", "string"]
+    hf_repo: swiss-ai/Apertus-v1.5-8B
+    description: "Apertus 1.5 8B, general multimodal instruction model (not HTR-tuned)"
+    task: htr
+    level: page
+    prompt: >-
+      Transcribe the handwritten text in this image exactly as written, line by
+      line. Keep the original spelling, abbreviations and punctuation. Output only
+      the transcription.
+    languages: [de, fr, it, la]
+    scripts: []
+    centuries: []
+    max_pixels: 1960000
+    vram_mb: 18000       # 17.2 GB bf16 LM + 1.2 GB fp32 vision/audio tokenizers; unmeasured
+    residency: lazy
+    gpu_affinity: 1
+
   # A generalized model for English printed text — Kiessling, 2019. Modern printed
   # English plus ~10 000 lines of historical print.
   - id: kraken-english_print

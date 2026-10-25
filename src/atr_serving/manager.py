@@ -400,6 +400,7 @@ class VllmLauncher:
             cmd += ["--max-model-len", str(settings.vllm_max_model_len)]
         if spec.max_num_seqs:
             cmd += ["--max-num-seqs", str(spec.max_num_seqs)]
+        cmd += spec.vllm_args
         env = vllm_env(exe, gpu)
         logger.info("Launching vLLM: {}", " ".join(cmd))
         proc = subprocess.Popen(cmd, env=env)  # noqa: S603

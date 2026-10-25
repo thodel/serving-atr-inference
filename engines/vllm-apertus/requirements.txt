@@ -1,0 +1,26 @@
+# The third vLLM on idhefix, for Apertus 1.5 (swiss-ai/Apertus-v1.5-8B) only.
+# Neither upstream vLLM nor upstream transformers knows `apertus1p5` yet; swiss-ai
+# ships forks, pinned below to the commits their model card and their release
+# image (github.com/swiss-ai/model-launch, images/vllm_apertus_1.5_release) name.
+#
+# That image is a CUDA 13 build and does not run on driver 565 (CUDA 12.7) — the
+# same wall as the default vLLM wheels (#132). So the fork is installed the way
+# the image installs it, VLLM_USE_PRECOMPILED=1, but with the kernels taken from
+# the *cu129* nightly of the upstream commit the fork is based on, and torch from
+# the cu129 index. scripts/make_venvs.sh vllm-apertus does all of that; this file
+# carries only what pip can install unaided, before the fork.
+#
+# Build requirements of the fork (requirements/build/cuda.txt at a601a9d), needed
+# because it is installed with --no-build-isolation against the torch above.
+cmake>=3.26.1
+ninja
+packaging>=24.2
+setuptools>=77.0.3,<81.0.0
+setuptools-scm>=8
+setuptools-rust>=1.9.0
+wheel
+jinja2>=3.1.6
+regex
+build
+# swiss-ai/transformers, branch feature/apertus_1p5_pipeline. Installed --no-deps
+# by make_venvs.sh after the fork, which brings transformers' own dependencies.
