@@ -2,8 +2,9 @@
 
 `swiss-ai/Apertus-v1.5-8B` (Okt. 2026) ist das erste multimodale Apertus: Bild,
 Audio und Text rein, Text raus. Es ist ein **allgemeines Instruktionsmodell, kein
-HTR-Fine-Tune**. Ziel des Tests ist eine erste Einschätzung: Liest es unsere Seiten
-überhaupt, und taugt es als Basis für ein Fine-Tune?
+HTR-Fine-Tune**. Hauptziel des Tests ist die **Bildbeschreibung**: Was erkennt es auf
+Fotografien, Drucken, Karten und Dokumenten, und wie zuverlässig ist das? Die
+Transkription ist eine Nebenfrage.
 
 Registry-ID: **`apertus-1.5-8b`** (`config/models.yaml`), `level: page`, lazy auf Karte 1.
 
@@ -49,41 +50,59 @@ curl -s localhost:8200/models | grep -o '"apertus-1.5-8b"'
 Falls Schritt 1 scheitert: Ohne Docker gibt es auf diesem Treiber keinen Plan B für
 den vLLM-Pfad. Dann bleibt der Fallback über transformers (siehe unten).
 
-## Demo
+## Demo: Bilder beschreiben
 
-**Eine Seite, freier Prompt** (erster Aufruf = Kaltstart, 1–3 min):
+Das Demo-Skript beschreibt standardmässig auf Deutsch. Der Prompt verlangt Inhalt
+(Personen, Gegenstände, Orte, Szene), die Art des Bildes, sichtbare Beschriftungen
+und Hinweise auf Zeit und Ort. Unsicheres soll das Modell als unsicher markieren.
+Der erste Aufruf ist der Kaltstart und dauert 1–3 min.
 
 ```bash
-.venvs/gateway/bin/python scripts/apertus_demo.py seite.jpg
-.venvs/gateway/bin/python scripts/apertus_demo.py seite.jpg \
-    --prompt "Beschreibe dieses Dokument: Art, Datierung, Schrift, Sprache."
-.venvs/gateway/bin/python scripts/apertus_demo.py seite.jpg \
-    --prompt "Welche Personen und Orte werden genannt? Antworte als JSON." --thinking
+# ein Bild
+.venvs/gateway/bin/python scripts/apertus_demo.py bild.jpg
+
+# ein ganzer Ordner, Ergebnis als JSONL (ein Datensatz pro Bild; ein erneuter
+# Start überspringt Bilder, die schon in der Datei stehen)
+.venvs/gateway/bin/python scripts/apertus_demo.py bilder/ --out beschreibungen.jsonl
+
+# eigene Fragen
+.venvs/gateway/bin/python scripts/apertus_demo.py bild.jpg \
+    --prompt "Welche Personen sind zu sehen, und was tun sie?"
+.venvs/gateway/bin/python scripts/apertus_demo.py bild.jpg \
+    --prompt "Gib Titel, Bildtyp, Datierung (geschätzt) und 5 Schlagwörter als JSON aus."
+.venvs/gateway/bin/python scripts/apertus_demo.py bild.jpg --thinking   # mit Reasoning
+
+# zum Vergleich: Transkription statt Beschreibung
+.venvs/gateway/bin/python scripts/apertus_demo.py seite.jpg --task transcribe
 ```
 
-Das Skript meldet Laufzeit, Tokens und `finish_reason`. `length` heisst: Die Lesung
-bricht mitten im Text ab und ist nicht vollständig.
+Jeder JSONL-Datensatz enthält Bild, Prompt, Text, `finish_reason`, Tokens und
+Sekunden. `finish_reason: length` heisst, dass der Text abgeschnitten ist. Dann
+`--max-tokens` erhöhen (Standard 2048).
 
-**Ein kleiner Batch-Vergleich** über den ATR-TEI-MCP (wie bei jedem neuen Modell):
-1. `start_batch` mit `models: ["apertus-1.5-8b", "qwen3.5-4b-german-kurrent-xvi-xix-page-v1"]`,
-   zuerst `dry_run`, dann `sample: 3` (zufällig, deterministisch; `limit` nimmt
-   aufeinanderfolgende Seiten *eines* Dokuments). Mit `keys_from` auf eine
-   Ground-Truth-Liste liest der Lauf nur Seiten, die man auch bewerten kann;
-2. `compare_readings` auf beide Läufe. Die Zahl dort misst **Uneinigkeit, nicht
-   Qualität**;
-3. wo Ground Truth existiert, `score_ground_truth`. Erst das ergibt eine CER.
+**Wie bewerten?** Für Beschreibungen gibt es keine CER. Praktikabel für morgen:
+- 10–20 Bilder auswählen, gemischt nach Typ: Foto, Druckgrafik, Karte, Dokumentseite.
+- Pro Beschreibung drei Fragen notieren: Stimmt es? Fehlt Wichtiges? Was ist
+  **erfunden**? Halluzinationen sind bei Bildbeschreibungen der Hauptfehler, und sie
+  klingen genauso flüssig wie richtige Aussagen.
+- Dieselben Bilder einmal mit einem Qwen3-VL-Modell beschreiben lassen, als
+  Gegenprobe zum gleichen Prompt. Die Qwen-Modelle im Gateway sind allerdings
+  HTR-Fine-Tunes und beschreiben schlecht. Ein faires Gegenüber wäre ein
+  ungetuntes `Qwen/Qwen3-VL-8B-Instruct`, das noch nicht registriert ist.
 
-Vorschlag für die Seiten: je 3 aus einem gedruckten Bestand, einem Kurrent-Bestand
-des 19. Jh. und einem frühneuzeitlichen Bestand. Dann sieht man, wo die Grenze liegt.
+**Transkription als Nebentest** über den ATR-TEI-MCP: `start_batch` mit
+`models: ["apertus-1.5-8b", "qwen3.5-4b-german-kurrent-xvi-xix-page-v1"]`, zuerst
+`dry_run`, dann `sample: 3`. Danach `compare_readings` (misst Uneinigkeit, nicht
+Qualität) und, wo Ground Truth existiert, `score_ground_truth`.
 
 ## Was sich morgen zeigen lässt, ehrlich eingeordnet
 
 | Frage | Wie | Erwartung |
 |---|---|---|
-| Liest es Druck/Fraktur? | Demo + Batch | plausibel |
-| Liest es Kurrent/frühneuzeitliche Hände? | Batch gegen das Kurrent-Page-Modell | fraglich (Basismodell, VQ-Tokenizer) |
-| Versteht es Dokumente (Typ, Datierung, Regest)? | Demo mit freiem Prompt | sein eigentlicher Vorteil gegenüber den HTR-Modellen |
-| Eignet es sich als Fine-Tune-Basis? | erst nach dem Test; Trainer kennt die Architektur noch nicht | offen |
+| Beschreibt es Fotos und Grafiken korrekt? | Demo, Ordner-Lauf | plausibel; die Model Card meldet gute VQA-Werte |
+| Erkennt es Bildtyp, Epoche, Beschriftungen? | Demo mit JSON-Prompt | wahrscheinlich grob; die feine Auflösung ist durch den VQ-Tokenizer begrenzt |
+| Wie oft erfindet es Details? | Stichprobe von Hand | die eigentliche Frage des Tests |
+| Liest es Handschrift? | `--task transcribe`, Batch | fraglich (Basismodell, VQ-Tokenizer) |
 
 ## Fallback: transformers statt vLLM
 
