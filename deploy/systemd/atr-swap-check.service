@@ -1,7 +1,7 @@
 # User unit (systemctl --user), started by atr-swap-check.timer — #213.
 # Applies the rule of scripts/swap_holders.py --rule: a process swapped out
-# almost whole, asleep, older than 14 days and without CPU time for 7 days is
-# stale. Exit 1 then, so the unit shows in `systemctl --user --failed`; the
+# almost whole, asleep, older than 14 days and at <= 0.1 % of one core over 7
+# days is stale. Exit 1 then, so the unit shows in `systemctl --user --failed`; the
 # finding is in `journalctl --user -u atr-swap-check`. It signals nothing.
 # Install: scripts/install_user_units.sh
 [Unit]

@@ -190,7 +190,7 @@ def test_a_week_without_cpu_time_makes_them_stale_and_the_exit_says_so(tmp_path,
     code, out = _rule(tmp_path, proc, share, BOOT + 129 * DAY, capsys)
     assert code == 1, "stale: the timer's unit fails, and shows in systemctl --failed"
     assert "STALE     pid 1216483" in out and "STALE     pid 2274" in out
-    assert "CPU time unchanged for 7d 00h" in out
+    assert "0 CPU s in 7d 00h (0.000 % of one core)" in out
     assert "holds open for writing: " + str(share) in out and "0497440.arrow" in out
     assert "unchanged 29d" in out, "the arrow untouched since the 10th of June"
     assert "Nothing was signalled" in out
@@ -204,16 +204,47 @@ def test_less_than_a_week_idle_is_still_a_candidate(tmp_path, capsys):
     assert code == 0 and "CANDIDATE pid 1216483" in out and "3d 00h" in out
 
 
-def test_a_process_whose_cpu_time_moved_is_not_listed(tmp_path, capsys):
+def test_an_idle_servers_housekeeping_does_not_keep_it_off_the_list(tmp_path, capsys):
+    """The vLLM from the boot answers on :8000 and its event loop ticks: its CPU
+    time is never unchanged. The first form of the rule dropped it without a
+    word — one of the two processes #213 is about. 40 s in 8 days is 0.006 %."""
     share = _share(tmp_path)
     _rule(tmp_path, _proc(tmp_path / "a", _idhefix(share)), share, BOOT + 122 * DAY, capsys)
-    busy = _proc(tmp_path / "b", _idhefix(share, cpu=95_000))
+    ticking = _proc(tmp_path / "b", _idhefix(share, cpu=91_000 + 4_000))
+    code, out = _rule(tmp_path, ticking, share, BOOT + 130 * DAY, capsys)
+    assert code == 1 and "STALE     pid 1216483" in out
+    assert "40 CPU s in 8d 00h (0.006 % of one core)" in out
+
+
+def test_a_candidate_that_works_is_listed_as_alive_not_dropped(tmp_path, capsys):
+    """1 % of a core over 8 days: swapped out and doing something. Not stale —
+    and still named, with its rate, so nobody has to wonder where it went."""
+    share = _share(tmp_path)
+    _rule(tmp_path, _proc(tmp_path / "a", _idhefix(share)), share, BOOT + 122 * DAY, capsys)
+    busy = _proc(tmp_path / "b", _idhefix(share, cpu=91_000 + 8 * DAY * TICKS // 100))
     code, out = _rule(tmp_path, busy, share, BOOT + 130 * DAY, capsys)
-    assert "1216483" not in out, "swapped out but working: not a corpse"
+    assert "CANDIDATE pid 1216483" in out and "STALE     pid 1216483" not in out
+    assert "(1.000 % of one core) — above 0.1 %, alive" in out
     assert "STALE     pid 2274" in out and code == 1
-    # and the clock restarts: one more week unchanged from here is needed
-    code, out = _rule(tmp_path, busy, share, BOOT + 131 * DAY, capsys)
-    assert "CANDIDATE pid 1216483" in out
+
+
+def test_the_rate_is_measured_from_the_first_reading_not_the_last(tmp_path, capsys):
+    """A weekly timer reads every 7 days; a rate measured only since the last
+    change would restart with every tick and never span a week."""
+    share = _share(tmp_path)
+    for day, cpu in ((122, 91_000), (126, 91_500), (130, 92_000)):
+        code, out = _rule(tmp_path, _proc(tmp_path / f"d{day}", _idhefix(share, cpu=cpu)),
+                          share, BOOT + day * DAY, capsys)
+    assert code == 1 and "10 CPU s in 8d 00h" in out
+
+
+def test_a_state_from_before_the_rate_still_counts_as_a_first_reading(tmp_path, capsys):
+    share = _share(tmp_path)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "swap.json").write_text(json.dumps(
+        {f"1216483:{100 * DAY * TICKS}": {"cpu": 91_007, "since": BOOT + 122 * DAY}}))
+    code, out = _rule(tmp_path, _proc(tmp_path, _idhefix(share)), share, BOOT + 130 * DAY, capsys)
+    assert "STALE     pid 1216483" in out and "0 CPU s in 8d 00h" in out
 
 
 def test_a_reused_pid_is_a_new_process(tmp_path, capsys):
