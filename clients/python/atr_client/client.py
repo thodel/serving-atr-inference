@@ -26,6 +26,7 @@ caller's policy (a batch runner's yes, a nightly gate's no), not the client's.
 from __future__ import annotations
 
 import io
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -181,9 +182,19 @@ class AtrClient:
         return self._post("/segment", files=self._image_part(image),
                           data={"seg_mode": seg_mode}).json()
 
-    def recognize(self, image: ImageLike, model: str, *, engine: str | None = None) -> AtrResult:
-        """Read a page through ``/recognize``: every engine, the full result."""
-        response = self._post("/recognize", files=self._image_part(image), data={"model": model})
+    def recognize(self, image: ImageLike, model: str, *, engine: str | None = None,
+                  lines: list[dict[str, Any]] | None = None) -> AtrResult:
+        """Read a page through ``/recognize``: every engine, the full result.
+
+        ``lines`` — ``[{"order", "baseline", "bbox", "boundary", "regions"}, …]``
+        in the image's pixels — are the page's own lines. A kraken model reads on
+        exactly those, in that order, instead of segmenting again
+        (``segmented_by: "given"``); the answer's lines match them one for one.
+        """
+        data = {"model": model}
+        if lines:
+            data["lines"] = json.dumps(list(lines))
+        response = self._post("/recognize", files=self._image_part(image), data=data)
         return self._result(response, model=model, engine=engine or "")
 
     def ocr(self, image: ImageLike, model: str, *, seg_mode: str = "baseline",

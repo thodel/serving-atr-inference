@@ -313,3 +313,65 @@ def test_no_engine_imports_through_an_engines_package():
             offenders += [f"{path.relative_to(ROOT)}:{node.lineno} {n}"
                           for n in names if n == "engines" or n.startswith("engines.")]
     assert not offenders, offenders
+
+
+# ── reading on the caller's lines ───────────────────────────────────────────
+def _containers_stub(monkeypatch):
+    """kraken.containers as plain records, so the test sees what was built."""
+    containers = types.ModuleType("kraken.containers")
+    containers.BaselineLine = lambda **kw: types.SimpleNamespace(**kw)
+    containers.Segmentation = lambda **kw: types.SimpleNamespace(**kw)
+    monkeypatch.setitem(sys.modules, "kraken.containers", containers)
+
+
+def test_given_lines_are_read_as_drawn_and_blla_does_not_run(kraken_svc, monkeypatch):
+    """A V 1447: blla left 23 of 258 transcribed lines empty where Transkribus'
+    own lines left 9. Given lines are read on, in the caller's order."""
+    import json as _json
+    _containers_stub(monkeypatch)
+    seen = {}
+
+    def no_blla(*_a, **_k):
+        raise AssertionError("blla must not run when lines are given")
+
+    def rpred(net, img, seg):
+        seen["seg"] = seg
+        return [types.SimpleNamespace(prediction=f"t{i}", confidences=[0.9])
+                for i, _ in enumerate(seg.lines)]
+
+    monkeypatch.setattr(kraken_svc, "_run_segmentation", no_blla)
+    monkeypatch.setattr(kraken_svc.rpred, "rpred", rpred)
+    lines = [
+        {"order": 0, "baseline": [[1, 9], [30, 9]], "boundary": [[1, 2], [30, 2], [30, 11], [1, 11]],
+         "regions": ["r1"]},
+        {"order": 1, "bbox": [2, 1, 38, 11]},                     # no baseline: derived
+    ]
+
+    async def call():
+        async with _client(kraken_svc) as client:
+            return await client.post("/recognize", data={"model": "m", "lines": _json.dumps(lines)},
+                                     files={"image": ("page.png", _png(), "image/png")})
+    r = asyncio.run(call())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["segmented_by"] == "given"
+    assert [ln["text"] for ln in body["lines"]] == ["t0", "t1"]
+    assert body["lines"][0]["baseline"] == [[1, 9], [30, 9]]
+    assert body["lines"][0]["regions"] == ["r1"]
+    built = seen["seg"].lines
+    assert built[0].boundary == [(1, 2), (30, 2), (30, 11), (1, 11)]
+    assert built[1].baseline == [(2, 8), (38, 8)]                 # 11 - (11-1)/4
+    assert built[1].boundary == [(2, 1), (38, 1), (38, 11), (2, 11)]
+
+
+def test_a_given_line_without_any_geometry_is_refused(kraken_svc, monkeypatch):
+    """Skipping it would shift every later reading onto the wrong line."""
+    import json as _json
+    _containers_stub(monkeypatch)
+
+    async def call():
+        async with _client(kraken_svc) as client:
+            return await client.post("/recognize", data={"model": "m",
+                                     "lines": _json.dumps([{"order": 0}])},
+                                     files={"image": ("page.png", _png(), "image/png")})
+    assert asyncio.run(call()).status_code == 400
