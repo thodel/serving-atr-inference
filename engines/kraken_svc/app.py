@@ -22,6 +22,7 @@ serialised against recognition (see :func:`_run_segmentation`).
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -173,15 +174,61 @@ def _run_recognition(net, img, seg):
     return list(rpred.rpred(net, img, seg))
 
 
-def _recognize_one(model_id: str, img: "Image.Image"):
+def _recognize_one(model_id: str, img: "Image.Image", given=None):
     """Thread-safe single-page recognition: model load + segmentation + recognition,
     all under one lock. Holds :data:`_model_lock` from the model check to the end
-    of inference, so a request never runs on a model another request just loaded."""
+    of inference, so a request never runs on a model another request just loaded.
+
+    ``given`` is a segmentation the caller brought (see :func:`_given_segmentation`);
+    then blla does not run and the lines are read as drawn."""
     with _model_lock:
         net = _load(model_id)
-        seg = _run_segmentation(img)
+        seg = given if given is not None else _run_segmentation(img)
         records = _run_recognition(net, img, seg)
     return seg, records
+
+
+def _given_segmentation(lines: list[Line], img: "Image.Image"):
+    """A kraken ``Segmentation`` from lines the caller drew, in the caller's order.
+
+    Why at all: a page whose lines a human or Transkribus already drew should be
+    read on *those* lines. blla re-segmenting it loses some and invents others —
+    on A V 1447 it left 23 of 258 transcribed lines without text where
+    Transkribus' own lines left 9 — and the reading then cannot be put back onto
+    the page it came from line for line.
+
+    Each line needs a baseline; one without gets a straight one a quarter of the
+    box height above the bottom of its bbox. The polygon is ``boundary`` when
+    given, else the bbox as a rectangle. A line with neither is refused (400),
+    because skipping it would shift every later reading onto the wrong line.
+    """
+    from kraken.containers import BaselineLine, Segmentation  # engine venv only
+
+    out = []
+    for i, ln in enumerate(lines):
+        bl = [(int(x), int(y)) for x, y in (ln.baseline or [])]
+        box = ln.bbox
+        if len(bl) < 2 and box:
+            x0, y0, x1, y1 = box
+            y = int(y1 - (y1 - y0) / 4)
+            bl = [(int(x0), y), (int(x1), y)]
+        if len(bl) < 2:
+            raise HTTPException(status_code=400,
+                                detail=f"line {i}: no baseline and no bbox to derive one from")
+        if ln.boundary and len(ln.boundary) >= 3:
+            poly = [(int(x), int(y)) for x, y in ln.boundary]
+        elif box:
+            x0, y0, x1, y1 = (int(v) for v in box)
+            poly = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        else:
+            xs, ys = [x for x, _ in bl], [y for _, y in bl]
+            h = 40
+            poly = [(min(xs), min(ys) - h), (max(xs), min(ys) - h),
+                    (max(xs), max(ys) + h // 4), (min(xs), max(ys) + h // 4)]
+        out.append(BaselineLine(id=f"line_{i}", baseline=bl, boundary=poly,
+                                regions=list(ln.regions) or None))
+    return Segmentation(type="baselines", imagename="page", text_direction="horizontal-lr",
+                        script_detection=False, lines=out, regions={}, line_orders=[])
 
 
 def _regions_for(img, seg, line_boxes) -> tuple[list[Region], list[list[str]]]:
@@ -364,14 +411,22 @@ async def segment(image: UploadFile = File(...), mode: str = Form(default="basel
 async def recognize(
     image: UploadFile = File(...),
     model: str = Form(...),
-    lines: str | None = Form(default=None),  # accepted for API compat; kraken segments internally
+    lines: str | None = Form(default=None),  # the caller's lines: read on them, no blla
 ):
     t0 = time.perf_counter()
     img = _read_image(await image.read())
+    given_lines: list[Line] = []
+    if lines:
+        try:
+            given_lines = [Line(**ln) for ln in json.loads(lines)]
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"invalid lines JSON: {exc}") from exc
+    given = _given_segmentation(given_lines, img) if given_lines else None
     # Off the event loop (#111): the loop stays free for other requests and
     # /health while the model loads and the GPU works.
     try:
-        seg, records = await run_in_threadpool(_recognize_one, model, img)
+        args = (model, img) if given is None else (model, img, given)
+        seg, records = await run_in_threadpool(_recognize_one, *args)
     except HTTPException:
         raise  # _load's own answers (unknown model, ...) keep their status
     except Exception as exc:  # noqa: BLE001
@@ -380,14 +435,22 @@ async def recognize(
     out: list[Line] = []
     texts: list[str] = []
     confs: list[float] = []
-    _, assigned = await run_in_threadpool(_regions_for, img, seg,
-                                          [_geom(ln)[1] for ln in seg.lines])
+    if given_lines:
+        # The caller's lines are the page's; YOLO would regroup what it drew.
+        assigned = [list(ln.regions) for ln in given_lines]
+    else:
+        _, assigned = await run_in_threadpool(_regions_for, img, seg,
+                                              [_geom(ln)[1] for ln in seg.lines])
     for idx, (ln, rec) in enumerate(zip(seg.lines, records)):
         text = _record_text(rec)
         conf = _record_conf(rec)
         if conf is not None:
             confs.append(conf)
-        bl, bbox = _geom(ln)
+        if given_lines:
+            src = given_lines[idx]
+            bl, bbox = src.baseline, src.bbox or _geom(ln)[1]
+        else:
+            bl, bbox = _geom(ln)
         out.append(Line(order=idx, baseline=bl, bbox=bbox, text=text, confidence=conf,
                         regions=assigned[idx]))
         texts.append(text)
@@ -396,7 +459,7 @@ async def recognize(
         model=model, engine="kraken", text="\n".join(texts), lines=out,
         confidence=(sum(confs) / len(confs)) if confs else None,
         timing_ms=int((time.perf_counter() - t0) * 1000),
-        segmented_by="kraken-blla", version=KRAKEN_VERSION,
+        segmented_by="given" if given_lines else "kraken-blla", version=KRAKEN_VERSION,
     )
 
 

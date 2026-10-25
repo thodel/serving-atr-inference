@@ -15,6 +15,10 @@ class Line(BaseModel):
     order: int
     baseline: list[list[float]] | None = None  # [[x0,y0],[x1,y1],...]
     bbox: list[float] | None = None            # [x0,y0,x1,y1]
+    #: The line's polygon, ``[[x,y],...]``. Optional: what a segmenter or a
+    #: Transkribus PAGE file draws around the line, so a recogniser given the
+    #: lines reads exactly that area instead of the bbox around it.
+    boundary: list[list[float]] | None = None
     text: str | None = None
     confidence: float | None = None
     #: Ids of the regions this line sits in, from the segmenter. A line in a
