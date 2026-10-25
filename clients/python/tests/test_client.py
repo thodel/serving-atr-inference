@@ -171,3 +171,19 @@ def test_a_borrowed_session_is_not_closed():
     with AtrClient("https://gw.test", http_client=http):
         pass
     assert not http.is_closed
+
+
+def test_recognize_sends_the_pages_own_lines_when_given():
+    """A page whose lines Transkribus drew is read on those (segmented_by=given)."""
+    posted = []
+
+    def handler(request):
+        posted.append(request.read())
+        return httpx.Response(200, json={**RESULT, "segmented_by": "given"})
+
+    c = _client(handler)
+    lines = [{"order": 0, "baseline": [[1, 9], [30, 9]], "boundary": [[1, 2], [30, 2], [30, 11]]}]
+    assert c.recognize(b"img", "m1", lines=lines).segmented_by == "given"
+    c.recognize(b"img", "m1")
+    assert b'name="lines"' in posted[0] and b'"boundary"' in posted[0]
+    assert b'name="lines"' not in posted[1], "no lines, no field: the gateway segments"
