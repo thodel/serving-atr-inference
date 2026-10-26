@@ -178,4 +178,5 @@ def test_apertus_is_the_only_model_on_its_vllm():
     assert on_apertus == ["apertus-1.5-8b"]
     spec = registry.get("apertus-1.5-8b")
     assert spec.vllm_args == ["--chat-template-content-format", "string",
-                              "--max-model-len", "16384"]
+                              "--max-model-len", "16384",
+                              "--safetensors-load-strategy", "prefetch"]

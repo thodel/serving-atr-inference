@@ -1079,7 +1079,14 @@ models:
     # The box's global --max-model-len is 8192, and one 1.96 MP image alone is
     # ~7700 tokens here (16 px per token): the answer would have no room. vLLM
     # takes the last of a repeated flag, so this one wins for this model only.
-    vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384"]
+    #
+    # Prefetch: vLLM reads the checkpoint into the OS page cache with several
+    # threads before the worker maps it. The default lazy mmap reads the share
+    # piecemeal, ~1 min per 4 GB shard (2026-10-26), and vLLM does not auto-
+    # prefetch here because it takes the CIFS mount for AUTOFS, not NFS. The box
+    # has ~150 GB RAM free, so the 16 GB usually stay cached for the next start.
+    vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384",
+                "--safetensors-load-strategy", "prefetch"]
     # A cold start reads 16 GB from the research share (~70 MB/s), then compiles:
     # ~6 min with the weights cached, ~10 min the first time (2026-10-26).
     startup_timeout_s: 900
