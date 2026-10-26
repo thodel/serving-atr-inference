@@ -147,10 +147,13 @@ if wanted vllm-apertus; then
     https://github.com/swiss-ai/transformers.git "${APERTUS_SRC}/transformers"
   git -C "${APERTUS_SRC}/transformers" checkout "${APERTUS_TRANSFORMERS_COMMIT}"
   # Non-editable installs: the clones are build inputs, not what the venv runs.
+  # The cu129 *index* is <commit>/cu129/vllm/, but the wheel itself sits at the
+  # commit root next to the default (cu130) one; under cu129/ it is a 404
+  # (idhefix, 2026-10-26).
   (cd "${APERTUS_SRC}/vllm" && \
     VLLM_USE_PRECOMPILED=1 \
     VLLM_PRECOMPILED_WHEEL_COMMIT="${APERTUS_BASE_COMMIT}" \
-    VLLM_PRECOMPILED_WHEEL_LOCATION="https://wheels.vllm.ai/${APERTUS_BASE_COMMIT}/cu129/vllm-0.23.1rc1.dev977%2Bgae6170f87.cu129-cp38-abi3-manylinux_2_28_x86_64.whl" \
+    VLLM_PRECOMPILED_WHEEL_LOCATION="https://wheels.vllm.ai/${APERTUS_BASE_COMMIT}/vllm-0.23.1rc1.dev977%2Bgae6170f87.cu129-cp38-abi3-manylinux_2_28_x86_64.whl" \
     "${VENVS}/vllm-apertus/bin/pip" install --no-build-isolation ".[audio]" \
       --extra-index-url https://download.pytorch.org/whl/cu129)
   # After vLLM, so vLLM's transformers pin cannot replace the fork.
