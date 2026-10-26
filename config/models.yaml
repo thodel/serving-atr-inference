@@ -1076,7 +1076,10 @@ models:
   - id: apertus-1.5-8b
     engine: vllm
     vllm_venv: vllm-apertus
-    vllm_args: ["--chat-template-content-format", "string"]
+    # The box's global --max-model-len is 8192, and one 1.96 MP image alone is
+    # ~7700 tokens here (16 px per token): the answer would have no room. vLLM
+    # takes the last of a repeated flag, so this one wins for this model only.
+    vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384"]
     hf_repo: swiss-ai/Apertus-v1.5-8B
     description: "Apertus 1.5 8B, general multimodal instruction model (not HTR-tuned)"
     task: htr

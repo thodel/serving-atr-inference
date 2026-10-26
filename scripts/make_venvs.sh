@@ -164,12 +164,22 @@ if wanted vllm-apertus; then
   # There is no tokenizers 0.23.0 on PyPI, so "<=0.23.0" means 0.22.x. vLLM
   # asks only tokenizers>=0.21.1.
   "${VENVS}/vllm-apertus/bin/pip" install "tokenizers==0.22.2" "huggingface-hub>=1.5.0,<2.0"
+  # torchcodec from PyPI is a CUDA 13 build (libnvrtc.so.13) and vLLM imports it
+  # at start-up, through vllm.multimodal; the gateway's cold start died on it
+  # (idhefix, 2026-10-26). The cu129 build of a version that pairs with torch 2.11
+  # (torchcodec's own table: 0.14-0.17 >= 2.11) and meets vLLM's >= 0.14.
+  "${VENVS}/vllm-apertus/bin/pip" install --force-reinstall --no-deps "torchcodec==0.16.0" \
+    --index-url https://download.pytorch.org/whl/cu129
   # Driver 565 must not see a CUDA 13 torch: if the fork's install pulled one in,
   # stop here rather than let the gateway find out at the first cold start.
   "${VENVS}/vllm-apertus/bin/python" -c 'import torch, sys; v = torch.version.cuda; print("torch", torch.__version__, "cuda", v); sys.exit(0 if v and v.startswith("12.") else 1)'
   # And both halves must import together: a version conflict here otherwise
   # surfaces only at the gateway's first cold start, as a vague startup timeout.
   "${VENVS}/vllm-apertus/bin/python" -c 'import transformers, vllm; print("transformers", transformers.__version__, "vllm", vllm.__version__)'
+  # `import vllm` alone loads too little: the CLI imports the multimodal stack,
+  # torchcodec with it, before it parses a single argument. This is what the
+  # gateway runs, so this is what has to start.
+  "${VENVS}/vllm-apertus/bin/vllm" --version
 fi
 
 echo "Done: ${TARGETS[*]}"

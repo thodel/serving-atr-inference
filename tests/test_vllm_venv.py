@@ -145,6 +145,22 @@ def test_vllm_args_reach_the_command(monkeypatch):
     assert launched[0][-2:] == ["--chat-template-content-format", "string"]
 
 
+def test_a_models_max_model_len_comes_after_the_global_one(monkeypatch):
+    """vLLM's argparse takes the last of a repeated flag; the model's must be last."""
+    monkeypatch.setattr(manager, "gpu_budget",
+                        lambda spec, gpu, settings: manager.Budget(0.5, "test"))
+    monkeypatch.setattr(manager, "resolve_model_path", lambda spec, settings: "/merged/m")
+    launched = []
+    monkeypatch.setattr(manager.subprocess, "Popen",
+                        lambda cmd, **kw: launched.append(cmd) or object())
+    settings = Settings()
+    settings.vllm_max_model_len = 8192
+    manager.VllmLauncher().start(_spec(vllm_args=["--max-model-len", "16384"]), 8210, 1, settings)
+    cmd = launched[0]
+    last = len(cmd) - 1 - cmd[::-1].index("--max-model-len")
+    assert cmd[last + 1] == "16384"
+
+
 @pytest.mark.parametrize("owned", ["--port", "--gpu-memory-utilization=0.9", "--host"])
 def test_vllm_args_cannot_take_the_launchers_flags(owned):
     with pytest.raises(ValidationError, match="the launcher sets those itself"):
@@ -161,4 +177,5 @@ def test_apertus_is_the_only_model_on_its_vllm():
     on_apertus = sorted(s.id for s in registry.all() if s.vllm_venv == "vllm-apertus")
     assert on_apertus == ["apertus-1.5-8b"]
     spec = registry.get("apertus-1.5-8b")
-    assert spec.vllm_args == ["--chat-template-content-format", "string"]
+    assert spec.vllm_args == ["--chat-template-content-format", "string",
+                              "--max-model-len", "16384"]
