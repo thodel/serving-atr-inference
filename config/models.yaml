@@ -1080,6 +1080,9 @@ models:
     # ~7700 tokens here (16 px per token): the answer would have no room. vLLM
     # takes the last of a repeated flag, so this one wins for this model only.
     vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384"]
+    # A cold start reads 16 GB from the research share (~70 MB/s), then compiles:
+    # ~6 min with the weights cached, ~10 min the first time (2026-10-26).
+    startup_timeout_s: 900
     hf_repo: swiss-ai/Apertus-v1.5-8B
     description: "Apertus 1.5 8B, general multimodal instruction model (not HTR-tuned)"
     task: htr

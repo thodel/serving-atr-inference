@@ -41,8 +41,8 @@ bash scripts/make_venvs.sh vllm-apertus
 
 # 2. Gewichte vorab holen (~19 GB), mit dem HF_TOKEN aus .env (Konto thodel, Gating
 #    akzeptiert). Sie landen im geteilten HF-Cache auf dem Research-Share. Nicht dem
-#    ersten Aufruf überlassen: das Gateway gibt einem Kaltstart 300 s, ein Download
-#    von 19 GB dauert länger, und der Start würde als Timeout abgebrochen.
+#    ersten Aufruf überlassen: auch mit 15 min Startzeit für Apertus kostet ein Download
+#    von 19 GB im Kaltstart zusätzlich Minuten, die die erste Anfrage wartet.
 set -a; . ./.env; set +a
 .venvs/gateway/bin/python scripts/download_models.py --model apertus-1.5-8b
 
@@ -59,7 +59,9 @@ den vLLM-Pfad. Dann bleibt der Fallback über transformers (siehe unten).
 Das Demo-Skript beschreibt standardmässig auf Deutsch. Der Prompt verlangt Inhalt
 (Personen, Gegenstände, Orte, Szene), die Art des Bildes, sichtbare Beschriftungen
 und Hinweise auf Zeit und Ort. Unsicheres soll das Modell als unsicher markieren.
-Der erste Aufruf ist der Kaltstart und dauert 1–3 min.
+Der erste Aufruf ist der Kaltstart und dauert rund **6 min**: 16 GB vom Research-Share
+(~70 MB/s), dann torch.compile und CUDA-Graphen. Das Gateway gibt Apertus dafür 15 min
+(`startup_timeout_s: 900`), andere Modelle behalten 300 s.
 
 ```bash
 # ein Bild

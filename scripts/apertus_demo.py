@@ -1,7 +1,7 @@
 """Apertus 1.5 describes images through the gateway — the demo for a first look.
 
 Goes through ``POST /v1/chat/completions``, the gateway's OpenAI passthrough, so
-the first call cold-starts the model (``.venvs/vllm-apertus``, a minute or more)
+the first call cold-starts the model (``.venvs/vllm-apertus``, ~6 minutes on idhefix)
 and evicts whatever else is resident on card 1. Every call after that is fast.
 
     .venvs/gateway/bin/python scripts/apertus_demo.py bild.jpg
@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-tokens", type=int, default=2048)
     ap.add_argument("--thinking", action="store_true",
                     help="enable Apertus' thinking mode (budget more --max-tokens)")
-    ap.add_argument("--timeout", type=float, default=900.0,
+    ap.add_argument("--timeout", type=float, default=1200.0,
                     help="seconds per image; the first one includes the cold start")
     args = ap.parse_args(argv)
 

@@ -145,6 +145,12 @@ class ModelSpec(BaseModel):
     #: manager's bookkeeping, and a registry entry overriding them would serve on
     #: a port or with a budget the manager does not know about.
     vllm_args: list[str] = Field(default_factory=list)
+    #: Seconds a cold start may take before the gateway gives up. None = the
+    #: box-wide ``vllm_startup_timeout_s``. Apertus 1.5 on idhefix needed ~10
+    #: minutes the first time (2026-10-26): 16 GB over the research share at
+    #: ~70 MB/s, then torch.compile and CUDA graphs. Raising the global value
+    #: for one model would make every other failed start wait as long.
+    startup_timeout_s: int | None = Field(default=None, gt=0)
     #: The weights' own identity, measured on the box that serves them (#200).
     #: ``zenodo_id`` carries a version; ``hf_repo`` and ``local_path`` do not, so
     #: without this a published reading can say nothing checkable about the
@@ -180,7 +186,7 @@ class ModelSpec(BaseModel):
     @model_validator(mode="after")
     def _check_vllm_venv(self) -> ModelSpec:
         if self.engine != "vllm":
-            for field in ("vllm_venv", "max_num_seqs"):
+            for field in ("vllm_venv", "max_num_seqs", "startup_timeout_s"):
                 if getattr(self, field) is not None:
                     raise ValueError(
                         f"model '{self.id}': {field} is only meaningful for engine vllm"
