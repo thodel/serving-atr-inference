@@ -32,15 +32,19 @@ Registry-ID: **`apertus-1.5-8b`** (`config/models.yaml`), `level: page`, lazy au
 ## Vorbereitung (heute Abend oder morgen früh, ca. 20–30 min)
 
 ```bash
-cd ~/Repo/serving-atr-inference && git pull
+cd ~/Repo/serving-atr-inference && git pull      # nach dem Merge von #234 (sonst: git switch claude/zen-faraday-f0jpr8)
 # 1. Venv bauen: torch 2.11 cu129 + Fork mit vorkompilierten cu129-Kernels.
 #    Endet mit "torch 2.11.0+cu129 cuda 12.9". Bricht mit Exit 1 ab, falls ein
 #    CUDA-13-torch hereingerutscht ist.
 bash scripts/make_venvs.sh vllm-apertus
 .venvs/vllm-apertus/bin/python -c "import vllm, transformers; print(vllm.__version__, transformers.__version__)"
 
-# 2. Gewichte holen (~19 GB). Vorher die Gating-Bedingungen akzeptieren.
-.venvs/vllm-apertus/bin/python -c "from huggingface_hub import snapshot_download as d; print(d('swiss-ai/Apertus-v1.5-8B'))"
+# 2. Gewichte vorab holen (~19 GB), mit dem HF_TOKEN aus .env (Konto thodel, Gating
+#    akzeptiert). Sie landen im geteilten HF-Cache auf dem Research-Share. Nicht dem
+#    ersten Aufruf überlassen: das Gateway gibt einem Kaltstart 300 s, ein Download
+#    von 19 GB dauert länger, und der Start würde als Timeout abgebrochen.
+set -a; . ./.env; set +a
+.venvs/gateway/bin/python scripts/download_models.py --model apertus-1.5-8b
 
 # 3. Gateway neu starten, damit es den neuen Registry-Eintrag liest
 systemctl --user restart atr-gateway
