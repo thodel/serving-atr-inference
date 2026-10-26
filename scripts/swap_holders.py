@@ -31,11 +31,17 @@ by accident. A holder is a *candidate* when all three hold:
 * not running (state S, D, T or I);
 * older than 14 days.
 
-It is **stale** when, in addition, its CPU time has not moved for 7 days. That
-needs a reading from before: ``--state`` keeps, per process (pid *and* start
-time, so a reused pid is a new process), its CPU ticks and since when they have
-not changed. On the first reading idleness is unknown — the holder is listed
-as a candidate, never as stale. A file on the share it holds open *for writing*
+It is **stale** when, in addition, it has used at most 0.1 % of one core over
+at least 7 days — about 86 CPU seconds a day. Not "no CPU at all": the vLLM from
+the boot answers on ``:8000`` and its event loop ticks, so "unchanged" never
+held for it, and the first form of this rule dropped exactly one of the two
+processes #213 was opened about without a word. The June run is at 0.
+
+That needs a reading from before: ``--state`` keeps, per process (pid *and*
+start time, so a reused pid is a new process), its CPU ticks and time at the
+first reading, and since when they have not changed. On the first reading the
+rate is unknown — the holder is a candidate, never stale. A candidate above
+the rate is listed with it, as *alive*, rather than left out. A file on the share it holds open *for writing*
 and that has not changed for 14 days is named with it: that is the June run's
 ``0497440.arrow``. ``--rule`` exits 1 when anything is stale, so the weekly
 ``atr-swap-check`` timer shows up in ``systemctl --user --failed``. It writes
@@ -64,6 +70,10 @@ RULE_MIN_SWAP_MIB = 256
 RULE_MAX_RESIDENT_SHARE = 0.05
 RULE_MIN_AGE_DAYS = 14
 RULE_IDLE_DAYS = 7
+#: CPU share of one core, averaged over the window, at or below which a candidate
+#: is stale. 0.1 % is ~86 s a day: an idle server's housekeeping, not work. A
+#: process doing anything with 14 MiB resident would also be paging itself in.
+RULE_MAX_CPU_SHARE = 0.001
 
 
 @dataclass
@@ -260,13 +270,31 @@ def load_state(path: Path) -> Dict[str, Dict[str, float]]:
         return {}
 
 
+def _first(before: Optional[Dict[str, float]]):
+    """``(cpu, time)`` of the first reading of a process, or None.
+
+    A state written before the rate existed has only ``cpu`` and ``since``; the
+    pair is a reading as well (the ticks were ``cpu`` at ``since``), so it
+    serves as the first one instead of throwing the week away.
+    """
+    if not before:
+        return None
+    if "first_cpu" in before and "first_t" in before:
+        return float(before["first_cpu"]), float(before["first_t"])
+    if "cpu" in before and "since" in before:
+        return float(before["cpu"]), float(before["since"])
+    return None
+
+
 def update_state(rows: List[Holder], previous: Dict[str, Dict[str, float]],
                  now: float) -> Dict[str, Dict[str, float]]:
-    """Per holder its CPU ticks and since when they have not moved.
+    """Per holder: CPU ticks now, since when they have not moved, and the first
+    reading the rate is measured from.
 
-    Unchanged ticks keep the earlier ``since``; changed ones restart it. A
-    process gone since the last reading drops out, so a reused pid starts from
-    nothing (the key carries the start time as well).
+    Unchanged ticks keep the earlier ``since``; changed ones restart it. The
+    first reading is kept for as long as the process lives. A process gone since
+    the last reading drops out, so a reused pid starts from nothing (the key
+    carries the start time as well).
     """
     out = {}
     for h in rows:
@@ -274,12 +302,19 @@ def update_state(rows: List[Holder], previous: Dict[str, Dict[str, float]],
             continue
         before = previous.get(h.key)
         since = before["since"] if before and before.get("cpu") == h.cpu_ticks else now
-        out[h.key] = {"cpu": h.cpu_ticks, "since": since}
+        first = _first(before) or (h.cpu_ticks, now)
+        out[h.key] = {"cpu": h.cpu_ticks, "since": since,
+                      "first_cpu": first[0], "first_t": first[1]}
     return out
 
 
-def judge(h: Holder, previous: Dict[str, Dict[str, float]], now: float):
-    """``("stale" | "candidate" | None, reasons)`` for one holder under the rule."""
+def judge(h: Holder, previous: Dict[str, Dict[str, float]], now: float,
+          ticks: Optional[int] = None):
+    """``("stale" | "candidate" | None, reasons)`` for one holder under the rule.
+
+    ``None`` only for what is not a candidate at all; a candidate is never left
+    out for using CPU — it is listed with its rate.
+    """
     if h.swap_kib < RULE_MIN_SWAP_MIB * 1024:
         return None, []
     if h.rss_kib > RULE_MAX_RESIDENT_SHARE * h.swap_kib:
@@ -290,17 +325,23 @@ def judge(h: Holder, previous: Dict[str, Dict[str, float]], now: float):
         return None, []
     reasons = ["%.0f MiB swapped, %.0f MiB resident" % (h.mib, h.rss_kib / 1024),
                "state %s" % h.state, "%s old" % _age(h.age_s)]
-    before = previous.get(h.key)
-    if h.cpu_ticks is None or before is None:
+    first = _first(previous.get(h.key))
+    if h.cpu_ticks is None or first is None:
         reasons.append("CPU time not read before — idleness unknown, not idle")
         return "candidate", reasons
-    if before.get("cpu") != h.cpu_ticks:
-        return None, []
-    idle = now - float(before["since"])
-    if idle < RULE_IDLE_DAYS * 86400:
-        reasons.append("CPU time unchanged for %s (stale from %d days)" % (_age(idle), RULE_IDLE_DAYS))
+    ticks = ticks or os.sysconf("SC_CLK_TCK")
+    window = now - first[1]
+    used = max(0.0, (h.cpu_ticks - first[0]) / ticks)
+    share = used / window if window > 0 else 0.0
+    rate = "%.0f CPU s in %s (%.3f %% of one core)" % (used, _age(window), 100 * share)
+    if window < RULE_IDLE_DAYS * 86400:
+        reasons.append("%s; stale from %d days at <= %.1f %%" % (
+            rate, RULE_IDLE_DAYS, 100 * RULE_MAX_CPU_SHARE))
         return "candidate", reasons
-    reasons.append("CPU time unchanged for %s" % _age(idle))
+    if share > RULE_MAX_CPU_SHARE:
+        reasons.append("%s — above %.1f %%, alive" % (rate, 100 * RULE_MAX_CPU_SHARE))
+        return "candidate", reasons
+    reasons.append(rate)
     return "stale", reasons
 
 
@@ -318,11 +359,12 @@ def _old_writes(files: Optional[List[str]], now: float) -> List[str]:
     return out
 
 
-def rule(rows: List[Holder], state_path: Path, now: float) -> int:
+def rule(rows: List[Holder], state_path: Path, now: float,
+         ticks: Optional[int] = None) -> int:
     previous = load_state(state_path)
     stale = 0
     for h in rows:
-        verdict, reasons = judge(h, previous, now)
+        verdict, reasons = judge(h, previous, now, ticks)
         if verdict is None:
             continue
         stale += verdict == "stale"

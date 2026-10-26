@@ -149,11 +149,17 @@ one within two weeks:
 | a holder is | when |
 |---|---|
 | a **candidate** | swapped >= 256 MiB with resident <= 5 % of that, not running, older than 14 days |
-| **stale** | a candidate whose CPU time has not moved for 7 days |
+| **stale** | a candidate that used at most 0.1 % of one core (~86 CPU s a day) over at least 7 days |
 
-Idleness needs two readings, so `--rule` keeps per process (pid and start time)
-its CPU ticks in `~/.local/state/atr/swap_holders.json`. On a first reading, or
-with that file unreadable, a holder is a candidate and never stale. A file on the
+Not "no CPU time at all": that was the first form of the rule, and on 25.10. it
+dropped the boot vLLM (pid 2274) without a word — it answers on `:8000`, its
+event loop ticks, so its CPU time is never unchanged, although it serves nobody.
+A candidate above the rate is listed as *alive*, with its rate, never left out.
+
+The rate needs two readings, so `--rule` keeps per process (pid and start time)
+its CPU ticks at the first reading and now in
+`~/.local/state/atr/swap_holders.json`. On a first reading, or with that file
+unreadable, a holder is a candidate and never stale. A file on the
 share that a holder keeps open for writing and that has not changed for 14 days
 is named beside it. The 11.10. reading under this rule: the June run and the boot
 vLLM are stale, and the `change` gunicorn workers are not candidates (8 GiB
