@@ -158,9 +158,18 @@ if wanted vllm-apertus; then
       --extra-index-url https://download.pytorch.org/whl/cu129)
   # After vLLM, so vLLM's transformers pin cannot replace the fork.
   "${VENVS}/vllm-apertus/bin/pip" install --no-deps --force-reinstall "${APERTUS_SRC}/transformers"
+  # The fork checks these at import (dependency_versions_table.py) and refuses to
+  # load outside them; vLLM's resolver had pulled tokenizers 0.23.3 and
+  # huggingface-hub 2.3, and `import transformers` died (idhefix, 2026-10-26).
+  # There is no tokenizers 0.23.0 on PyPI, so "<=0.23.0" means 0.22.x. vLLM
+  # asks only tokenizers>=0.21.1.
+  "${VENVS}/vllm-apertus/bin/pip" install "tokenizers==0.22.2" "huggingface-hub>=1.5.0,<2.0"
   # Driver 565 must not see a CUDA 13 torch: if the fork's install pulled one in,
   # stop here rather than let the gateway find out at the first cold start.
   "${VENVS}/vllm-apertus/bin/python" -c 'import torch, sys; v = torch.version.cuda; print("torch", torch.__version__, "cuda", v); sys.exit(0 if v and v.startswith("12.") else 1)'
+  # And both halves must import together: a version conflict here otherwise
+  # surfaces only at the gateway's first cold start, as a vague startup timeout.
+  "${VENVS}/vllm-apertus/bin/python" -c 'import transformers, vllm; print("transformers", transformers.__version__, "vllm", vllm.__version__)'
 fi
 
 echo "Done: ${TARGETS[*]}"
