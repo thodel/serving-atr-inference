@@ -1106,6 +1106,38 @@ models:
     residency: lazy
     gpu_affinity: 1
 
+  # The same weights, read one line at a time (training-atr-models#315): kraken
+  # segments, each line crop goes in on its own. The question it answers is how
+  # much of Apertus' page reading is lost to resolution. On a whole page at
+  # 1.96 MP a Kurrent letter is smaller than one 16 px vision token; a line crop
+  # keeps its native pixels, so the same letter spans several tokens.
+  # max_pixels is the model's own ceiling rather than the line budget
+  # (VLM_PIXEL_BUDGET["line"], 262 144 px): that budget would shrink a long line
+  # and give back the resolution this entry exists to measure.
+  # Its own id means its own vLLM instance: it and apertus-1.5-8b do not share
+  # one, and the gateway evicts the other when it starts (card 1 holds one).
+  - id: apertus-1.5-8b-line
+    engine: vllm
+    vllm_venv: vllm-apertus
+    vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384",
+                "--safetensors-load-strategy", "prefetch"]
+    startup_timeout_s: 900
+    hf_repo: swiss-ai/Apertus-v1.5-8B
+    description: "Apertus 1.5 8B, line by line (resolution probe; not HTR-tuned)"
+    task: htr
+    level: line
+    prompt: >-
+      Transcribe the handwritten text in this image of a single line exactly as
+      written. Keep the original spelling, abbreviations and punctuation. Output
+      only the transcription.
+    languages: [de, fr, it, la]
+    scripts: []
+    centuries: []
+    max_pixels: 1960000
+    vram_mb: 18000
+    residency: lazy
+    gpu_affinity: 1
+
   # A generalized model for English printed text — Kiessling, 2019. Modern printed
   # English plus ~10 000 lines of historical print.
   - id: kraken-english_print
