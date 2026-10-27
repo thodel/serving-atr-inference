@@ -40,7 +40,7 @@ case "$(stat -f -c %T "${TMPDIR:-/tmp}" 2>/dev/null || echo unknown)" in
     echo "      TMPDIR=${TMPDIR}" >&2
     ;;
 esac
-ALL=(gateway kraken party trocr vllm vllm-next)
+ALL=(gateway kraken party trocr vllm vllm-next vllm-apertus)
 TARGETS=("$@")
 [ ${#TARGETS[@]} -eq 0 ] && TARGETS=("${ALL[@]}")
 
@@ -125,6 +125,63 @@ if wanted vllm-next; then
     --extra-index-url https://download.pytorch.org/whl/cu129
 fi
 
+if wanted vllm-apertus; then
+  # Apertus 1.5 needs swiss-ai's vLLM and transformers forks (engines/vllm-apertus/).
+  # Their release image is CUDA 13 and cannot run here; the fork itself is pure
+  # Python on top of upstream commit ae6170f, whose compiled kernels exist as a
+  # cu129 nightly — the build that runs on driver 565, like vllm-next's.
+  APERTUS_VLLM_COMMIT=a601a9d998ddeb488f0c17e8512874b116aa7658
+  APERTUS_TRANSFORMERS_COMMIT=3797303dda74844e3d1f8977ff5518bb91f818b4
+  APERTUS_BASE_COMMIT=ae6170f874a7c66512bd24aa714b3a02f8a61838
+  APERTUS_SRC="${VENVS}/vllm-apertus-src"
+  new_venv vllm-apertus
+  "${VENVS}/vllm-apertus/bin/pip" install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+    --index-url https://download.pytorch.org/whl/cu129
+  "${VENVS}/vllm-apertus/bin/pip" install -r "${ROOT}/engines/vllm-apertus/requirements.txt"
+  rm -rf "${APERTUS_SRC}"
+  mkdir -p "${APERTUS_SRC}"
+  git clone --filter=blob:none --branch apertus-1-5 https://github.com/swiss-ai/vllm.git \
+    "${APERTUS_SRC}/vllm"
+  git -C "${APERTUS_SRC}/vllm" checkout "${APERTUS_VLLM_COMMIT}"
+  git clone --filter=blob:none --branch feature/apertus_1p5_pipeline \
+    https://github.com/swiss-ai/transformers.git "${APERTUS_SRC}/transformers"
+  git -C "${APERTUS_SRC}/transformers" checkout "${APERTUS_TRANSFORMERS_COMMIT}"
+  # Non-editable installs: the clones are build inputs, not what the venv runs.
+  # The cu129 *index* is <commit>/cu129/vllm/, but the wheel itself sits at the
+  # commit root next to the default (cu130) one; under cu129/ it is a 404
+  # (idhefix, 2026-10-26).
+  (cd "${APERTUS_SRC}/vllm" && \
+    VLLM_USE_PRECOMPILED=1 \
+    VLLM_PRECOMPILED_WHEEL_COMMIT="${APERTUS_BASE_COMMIT}" \
+    VLLM_PRECOMPILED_WHEEL_LOCATION="https://wheels.vllm.ai/${APERTUS_BASE_COMMIT}/vllm-0.23.1rc1.dev977%2Bgae6170f87.cu129-cp38-abi3-manylinux_2_28_x86_64.whl" \
+    "${VENVS}/vllm-apertus/bin/pip" install --no-build-isolation ".[audio]" \
+      --extra-index-url https://download.pytorch.org/whl/cu129)
+  # After vLLM, so vLLM's transformers pin cannot replace the fork.
+  "${VENVS}/vllm-apertus/bin/pip" install --no-deps --force-reinstall "${APERTUS_SRC}/transformers"
+  # The fork checks these at import (dependency_versions_table.py) and refuses to
+  # load outside them; vLLM's resolver had pulled tokenizers 0.23.3 and
+  # huggingface-hub 2.3, and `import transformers` died (idhefix, 2026-10-26).
+  # There is no tokenizers 0.23.0 on PyPI, so "<=0.23.0" means 0.22.x. vLLM
+  # asks only tokenizers>=0.21.1.
+  "${VENVS}/vllm-apertus/bin/pip" install "tokenizers==0.22.2" "huggingface-hub>=1.5.0,<2.0"
+  # torchcodec from PyPI is a CUDA 13 build (libnvrtc.so.13) and vLLM imports it
+  # at start-up, through vllm.multimodal; the gateway's cold start died on it
+  # (idhefix, 2026-10-26). The cu129 build of a version that pairs with torch 2.11
+  # (torchcodec's own table: 0.14-0.17 >= 2.11) and meets vLLM's >= 0.14.
+  "${VENVS}/vllm-apertus/bin/pip" install --force-reinstall --no-deps "torchcodec==0.16.0" \
+    --index-url https://download.pytorch.org/whl/cu129
+  # Driver 565 must not see a CUDA 13 torch: if the fork's install pulled one in,
+  # stop here rather than let the gateway find out at the first cold start.
+  "${VENVS}/vllm-apertus/bin/python" -c 'import torch, sys; v = torch.version.cuda; print("torch", torch.__version__, "cuda", v); sys.exit(0 if v and v.startswith("12.") else 1)'
+  # And both halves must import together: a version conflict here otherwise
+  # surfaces only at the gateway's first cold start, as a vague startup timeout.
+  "${VENVS}/vllm-apertus/bin/python" -c 'import transformers, vllm; print("transformers", transformers.__version__, "vllm", vllm.__version__)'
+  # `import vllm` alone loads too little: the CLI imports the multimodal stack,
+  # torchcodec with it, before it parses a single argument. This is what the
+  # gateway runs, so this is what has to start.
+  "${VENVS}/vllm-apertus/bin/vllm" --version
+fi
+
 echo "Done: ${TARGETS[*]}"
 wanted gateway && echo "  Gateway: ${VENVS}/gateway/bin/uvicorn atr_serving.app:app --host 0.0.0.0 --port 8200"
 wanted kraken && echo "  Kraken:  ${VENVS}/kraken/bin/python -m uvicorn kraken_svc.app:app --host 127.0.0.1 --port 8201"
@@ -132,4 +189,5 @@ wanted party && echo "  Party:   ${VENVS}/party/bin/python -m uvicorn party_svc.
 wanted trocr && echo "  TrOCR:   ${VENVS}/trocr/bin/python -m uvicorn trocr_svc.app:app --host 127.0.0.1 --port 8202"
 wanted vllm && echo "  vLLM:    spawned on demand by the gateway's ModelManager (ports 8210+)"
 wanted vllm-next && echo "  vLLM-next: same, for models with vllm_venv: vllm-next"
+wanted vllm-apertus && echo "  vLLM-apertus: same, for models with vllm_venv: vllm-apertus"
 exit 0

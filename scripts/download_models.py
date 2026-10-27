@@ -6,6 +6,7 @@ with the right libraries and in HF_HOME):
 
     python scripts/download_models.py            # all
     python scripts/download_models.py --engine vllm trocr
+    python scripts/download_models.py --model apertus-1.5-8b
     python scripts/download_models.py --dry-run
 
 - vllm / trocr models  -> huggingface_hub.snapshot_download(hf_repo)
@@ -47,6 +48,7 @@ def kraken_get(zenodo_id: str) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", nargs="*", choices=["vllm", "trocr", "kraken", "party"])
+    ap.add_argument("--model", nargs="*", help="only these registry ids")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -54,11 +56,19 @@ def main() -> int:
     specs = reg.all()
     if args.engine:
         specs = [s for s in specs if s.engine in args.engine]
+    if args.model:
+        unknown = sorted(set(args.model) - {s.id for s in specs})
+        if unknown:
+            print(f"not in the registry (or not of --engine): {', '.join(unknown)}")
+            return 2
+        specs = [s for s in specs if s.id in args.model]
 
     failures: list[str] = []
     for spec in specs:
         if spec.engine in {"vllm", "trocr"} and spec.hf_repo:
-            venv = "vllm" if spec.engine == "vllm" else "trocr"
+            # The venv that will serve it: a model on its own vLLM (vllm_venv) may
+            # need a huggingface_hub the default venv lacks, e.g. for gated repos.
+            venv = (spec.vllm_venv or "vllm") if spec.engine == "vllm" else "trocr"
             cmd = hf_snapshot(spec.hf_repo, venv)
             label = f"[{spec.engine}] {spec.hf_repo}"
         elif spec.engine in {"kraken", "party"} and spec.zenodo_id:

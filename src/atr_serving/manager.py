@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -78,11 +79,41 @@ class SubprocessHandle:
             return False
 
     def terminate(self) -> None:
-        self.proc.terminate()
+        """Stop ``vllm serve`` **and everything it started**.
+
+        vLLM v1 runs the model in a child, ``VLLM::EngineCore``, and that child
+        holds the card. Signalling only ``vllm serve`` left it behind: on
+        2026-10-26 a cold start of Apertus outran the startup timeout, the
+        gateway terminated the server, and the engine — reparented to the user's
+        systemd — went on loading and held 30 GB of card 1 for half an hour,
+        unregistered, refusing every launch after it. The launcher starts each
+        instance in its own session, so the whole group goes together.
+        """
+        self._signal_group(signal.SIGTERM)
         try:
-            self.proc.wait(timeout=10)
+            self.proc.wait(timeout=30)
         except Exception:
-            self.proc.kill()
+            self._signal_group(signal.SIGKILL)
+            try:
+                self.proc.wait(timeout=10)
+            except Exception:
+                pass
+        # The server may have exited on SIGTERM while its engine has not yet:
+        # whatever is still in the group gets no second chance to keep the card.
+        self._signal_group(signal.SIGKILL)
+
+    def _signal_group(self, sig: int) -> None:
+        try:
+            os.killpg(self.proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass                     # nothing left in the group
+        except OSError:
+            # Not a group leader (a handle from before start_new_session):
+            # the process itself is still ours to stop.
+            try:
+                self.proc.send_signal(sig)
+            except ProcessLookupError:
+                pass
 
 
 class Launcher(Protocol):
@@ -400,9 +431,12 @@ class VllmLauncher:
             cmd += ["--max-model-len", str(settings.vllm_max_model_len)]
         if spec.max_num_seqs:
             cmd += ["--max-num-seqs", str(spec.max_num_seqs)]
+        cmd += spec.vllm_args
         env = vllm_env(exe, gpu)
         logger.info("Launching vLLM: {}", " ".join(cmd))
-        proc = subprocess.Popen(cmd, env=env)  # noqa: S603
+        # Its own session, so terminate() can stop the whole group: vllm serve
+        # and the EngineCore child that actually holds the card.
+        proc = subprocess.Popen(cmd, env=env, start_new_session=True)  # noqa: S603
         return SubprocessHandle(port=port, proc=proc)
 
 
@@ -602,7 +636,7 @@ class ModelManager:
         try:
             handle = self.launcher.start(spec, port, self.settings.vllm_gpu,
                                          self.settings)
-            self._wait_healthy(handle)
+            self._wait_healthy(handle, spec)
         except Exception:
             # No port stays taken for a model that is not running: the next
             # caller through here is the next attempt, not the next leak.
@@ -779,21 +813,25 @@ class ModelManager:
         finally:
             self._ports.release(r.port)
 
-    def _wait_healthy(self, handle: VllmHandle) -> None:
-        deadline = time.monotonic() + self.settings.vllm_startup_timeout_s
+    def _wait_healthy(self, handle: VllmHandle, spec: ModelSpec | None = None) -> None:
+        timeout = (spec.startup_timeout_s if spec is not None and spec.startup_timeout_s
+                   else self.settings.vllm_startup_timeout_s)
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if handle.is_healthy():
                 return
             # Fail fast if the subprocess already died (don't wait out the timeout).
             proc = getattr(handle, "proc", None)
             if proc is not None and proc.poll() is not None:
+                # The server is gone; its engine child may not be.
+                handle.terminate()
                 raise ManagerError(
                     f"vLLM process exited (code {proc.returncode}) during startup; "
                     "see the gateway journal for the vLLM traceback"
                 )
             self._sleep(2)
         handle.terminate()
-        raise ManagerError("vLLM instance did not become healthy in time")
+        raise ManagerError(f"vLLM instance did not become healthy in {timeout} s")
 
     def shutdown(self) -> None:
         for mid in list(self._resident):
