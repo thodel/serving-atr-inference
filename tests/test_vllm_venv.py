@@ -175,7 +175,7 @@ def test_vllm_args_only_for_vllm_models():
 def test_apertus_is_the_only_model_on_its_vllm():
     registry = load_registry(REPO_ROOT / "config" / "models.yaml")
     on_apertus = sorted(s.id for s in registry.all() if s.vllm_venv == "vllm-apertus")
-    assert on_apertus == ["apertus-1.5-8b"]
+    assert on_apertus == ["apertus-1.5-8b", "apertus-1.5-8b-line"]
     spec = registry.get("apertus-1.5-8b")
     assert spec.vllm_args == ["--chat-template-content-format", "string",
                               "--max-model-len", "16384",
