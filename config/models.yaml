@@ -1085,8 +1085,17 @@ models:
     # piecemeal, ~1 min per 4 GB shard (2026-10-26), and vLLM does not auto-
     # prefetch here because it takes the CIFS mount for AUTOFS, not NFS. The box
     # has ~150 GB RAM free, so the 16 GB usually stay cached for the next start.
+    #
+    # max-num-batched-tokens: vLLM prefills in chunks of 2048 tokens by default,
+    # and a whole page is one image of ~7 750 tokens. The fork's multimodal path
+    # fails when an image is split across prefill chunks: the first batch run on
+    # 2026-10-27 crashed the EngineCore on its very first step (prompt 7845
+    # tokens, image 7749, 2048 scheduled with the encoder input), while the web
+    # page's small test photo (~1200 tokens, one chunk) had worked. At the
+    # context length every prompt prefills in one chunk.
     vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384",
-                "--safetensors-load-strategy", "prefetch"]
+                "--safetensors-load-strategy", "prefetch",
+                "--max-num-batched-tokens", "16384"]
     # A cold start reads 16 GB from the research share (~70 MB/s), then compiles:
     # ~6 min with the weights cached, ~10 min the first time (2026-10-26).
     startup_timeout_s: 900
@@ -1120,7 +1129,8 @@ models:
     engine: vllm
     vllm_venv: vllm-apertus
     vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384",
-                "--safetensors-load-strategy", "prefetch"]
+                "--safetensors-load-strategy", "prefetch",
+                "--max-num-batched-tokens", "16384"]   # see apertus-1.5-8b
     startup_timeout_s: 900
     hf_repo: swiss-ai/Apertus-v1.5-8B
     description: "Apertus 1.5 8B, line by line (resolution probe; not HTR-tuned)"
