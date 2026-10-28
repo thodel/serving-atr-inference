@@ -180,7 +180,8 @@ def test_apertus_is_the_only_model_on_its_vllm():
     assert spec.vllm_args == ["--chat-template-content-format", "string",
                               "--max-model-len", "16384",
                               "--safetensors-load-strategy", "prefetch",
-                              "--max-num-batched-tokens", "16384"]
+                              "--max-num-batched-tokens", "16384",
+                              "--kv-cache-memory-bytes", "3221225472"]
 
 
 def test_apertus_prefills_a_whole_page_in_one_chunk():
@@ -192,3 +193,17 @@ def test_apertus_prefills_a_whole_page_in_one_chunk():
         batched = int(args[args.index("--max-num-batched-tokens") + 1])
         context = int(args[args.index("--max-model-len") + 1])
         assert batched >= context, model_id
+
+
+def test_apertus_leaves_the_vision_encoder_its_peak():
+    """The fp32 vision tokenizer needs ~7-9 GiB for one 1.96 MP page, which
+    vLLM's profile does not see; with the KV cache sized from
+    --gpu-memory-utilization the first page ran the card out of memory
+    (2026-10-28). The cache is fixed instead, and must still hold one context."""
+    registry = load_registry(REPO_ROOT / "config" / "models.yaml")
+    kv_bytes_per_token = 32 * 8 * 128 * 2 * 2      # layers x KV heads x dim x K,V x bf16
+    for model_id in ("apertus-1.5-8b", "apertus-1.5-8b-line"):
+        args = registry.get(model_id).vllm_args
+        kv = int(args[args.index("--kv-cache-memory-bytes") + 1])
+        context = int(args[args.index("--max-model-len") + 1])
+        assert context * kv_bytes_per_token <= kv <= 4 * 2**30, model_id
