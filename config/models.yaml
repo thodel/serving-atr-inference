@@ -1093,9 +1093,22 @@ models:
     # tokens, image 7749, 2048 scheduled with the encoder input), while the web
     # page's small test photo (~1200 tokens, one chunk) had worked. At the
     # context length every prompt prefills in one chunk.
+    #
+    # kv-cache-memory-bytes: the vision tokenizer runs in fp32 with 256 channels
+    # at the image's full resolution, so one 1.96 MP page needs 1.87 GiB per
+    # activation and several of them at once, ~7-9 GiB in all. vLLM's profile
+    # run does not see that peak and gave the KV cache everything up to
+    # --gpu-memory-utilization; the first page then ran the card out of memory
+    # inside the encoder (2026-10-28, CUDA OOM in modeling_apertus1p5 encode,
+    # 30.6 GiB allocated, 1.87 GiB more wanted, 0.6 GiB free). A fixed 3 GiB
+    # cache holds 24 576 tokens (128 KiB per token: 32 layers x 8 KV heads x
+    # 128 x K,V x bf16), more than one full context, and leaves the encoder its
+    # peak: ~17 GiB weights + 3 KV + ~1 graphs + ~9 encoder = ~30 GiB of the
+    # ~32 GiB the card has beside the engines.
     vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384",
                 "--safetensors-load-strategy", "prefetch",
-                "--max-num-batched-tokens", "16384"]
+                "--max-num-batched-tokens", "16384",
+                "--kv-cache-memory-bytes", "3221225472"]
     # A cold start reads 16 GB from the research share (~70 MB/s), then compiles:
     # ~6 min with the weights cached, ~10 min the first time (2026-10-26).
     startup_timeout_s: 900
@@ -1111,7 +1124,7 @@ models:
     scripts: []
     centuries: []
     max_pixels: 1960000
-    vram_mb: 18000       # 17.2 GB bf16 LM + 1.2 GB fp32 vision/audio tokenizers; unmeasured
+    vram_mb: 18000       # 17.2 GB bf16 LM + 1.2 GB fp32 vision/audio tokenizers; peak ~30 GiB with a page in the encoder
     residency: lazy
     gpu_affinity: 1
 
@@ -1130,7 +1143,8 @@ models:
     vllm_venv: vllm-apertus
     vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384",
                 "--safetensors-load-strategy", "prefetch",
-                "--max-num-batched-tokens", "16384"]   # see apertus-1.5-8b
+                "--max-num-batched-tokens", "16384",
+                "--kv-cache-memory-bytes", "3221225472"]   # see apertus-1.5-8b
     startup_timeout_s: 900
     hf_repo: swiss-ai/Apertus-v1.5-8B
     description: "Apertus 1.5 8B, line by line (resolution probe; not HTR-tuned)"
