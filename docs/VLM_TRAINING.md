@@ -498,6 +498,22 @@ since. So:
 - **Before registering any VLM `level: page`, run `scripts/eval_granularity.py`**
   on held-out PageXML pages. A line CER says nothing about a page.
 
+**The rule has two directions, and the second one is quieter** (#165, measured
+in training-atr-models#60 on the same 15 pages):
+
+- **A line model given a page fails loudly.** It stops after a line (length
+  ratio 0.03 for `qwen3vl-german-xix-v2`), and anyone looking at the output
+  sees it.
+- **A page model given a line fails quietly.** It keeps writing fluent German
+  that is not on the crop: `qwen3vl-german-xix-page-v1` read lines at CER 0.435
+  with length ratio **1.26**. The failure happens on the *smaller* input, where
+  a caller is least suspicious.
+
+So a page-trained model needs more on its card than "give it a page". It
+needs the sentence that an input too small gives a plausible invention, not
+an error. Its registry entry carries that sentence in `description`, so `GET
+/models` says it too.
+
 ### What each model reads, per model
 
 Measured with `scripts/eval_granularity.py` against ground truth unless the row
@@ -509,6 +525,7 @@ reference). A row without numbers has not been measured, and says why.
 | `qwen3vl-medieval-german-v3` | line | **0.111** | 1.96 / 0.94 | **1.00** (LR 0.001) | line | 14 held-out pages, 2026-09-22 (#165) |
 | `qwen3vl-german-xix-v2` | line | **0.052** | 0.95 | **0.98** (LR 0.02) | line | 15 validation pages of its own run, 2026-09-22 (#165) |
 | `qwen3.5-4b-german-xix-v2` | line | 0.0680 (federal benchmark) | — | fragments, no ground truth | line | 27 Lassberg pages, 2026-09-21 (#159) |
+| `qwen3.5-4b-german-kurrent-xvi-xix-page-v1` | **page** | not measured: from a page model expect invention, not a stop (above) | — | **0.5405** (LR 1.011, `truncated_cer` 0.4168; 99 of 695 at the token cap) | page | 695 held-out pages of `german-medieval-v1` (test), the early edge of its range; its own Kurrent set `german-kurrent-xvi-xix-v1` is registered, the v2 retrain is measured there (training-atr-models#301, #341) |
 | `qwen3vl-german-pages-v5-asteraix` | **page** | 1.32 (LR 2.01) | **0.288** (LR 1.12) | 0.98, 0.444 over the 12 without a repetition loop | registered, disabled | 14 medieval held-out pages, 2026-09-22 (training-atr-models#56) |
 | `qwen3vl-german-xix-v1` | line | **0.0475** on its own split, 0.2551 on the federal benchmark | 0.976 | **1.24** (LR 0.37, 14 of 15 collapsed) | line | 15 validation pages of its own run, 2026-09-23 (#165) |
 | `qwen3.5-4b-german-xix-v1`, `qwen3.5-2b-german-xix-v1` | line | 0.36 / 0.29 (federal benchmark) | — | not measured | page, disabled | superseded by their v2; same two causes |

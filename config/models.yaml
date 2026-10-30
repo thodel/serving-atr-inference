@@ -13,9 +13,9 @@
 #   cache a minute into the load, too high and a launch is refused or a resident
 #   model evicted for nothing.
 #
-#   Every value below was estimated, none measured (#130). An entry that HAS been
-#   measured carries `vram_measured:` beside it, with the host and date; absence
-#   of that block means the number is somebody's guess. Measure one with
+#   Most values below are estimates (#130). An entry that HAS been measured
+#   carries `vram_measured:` beside it, with the host and date; absence of that
+#   block means the number is somebody's guess. Measure one with
 #
 #       python scripts/measure_vram.py --model <id> --write
 #
@@ -240,6 +240,11 @@ models:
   # them in September covers 15–17 and was trained on four corpora.
   - id: qwen3.5-4b-german-kurrent-xvi-xix-page-v1
     engine: vllm
+    description: >-
+      Whole pages of German Kurrent and chancery hands, 16th to 19th century,
+      trained and measured at page level. Give it a page, not a line or a small
+      crop: a page model given too little does not stop, it goes on in fluent
+      German that is not in the image (#165).
     vllm_venv: vllm-next
     max_num_seqs: 64     # hybrid model: at vLLM's 256 it does not start (see ModelSpec)
     hf_repo: dh-unibe/qwen3.5-4b-german-kurrent-xvi-xix-page-v1
