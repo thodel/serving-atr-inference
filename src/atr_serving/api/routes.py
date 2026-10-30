@@ -687,6 +687,8 @@ async def recognize(
                     # which is what makes a per-line comparison between the two
                     # a comparison at all (#205).
                     segcache=_segcache(request),
+                    lines_per_crop=spec.lines_per_crop or 1,
+                    crop_scale=spec.crop_scale or 1.0,
                 )
             )
     except EngineError as exc:

@@ -175,7 +175,8 @@ def test_vllm_args_only_for_vllm_models():
 def test_apertus_is_the_only_model_on_its_vllm():
     registry = load_registry(REPO_ROOT / "config" / "models.yaml")
     on_apertus = sorted(s.id for s in registry.all() if s.vllm_venv == "vllm-apertus")
-    assert on_apertus == ["apertus-1.5-8b", "apertus-1.5-8b-line"]
+    assert on_apertus == ["apertus-1.5-8b", "apertus-1.5-8b-line",
+                          "apertus-1.5-8b-strip4", "apertus-1.5-8b-strip4-x2"]
     spec = registry.get("apertus-1.5-8b")
     assert spec.vllm_args == ["--chat-template-content-format", "string",
                               "--max-model-len", "16384",
@@ -184,11 +185,15 @@ def test_apertus_is_the_only_model_on_its_vllm():
                               "--kv-cache-memory-bytes", "3221225472"]
 
 
+APERTUS = ("apertus-1.5-8b", "apertus-1.5-8b-line",
+           "apertus-1.5-8b-strip4", "apertus-1.5-8b-strip4-x2")
+
+
 def test_apertus_prefills_a_whole_page_in_one_chunk():
     """A page is one image of ~7 750 tokens; split across prefill chunks it
     crashed the EngineCore (2026-10-27). The chunk must hold the whole context."""
     registry = load_registry(REPO_ROOT / "config" / "models.yaml")
-    for model_id in ("apertus-1.5-8b", "apertus-1.5-8b-line"):
+    for model_id in APERTUS:
         args = registry.get(model_id).vllm_args
         batched = int(args[args.index("--max-num-batched-tokens") + 1])
         context = int(args[args.index("--max-model-len") + 1])
@@ -202,7 +207,7 @@ def test_apertus_leaves_the_vision_encoder_its_peak():
     (2026-10-28). The cache is fixed instead, and must still hold one context."""
     registry = load_registry(REPO_ROOT / "config" / "models.yaml")
     kv_bytes_per_token = 32 * 8 * 128 * 2 * 2      # layers x KV heads x dim x K,V x bf16
-    for model_id in ("apertus-1.5-8b", "apertus-1.5-8b-line"):
+    for model_id in APERTUS:
         args = registry.get(model_id).vllm_args
         kv = int(args[args.index("--kv-cache-memory-bytes") + 1])
         context = int(args[args.index("--max-model-len") + 1])

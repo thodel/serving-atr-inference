@@ -1161,6 +1161,62 @@ models:
     vram_mb: 18000
     residency: lazy
     gpu_affinity: 1
+  # Strips (training-atr-models#317): four consecutive lines of one region per
+  # crop. On the 276 GT pages (#315) the page read 31.9 % CER median and single
+  # lines 42.9 %: a line alone loses the context, and on Basel's small scans
+  # (~1300 x 1600) a line crop has no more pixels per letter than the page. A
+  # strip keeps some context; the x2 variant also gives each letter (8-12 px)
+  # one to two of the tokenizer's 16 px cells instead of less than one (#314).
+  # The pair answers which of the two matters. Same weights, own vLLM instances.
+  - id: apertus-1.5-8b-strip4
+    engine: vllm
+    vllm_venv: vllm-apertus
+    vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384",
+                "--safetensors-load-strategy", "prefetch",
+                "--max-num-batched-tokens", "16384",
+                "--kv-cache-memory-bytes", "3221225472"]   # see apertus-1.5-8b
+    startup_timeout_s: 900
+    hf_repo: swiss-ai/Apertus-v1.5-8B
+    description: "Apertus 1.5 8B, four lines per crop (resolution probe; not HTR-tuned)"
+    task: htr
+    level: line
+    lines_per_crop: 4
+    max_new_tokens: 512
+    prompt: &apertus_strip_prompt >-
+      Transcribe the handwritten text in this image of a few lines exactly as
+      written, line by line. Keep the original spelling, abbreviations and
+      punctuation. Output only the transcription.
+    languages: [de, fr, it, la]
+    scripts: []
+    centuries: []
+    max_pixels: 1960000
+    vram_mb: 18000
+    residency: lazy
+    gpu_affinity: 1
+
+  - id: apertus-1.5-8b-strip4-x2
+    engine: vllm
+    vllm_venv: vllm-apertus
+    vllm_args: ["--chat-template-content-format", "string", "--max-model-len", "16384",
+                "--safetensors-load-strategy", "prefetch",
+                "--max-num-batched-tokens", "16384",
+                "--kv-cache-memory-bytes", "3221225472"]   # see apertus-1.5-8b
+    startup_timeout_s: 900
+    hf_repo: swiss-ai/Apertus-v1.5-8B
+    description: "Apertus 1.5 8B, four lines per crop enlarged 2x (resolution probe; not HTR-tuned)"
+    task: htr
+    level: line
+    lines_per_crop: 4
+    crop_scale: 2.0
+    max_new_tokens: 512
+    prompt: *apertus_strip_prompt
+    languages: [de, fr, it, la]
+    scripts: []
+    centuries: []
+    max_pixels: 1960000
+    vram_mb: 18000
+    residency: lazy
+    gpu_affinity: 1
 
   # A generalized model for English printed text — Kiessling, 2019. Modern printed
   # English plus ~10 000 lines of historical print.
