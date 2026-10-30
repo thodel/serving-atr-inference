@@ -85,3 +85,15 @@ def test_the_strip_probe_pair_differs_only_in_scale():
     assert native.lines_per_crop == x2.lines_per_crop == 4
     assert native.crop_scale is None and x2.crop_scale == 2.0
     assert native.prompt == x2.prompt and native.vllm_args == x2.vllm_args
+
+
+def test_a_strip_stays_within_the_pixel_budget():
+    """2026-10-30: 2x strips of Aarau's ~5000 px scans crashed Apertus' engine."""
+    img = Image.new("RGB", (5000, 800), "white")
+    lines = [Line(order=i, bbox=[0, i * 200, 5000, i * 200 + 190]) for i in range(4)]
+    crop = crop_strip(img, lines, 2.0, max_pixels=1_960_000)
+    assert crop.width * crop.height <= 1_960_000
+    assert crop.width < 5000                         # shrunk, not enlarged
+    small = crop_strip(Image.new("RGB", (400, 200)), [Line(order=0, bbox=[0, 0, 400, 100])],
+                       2.0, max_pixels=1_960_000)
+    assert small.size == (800, 200)                  # a small strip still gets its 2x

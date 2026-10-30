@@ -689,6 +689,7 @@ async def recognize(
                     segcache=_segcache(request),
                     lines_per_crop=spec.lines_per_crop or 1,
                     crop_scale=spec.crop_scale or 1.0,
+                    max_pixels=visual_budget(spec, _settings(request)),
                 )
             )
     except EngineError as exc:
