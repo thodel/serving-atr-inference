@@ -126,9 +126,12 @@ def generation_budget(spec, settings) -> int:
     transcription, it produces an error at generation time, which is a worse
     failure than the truncation this is fixing.
     """
+    # A strip is k lines in one call (#186, training-atr-models#317): the line
+    # default is per line, so a strip without its own figure gets k of them, or
+    # its readings stop after the first lines and still return 200.
     wanted = spec.max_new_tokens or (
         settings.vllm_max_new_tokens_page if spec.level == "page"
-        else settings.vllm_max_new_tokens
+        else settings.vllm_max_new_tokens * max(1, getattr(spec, "lines_per_crop", None) or 1)
     )
     limit = settings.vllm_max_model_len
     if not limit:
@@ -367,6 +370,7 @@ async def recognize_lines(
     # Crop first, synchronously: cropping is CPU-bound and shares one PIL image, so
     # there is nothing to overlap, and doing it up front keeps the index stable.
     crops: list[tuple[int, object, bytes]] = []
+    members_of: list[int] = []          # segmented lines per strip, in crop order
     if lines_per_crop > 1:
         for group in strips(order_lines(seg), seg.lines, lines_per_crop):
             members = [seg.lines[i] for i in group]
@@ -376,6 +380,7 @@ async def recognize_lines(
                 strip = Line(order=0, bbox=list(box) if box else None, text="",
                              regions=[str(r) for r in (getattr(members[0], "regions", None) or [])])
                 crops.append((len(crops), strip, _png_bytes(crop)))
+                members_of.append(len(members))
     else:
         for position in order_lines(seg):
             ln = seg.lines[position]
@@ -403,8 +408,20 @@ async def recognize_lines(
                               text=txt,
                               regions=[str(r) for r in (getattr(ln, "regions", None) or [])]))
         texts.append(txt)
+    strip_report = None
+    if lines_per_crop > 1:
+        # How many lines each strip came back with, against how many were in it
+        # (#186). A strip stays one Line with the union box, so a k±1 answer
+        # puts no text on a wrong line box; it is counted, because k±1 is also
+        # what a model that skipped or invented a line looks like.
+        parts = [len([t for t in txt.splitlines() if t.strip()])
+                 for _i, _ln, txt in sorted(done, key=lambda r: r[0])]
+        off = [i for i, (n, k) in enumerate(zip(parts, members_of)) if n != k]
+        strip_report = {"lines_per_crop": lines_per_crop, "count": len(parts),
+                        "lines": members_of, "parts": parts, "mismatched": off}
     return RecognitionResult(
         model=model_id, engine=engine, text="\n".join(texts), lines=out_lines,
         timing_ms=int((time.perf_counter() - t0) * 1000),
         segmented_by=seg.segmented_by, segmentation_id=seg_id, version=__version__,
+        strips=strip_report,
     )
