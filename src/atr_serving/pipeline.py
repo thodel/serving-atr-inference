@@ -77,19 +77,27 @@ def crop_box(img: Image.Image, lines: list[Line]) -> tuple[int, int, int, int] |
             max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
-def crop_strip(img: Image.Image, lines: list[Line], scale: float = 1.0) -> Image.Image | None:
-    """The box around several lines, enlarged ``scale`` times.
+def crop_strip(img: Image.Image, lines: list[Line], scale: float = 1.0,
+               max_pixels: int | None = None) -> Image.Image | None:
+    """The box around several lines, enlarged ``scale`` times, within ``max_pixels``.
 
     Enlarging adds no information, and that is not what it is for. A model that
     sees an image as one discrete code per 16 x 16 pixels (Apertus 1.5) cannot
     represent a letter smaller than a cell, whatever the language model behind
     it knows; at 2x a letter of 8-12 px spans one to two cells instead of less
     than one (training-atr-models#314, #317).
+
+    ``max_pixels`` caps the result, enlargement included. Four lines of a large
+    scan are already most of a model's budget: on 2026-10-30 a 2x strip of an
+    Aarau page (scans ~5000 px wide) took Apertus' EngineCore down, page after
+    page, while Basel's small scans read fine.
     """
     box = crop_box(img, lines)
     if box is None:
         return None
     crop = img.crop(box)
+    if max_pixels:
+        scale = min(scale, (max_pixels / (crop.width * crop.height)) ** 0.5)
     if scale != 1.0:
         crop = crop.resize((max(1, round(crop.width * scale)), max(1, round(crop.height * scale))),
                            Image.Resampling.BICUBIC)
@@ -313,6 +321,7 @@ async def recognize_lines(
     segcache=None,
     lines_per_crop: int = 1,
     crop_scale: float = 1.0,
+    max_pixels: int | None = None,
 ) -> RecognitionResult:
     """Engine-agnostic line pipeline: segment -> crop each line -> recognize ->
     assemble. ``recognize_line`` runs one line image through whichever backend
@@ -339,7 +348,7 @@ async def recognize_lines(
 
     ``lines_per_crop`` above 1 reads **strips** instead of lines: that many
     consecutive lines of one region in one crop, enlarged ``crop_scale`` times
-    (see :func:`crop_strip`). Each strip comes back as one ``Line`` with the box
+    (see :func:`crop_strip`) and kept within ``max_pixels``. Each strip comes back as one ``Line`` with the box
     around its lines and the model's text for all of them.
     """
     t0 = time.perf_counter()
@@ -361,7 +370,7 @@ async def recognize_lines(
     if lines_per_crop > 1:
         for group in strips(order_lines(seg), seg.lines, lines_per_crop):
             members = [seg.lines[i] for i in group]
-            crop = crop_strip(pil, members, crop_scale)
+            crop = crop_strip(pil, members, crop_scale, max_pixels)
             if crop is not None:
                 box = crop_box(pil, members)
                 strip = Line(order=0, bbox=list(box) if box else None, text="",
