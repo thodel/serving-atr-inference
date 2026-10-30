@@ -52,6 +52,50 @@ def crop_line(img: Image.Image, ln: Line) -> Image.Image | None:
     return img.crop(box) if box else None
 
 
+def strips(order: list[int], lines, size: int) -> list[list[int]]:
+    """Consecutive lines in reading order, ``size`` at a time, never across a
+    region: a strip that ran from the end of a margin note into the body text
+    would hand the model two texts glued together and ask for one."""
+    groups: list[list[int]] = []
+    for position in order:
+        regions = tuple(getattr(lines[position], "regions", None) or ())
+        last = groups[-1] if groups else None
+        if (last and len(last) < size
+                and tuple(getattr(lines[last[-1]], "regions", None) or ()) == regions):
+            last.append(position)
+        else:
+            groups.append([position])
+    return groups
+
+
+def crop_box(img: Image.Image, lines: list[Line]) -> tuple[int, int, int, int] | None:
+    """The pixel box around all of ``lines``, or None when none has geometry."""
+    boxes = [b for b in (_bbox_from_line(ln, *img.size) for ln in lines) if b]
+    if not boxes:
+        return None
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def crop_strip(img: Image.Image, lines: list[Line], scale: float = 1.0) -> Image.Image | None:
+    """The box around several lines, enlarged ``scale`` times.
+
+    Enlarging adds no information, and that is not what it is for. A model that
+    sees an image as one discrete code per 16 x 16 pixels (Apertus 1.5) cannot
+    represent a letter smaller than a cell, whatever the language model behind
+    it knows; at 2x a letter of 8-12 px spans one to two cells instead of less
+    than one (training-atr-models#314, #317).
+    """
+    box = crop_box(img, lines)
+    if box is None:
+        return None
+    crop = img.crop(box)
+    if scale != 1.0:
+        crop = crop.resize((max(1, round(crop.width * scale)), max(1, round(crop.height * scale))),
+                           Image.Resampling.BICUBIC)
+    return crop
+
+
 def _png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -267,6 +311,8 @@ async def recognize_lines(
     image, filename, content_type, model_id, engine, segmenter, recognize_line: RecognizeLine,
     concurrency: int = 1,
     segcache=None,
+    lines_per_crop: int = 1,
+    crop_scale: float = 1.0,
 ) -> RecognitionResult:
     """Engine-agnostic line pipeline: segment -> crop each line -> recognize ->
     assemble. ``recognize_line`` runs one line image through whichever backend
@@ -290,6 +336,11 @@ async def recognize_lines(
     for several readings of it. Nothing about a segmentation depends on which
     model will read the lines. Passing ``None`` segments every time, which is
     what the tests of this function's own behaviour do.
+
+    ``lines_per_crop`` above 1 reads **strips** instead of lines: that many
+    consecutive lines of one region in one crop, enlarged ``crop_scale`` times
+    (see :func:`crop_strip`). Each strip comes back as one ``Line`` with the box
+    around its lines and the model's text for all of them.
     """
     t0 = time.perf_counter()
     if segcache is None:
@@ -307,11 +358,21 @@ async def recognize_lines(
     # Crop first, synchronously: cropping is CPU-bound and shares one PIL image, so
     # there is nothing to overlap, and doing it up front keeps the index stable.
     crops: list[tuple[int, object, bytes]] = []
-    for position in order_lines(seg):
-        ln = seg.lines[position]
-        crop = crop_line(pil, ln)
-        if crop is not None:
-            crops.append((len(crops), ln, _png_bytes(crop)))
+    if lines_per_crop > 1:
+        for group in strips(order_lines(seg), seg.lines, lines_per_crop):
+            members = [seg.lines[i] for i in group]
+            crop = crop_strip(pil, members, crop_scale)
+            if crop is not None:
+                box = crop_box(pil, members)
+                strip = Line(order=0, bbox=list(box) if box else None, text="",
+                             regions=[str(r) for r in (getattr(members[0], "regions", None) or [])])
+                crops.append((len(crops), strip, _png_bytes(crop)))
+    else:
+        for position in order_lines(seg):
+            ln = seg.lines[position]
+            crop = crop_line(pil, ln)
+            if crop is not None:
+                crops.append((len(crops), ln, _png_bytes(crop)))
 
     sem = asyncio.Semaphore(max(1, int(concurrency)))
 

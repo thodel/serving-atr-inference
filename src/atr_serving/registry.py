@@ -123,6 +123,15 @@ class ModelSpec(BaseModel):
     #: ``max_new_tokens`` is: the budget belongs to the fine-tune, and serving at
     #: a different one is a silent distribution shift, not an error.
     max_pixels: int | None = None
+    #: Line-level only: read this many consecutive lines of a region as one
+    #: strip instead of one line at a time. None = one line per crop. A line on
+    #: its own leaves a page model without context; a whole page leaves a letter
+    #: too few pixels (training-atr-models#315, #317).
+    lines_per_crop: int | None = Field(default=None, ge=2)
+    #: Line-level only: enlarge every crop this many times before it is sent.
+    #: None = native pixels. See ``pipeline.crop_strip`` for why a model that
+    #: reads 16 px cells is helped by pixels that add no information.
+    crop_scale: float | None = Field(default=None, gt=1.0, le=4.0)
     residency: Literal["pinned", "lazy"] = "lazy"
     gpu_affinity: int | None = None
     prompt: str | None = None  # optional VLM instruction; None = image-only (e.g. LightOnOCR)
@@ -181,6 +190,15 @@ class ModelSpec(BaseModel):
             raise ValueError(
                 f"model '{self.id}': needs one of hf_repo, zenodo_id or local_path"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_strips(self) -> ModelSpec:
+        for field in ("lines_per_crop", "crop_scale"):
+            if getattr(self, field) is not None and self.level != "line":
+                raise ValueError(f"model '{self.id}': {field} is only meaningful at level line")
+            if getattr(self, field) is not None and self.engine != "vllm":
+                raise ValueError(f"model '{self.id}': {field} is only served for engine vllm")
         return self
 
     @model_validator(mode="after")
