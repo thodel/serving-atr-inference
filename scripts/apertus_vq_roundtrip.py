@@ -20,12 +20,15 @@ PSNR, code agreement and — with ``--htr`` — the CER of an HTR model's readin
 the reconstruction against its reading of the original (and against the ground
 truth, when ``<page>.gt.txt`` lies next to the image). Runs on the CPU by default,
 so it leaves the serving card alone; a 2 MP page takes a minute or two.
+
+With ``--htr`` the gateway is asked first (``ATR_API_KEY``, and whether it serves
+the model), before the tokenizer loads. A reading that fails marks that page and
+the run goes on; the report is rewritten after every page (scripts/_vq_gateway.py).
 """
 
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import math
 import os
@@ -38,6 +41,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _emu35_vq import Emu35VQ  # noqa: E402
+from _vq_gateway import check_gateway, read_page, write_report  # noqa: E402
 
 APERTUS = "swiss-ai/Apertus-v1.5-8B"
 APERTUS_VQ_FILE = "model-vision_tokenizer-model.safetensors"
@@ -205,17 +209,6 @@ def cer(ref: str, hyp: str) -> float | None:
     return None if not ref else levenshtein(ref, hyp) / len(ref)
 
 
-def read_with(gateway: str, key: str | None, model: str, img: Image.Image) -> str:
-    import httpx
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    r = httpx.post(f"{gateway}/recognize", data={"model": model},
-                   files={"image": ("page.png", buf.getvalue(), "image/png")},
-                   headers={"X-API-Key": key} if key else {}, timeout=1200)
-    r.raise_for_status()
-    return r.json()["text"]
-
-
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -236,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--api-key", default=os.environ.get("ATR_API_KEY"))
     args = ap.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.htr and (problem := check_gateway(args.gateway, args.api_key, args.htr)):
+        raise SystemExit(f"not starting: {problem}")
     torch.set_grad_enabled(False)
 
     print("loading EMU3.5 vision tokenizer (encoder + decoder) ...", file=sys.stderr)
@@ -280,45 +275,30 @@ def main(argv: list[str] | None = None) -> int:
         gt = gt_file.read_text(encoding="utf-8") if gt_file.exists() else None
         if args.htr:
             print(f"{path.name}: reading both with {args.htr} ...", file=sys.stderr)
-            r_orig = read_with(args.gateway, args.api_key, args.htr, seen)
-            r_back = read_with(args.gateway, args.api_key, args.htr, back)
-            (args.out / f"{stem}.read_seen.txt").write_text(r_orig, encoding="utf-8")
-            (args.out / f"{stem}.read_recon.txt").write_text(r_back, encoding="utf-8")
-            page["cer_recon_vs_seen_reading"] = round(cer(r_orig, r_back) or 0.0, 4)
-            if gt:
-                page["cer_seen_vs_gt"] = round(cer(gt, r_orig), 4)
-                page["cer_recon_vs_gt"] = round(cer(gt, r_back), 4)
+            r_orig, r_back, error = read_page(args.gateway, args.api_key, args.htr, seen, back)
+            if r_orig is not None:
+                (args.out / f"{stem}.read_seen.txt").write_text(r_orig, encoding="utf-8")
+            if r_back is not None:
+                (args.out / f"{stem}.read_recon.txt").write_text(r_back, encoding="utf-8")
+            if error:
+                page["read_error"] = error
+                print(f"{path.name}: {error}; going on with the next page", file=sys.stderr)
+            else:
+                page["cer_recon_vs_seen_reading"] = round(cer(r_orig, r_back) or 0.0, 4)
+                if gt:
+                    page["cer_seen_vs_gt"] = round(cer(gt, r_orig), 4)
+                    page["cer_recon_vs_gt"] = round(cer(gt, r_back), 4)
         page["seconds"] = round(time.monotonic() - t0, 1)
         report["pages"].append(page)
         print(json.dumps(page, ensure_ascii=False), file=sys.stderr)
+        write_report(args.out, report, tile=args.tile, total=len(args.images))
 
-    (args.out / "results.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
-    lines = ["# Apertus 1.5 vision tokenizer: round trip on handwriting", ""]
-    w = report["weights"]
-    if w is None:
-        lines += ["Apertus' own weights were **not** compared (`--no-apertus`): the codes are "
-                  "EMU3.5's, which equal Apertus' only if its encoder is unchanged.", ""]
-    else:
-        same = w["identical"] == w["tensors"] == w["matched"]
-        lines += [f"**Weights:** {w['identical']} of {w['tensors']} encoder/codebook tensors "
-                  f"identical (max |diff| {w['max_abs_diff']:.3g}). "
-                  + ("The EMU3.5 decoder shows exactly what Apertus sees."
-                     if same else "**Not identical**: read the reconstructions with care."), ""]
-    if args.tile:
-        lines += [f"Encoded in bands of {args.tile} px (`--tile`): letter sizes are Apertus' own, "
-                  "but the tokenizer's attention saw one band at a time, so the codes "
-                  "approximate the full-page ones.", ""]
-    lines += ["| page | seen | tokens | PSNR dB | codes = EMU | CER recon vs seen reading "
-              "| CER seen vs GT | CER recon vs GT |", "|---|---|---|---|---|---|---|---|"]
-    for p in report["pages"]:
-        lines.append(f"| {p['page']} | {p['seen_size'][0]}×{p['seen_size'][1]} | {p['tokens']} "
-                     f"| {p['psnr_db']} | {p['code_agreement_apertus_vs_emu']} "
-                     f"| {p.get('cer_recon_vs_seen_reading', '–')} | {p.get('cer_seen_vs_gt', '–')} "
-                     f"| {p.get('cer_recon_vs_gt', '–')} |")
-    lines += ["", "Look at `*.crops.png` first: original left, reconstruction right, 1:1."]
-    (args.out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"\nwrote {args.out}/report.md", file=sys.stderr)
-    return 0
+    failed = sum(1 for p in report["pages"] if p.get("read_error"))
+    if failed:
+        print(f"reading failed on {failed} of {len(report['pages'])} page(s): see report.md",
+              file=sys.stderr)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
