@@ -161,6 +161,13 @@ class Settings(BaseSettings):
     # idhefix: GPU 1 only (GPU 0 is the shared RAG GPU); one 8B resident at a time.
     vllm_python: Path = REPO_ROOT / ".venvs" / "vllm" / "bin" / "vllm"
     vllm_gpu: int = 1
+    #: The card the atr-* engine units run on (deploy/systemd sets
+    #: CUDA_VISIBLE_DEVICES=1 for kraken, trocr and party). Read only to say
+    #: which card's energy a model's calls draw (#240).
+    engine_gpu: int = 1
+    #: Seconds between two power readings of the meter behind GET /gpu/energy
+    #: (#240); 0 switches the meter off.
+    power_sample_s: float = 2.0
     vllm_port_base: int = 8210
     # Budget for resident vLLM models on vllm_gpu, in registry vram_mb; a launch
     # beyond it evicts the least recently used lazy model. Unset (the default),

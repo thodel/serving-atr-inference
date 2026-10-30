@@ -418,6 +418,7 @@ own 30 s, or the bot times out first and blames this box.
 
 - `GET /train/gpu` — the trainer's cards, always its own reading (a trainer without `/gpu` is a `502`).
 - `GET /gpu` — this box's cards: the engines, the gateway's vLLM children and the vLLM budget (#139).
+- `GET /gpu/energy[?model=…]` — the power meter: watt-hours per card since the gateway started, from `power.draw` every 2 s (`ATR_POWER_SAMPLE_S`, 0 = off), the unwatched seconds, calls per model and foreign processes seen. A batch reads it before and after a model and subtracts; with `model`, it also names that model's card (#240).
 
 | Endpoint | Returns | Use |
 |---|---|---|

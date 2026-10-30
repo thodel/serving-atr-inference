@@ -88,6 +88,13 @@ def _engine_client(request: Request, engine: str):
     return get_engine_client(engine, _settings(request))
 
 
+def _count(request: Request, model: str) -> None:
+    """One call for *model* on the power meter (#240); nothing when it is off."""
+    meter = getattr(request.app.state, "power", None)
+    if meter is not None:
+        meter.count(model)
+
+
 def _segcache(request: Request):
     """The process's segmentation cache, or ``None`` when sharing is off.
 
@@ -366,6 +373,34 @@ async def gpu(request: Request) -> dict:
             detail=f"nvidia-smi failed: {type(exc).__name__}: {exc}") from exc
 
 
+@router.get("/gpu/energy", tags=["meta"], dependencies=[Depends(require_api_key)])
+async def gpu_energy(request: Request, model: str | None = None) -> dict:
+    """The power meter's counters: watt-hours per card since the gateway started (#240).
+
+    A meter, not a report: read it before and after a batch and subtract. With
+    ``model``, the answer also says which card that model's calls draw on, so
+    the caller knows which counter is its own. The counters say how much of
+    the window was watched (``measured_s``/``gap_s``) and what else used the
+    card (``requests`` per model, ``foreign_seen``); calling the difference
+    *shared* or not is the caller's job, from those.
+    """
+    meter = getattr(request.app.state, "power", None)
+    if meter is None:
+        raise HTTPException(status_code=503, detail="the power meter is off (power_sample_s = 0)")
+    out = meter.snapshot()
+    if model is not None:
+        settings = _settings(request)
+        spec = _registry(request).get(model)
+        if spec is None:
+            raise HTTPException(status_code=404, detail=f"unknown model {model!r}")
+        if spec.gpu_affinity is not None:
+            card = spec.gpu_affinity
+        else:
+            card = settings.vllm_gpu if spec.engine == "vllm" else settings.engine_gpu
+        out["model"] = {"id": model, "engine": spec.engine, "card": card}
+    return out
+
+
 # ── recognition endpoints ───────────────────────────────────────────────────
 def _resolve_spec(request: Request, model: str) -> tuple[str, ModelSpec | None]:
     """Return (engine, spec). Unknown models default to the kraken engine (the
@@ -465,6 +500,7 @@ async def segment(
     mode: str = Form("baseline"),
     seg_mode: str | None = Form(None),  # legacy alias used by KrakenHTTPClient
 ) -> SegmentResponse:
+    _count(request, f"segment:{seg_mode or mode}")
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
@@ -607,6 +643,7 @@ async def recognize(
     lines: str | None = Form(None),
 ) -> RecognitionResult:
     engine, spec = _resolve_spec_strict(request, model)   # 404 on an unrunnable id (#21)
+    _count(request, model)
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
@@ -736,6 +773,7 @@ async def ocr(
     page genuinely had no detected lines.
     """
     engine, spec = _resolve_spec_strict(request, model)   # 404 on an unrunnable id (#21)
+    _count(request, model)
     raw = await image.read()
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
@@ -786,6 +824,7 @@ async def chat_completions(request: Request) -> dict:
     engine, spec = _resolve_spec(request, model)
     if engine != "vllm" or spec is None:
         raise HTTPException(status_code=400, detail=f"'{model}' is not a vLLM model")
+    _count(request, model)
     port = await _ensure_vllm_port(request, model)
     try:
         return await _vllm_client(request, port).chat(body)
