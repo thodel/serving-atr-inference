@@ -47,6 +47,7 @@ from atr_serving.pipeline import (
 from atr_serving.registry import ModelSpec, Registry
 from atr_serving.segcache import segmentation_id
 from atr_serving.seam import PROMOTION_GATE_HEADER
+from atr_serving import discoveries
 from atr_serving import units
 from atr_serving.engine_activity import EngineActivity, Tracked
 
@@ -426,6 +427,66 @@ async def load_engine(name: str, request: Request) -> EngineResidencyResponse:
         engine=name, unit=unit, action="load", ok=True, reachable=reachable,
         detail="" if reachable else
         f"{unit} was started; {name} did not answer /health within {RESTART_VERIFY_S:.0f}s")
+
+
+# ── model discovery (#116) ──────────────────────────────────────────────────
+
+#: The fields of a list row. The detail, under /discoveries/{key}, is the whole
+#: entry; the list stays a summary so 200+ candidates are a few dozen KB, not the
+#: 807 KB /train/jobs once was (#107).
+DISCOVERY_SUMMARY = ("key", "source", "id", "verdict", "backend", "first_seen",
+                     "last_seen", "at")
+
+
+def _catalogue(request: Request) -> dict:
+    try:
+        return discoveries.load(_settings(request).discoveries_path)
+    except discoveries.CatalogueError as exc:
+        raise HTTPException(status_code=503, detail=f"the discovery catalogue is unreadable: {exc}")
+
+
+def _entry_dict(entry) -> dict:
+    out = {k: v for k, v in vars(entry).items() if v is not None}
+    out["key"] = entry.key
+    return out
+
+
+@router.get("/discoveries", tags=["meta"], dependencies=[Depends(require_api_key)])
+async def list_discoveries(request: Request, verdict: str | None = None,
+                           backend: str | None = None, source: str | None = None,
+                           since: str | None = None) -> dict:
+    """The model candidates the weekly discovery found, and what was decided (#116).
+
+    Read-only. Summary rows; the full entry is under ``/discoveries/{key}``.
+    ``since`` (ISO date or time) keeps a candidate first seen, last seen or
+    decided at or after it, so "3 new since Monday" needs no full fetch.
+    Served from this checkout's catalogue: as fresh as its last ``git pull``.
+    """
+    if verdict is not None and verdict not in discoveries.VERDICTS:
+        raise HTTPException(status_code=422, detail=f"verdict must be one of {discoveries.VERDICTS}")
+    entries = list((await run_in_threadpool(_catalogue, request)).values())
+    if verdict:
+        entries = [e for e in entries if e.verdict == verdict]
+    if backend:
+        entries = [e for e in entries if e.backend == backend]
+    if source:
+        entries = [e for e in entries if e.source == source]
+    if since:
+        entries = [e for e in entries
+                   if any(str(t) >= since for t in (e.first_seen, e.last_seen, e.at) if t)]
+    rows = [{k: v for k, v in _entry_dict(e).items() if k in DISCOVERY_SUMMARY}
+            for e in sorted(entries, key=lambda e: e.key)]
+    counts = {v: sum(1 for e in entries if e.verdict == v) for v in discoveries.VERDICTS}
+    return {"count": len(rows), "counts": counts, "candidates": rows}
+
+
+@router.get("/discoveries/{key:path}", tags=["meta"], dependencies=[Depends(require_api_key)])
+async def get_discovery(key: str, request: Request) -> dict:
+    """One candidate in full, by its key (``hf:OWNER/MODEL``, ``zenodo:ID``)."""
+    entry = (await run_in_threadpool(_catalogue, request)).get(key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"no candidate {key!r} in the catalogue")
+    return _entry_dict(entry)
 
 
 @router.get(

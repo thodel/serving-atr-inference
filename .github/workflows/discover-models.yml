@@ -13,7 +13,9 @@ on:
         type: boolean
 
 permissions:
-  issues: write  # needed to create/update the rolling report issue
+  issues: write         # the rolling report issue
+  contents: write       # push the catalogue branch (#116)
+  pull-requests: write  # propose the catalogue as a PR (#116)
 
 jobs:
   discover:
@@ -44,11 +46,25 @@ jobs:
           # run never did. Optional: without the secret the script still runs,
           # bounded, and reports what it could not reach (#58).
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        # Not --dry-run: that only prints, so the report files the next step
+        # reads were never written and config/discovered.yaml never changed —
+        # it stayed `candidates: []` while #66 listed 206 (#116).
         run: >
           python scripts/discover_models.py
-          --dry-run
           --out discovery_report.json
           --md discovery_report.md
+
+      # The catalogue is proposed, not committed: a verdict is recorded by hand
+      # in that file, and a weekly run must not land on main without review.
+      # One rolling branch and one open PR, updated in place. A PR opened with
+      # GITHUB_TOKEN starts no other workflow, so its CI is run by hand or by
+      # the next push to it; the repository must allow Actions to create PRs
+      # (Settings → Actions → General).
+      - name: Propose the catalogue as a PR
+        if: inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/propose_catalogue.py
 
       - name: Update GitHub issue
         if: inputs.dry_run != 'true'
