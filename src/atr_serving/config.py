@@ -168,6 +168,9 @@ class Settings(BaseSettings):
     #: Seconds between two power readings of the meter behind GET /gpu/energy
     #: (#240); 0 switches the meter off.
     power_sample_s: float = 2.0
+    #: An engine this gateway has not called for this long may be unloaded by
+    #: POST /engines/{name}/unload (#178); a younger last call is refused 409.
+    engine_unload_idle_s: float = 300.0
     vllm_port_base: int = 8210
     # Budget for resident vLLM models on vllm_gpu, in registry vram_mb; a launch
     # beyond it evicts the least recently used lazy model. Unset (the default),

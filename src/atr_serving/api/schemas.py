@@ -67,6 +67,44 @@ class EngineRestartResponse(BaseModel):
     reachable: bool | None = None
     detail: str = ""
 
+class EngineInfo(BaseModel):
+    """One recognition engine's residency (#178).
+
+    ``vram_mb`` is what the engine's unit holds on the cards now, from the GPU
+    process list; None when nvidia-smi cannot say. ``idle_s`` counts from the
+    end of the last call this gateway made to it, or from the gateway's start.
+    ``evictable`` is what ``unload`` would accept right now.
+    """
+
+    name: str
+    unit: str
+    resident: bool | None = None
+    vram_mb: int | None = None
+    busy: bool = False
+    idle_s: float
+    evictable: bool
+    reason: str = ""
+
+
+class EnginesResponse(BaseModel):
+    engines: list[EngineInfo]
+    unload_idle_s: float
+
+
+class EngineResidencyResponse(BaseModel):
+    """What ``unload``/``load`` did: ``systemctl``'s word, and the card's."""
+
+    engine: str
+    unit: str
+    action: str
+    ok: bool
+    vram_before_mb: int | None = None
+    vram_after_mb: int | None = None
+    freed_mb: int | None = None
+    reachable: bool | None = None
+    detail: str = ""
+
+
 # ── /models ───────────────────────────────────────────────────────────────
 class ModelInfo(ModelSpec):
     """Registry spec plus runtime state."""
