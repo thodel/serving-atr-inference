@@ -97,3 +97,43 @@ def test_a_strip_stays_within_the_pixel_budget():
     small = crop_strip(Image.new("RGB", (400, 200)), [Line(order=0, bbox=[0, 0, 400, 100])],
                        2.0, max_pixels=1_960_000)
     assert small.size == (800, 200)                  # a small strip still gets its 2x
+
+
+def _strip_run(answers, n_lines=6, k=4):
+    img = Image.new("RGB", (200, 200), "white")
+    replies = iter(answers)
+
+    class Seg:
+        async def segment(self, *a, **k):
+            return SimpleNamespace(lines=[_line(i) for i in range(n_lines)], segmented_by="stub")
+
+    async def read(png, ct):
+        return next(replies)
+
+    return asyncio.run(recognize_lines(encode_png(img), "p.png", "image/png", "m", "vllm",
+                                       Seg(), read, lines_per_crop=k))
+
+
+def test_a_strip_that_comes_back_one_line_short_or_long_is_counted():
+    """#186: k±1 is what a skipped or invented line looks like. One Line per strip
+    keeps the text off the wrong box; the count says it happened."""
+    res = _strip_run(["a\nb\nc", "e\nf\ng"])         # 4 lines in, 3 out; 2 lines in, 3 out
+    assert res.strips == {"lines_per_crop": 4, "count": 2, "lines": [4, 2],
+                          "parts": [3, 3], "mismatched": [0, 1]}
+    exact = _strip_run(["a\nb\n\nc\nd", "e\nf"])     # blank lines are not parts
+    assert exact.strips["parts"] == [4, 2] and exact.strips["mismatched"] == []
+
+
+def test_a_line_reading_carries_no_strip_report():
+    res = _strip_run(["a"] * 6, k=1)
+    assert res.strips is None
+
+
+def test_a_strip_gets_k_line_budgets_unless_it_names_its_own():
+    from atr_serving.config import Settings
+    from atr_serving.pipeline import generation_budget
+    base = {"id": "s", "engine": "vllm", "hf_repo": "x/y", "level": "line"}
+    assert generation_budget(ModelSpec(**base), Settings()) == 512
+    assert generation_budget(ModelSpec(**base, lines_per_crop=4), Settings()) == 2048
+    assert generation_budget(ModelSpec(**base, lines_per_crop=4, max_new_tokens=600),
+                             Settings()) == 600

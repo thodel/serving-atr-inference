@@ -18,6 +18,7 @@ from atr_serving.config import (
     is_loopback_url,
 )
 from atr_serving.manager import ModelManager
+from atr_serving.power import PowerMeter
 from atr_serving.registry import Registry, load_registry
 from atr_serving.segcache import SegmentationCache
 from atr_serving.shared_registry import RegistryWatch
@@ -104,10 +105,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _check_auth_hardening(settings)
 
     manager = ModelManager(registry, settings)
+    # Passive: one nvidia-smi query every two seconds, no load (#240). Started
+    # with the server, not here, so building an app for a test reads no card.
+    meter = PowerMeter(interval_s=settings.power_sample_s) if settings.power_sample_s > 0 else None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):  # pragma: no cover - lifecycle hook
+        if meter is not None:
+            meter.start()
         yield
+        if meter is not None:
+            meter.stop()
         manager.shutdown()
 
     app = FastAPI(
@@ -119,6 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.registry = registry
     app.state.model_manager = manager
+    app.state.power = meter
     app.state.registry_watch = watch
     # One segmentation per page rather than one per line-level engine (#205).
     # Per process, because that is the scope in which one page's recognitions

@@ -101,6 +101,10 @@ class RecognitionResult(BaseModel):
     #: response to the wrong diagnosis (a better prompt, a different model) does
     #: not help. Raising the ceiling does.
     truncated: bool = False
+    #: Only for a model read in strips (``lines_per_crop`` > 1, #186): per strip,
+    #: the segmented lines in it and the lines its reading came back with, and
+    #: the strips where the two differ. None for every other reading.
+    strips: dict | None = None
     #: Party runs on every image (config/models.yaml), so every result can carry
     #: its reading alongside the requested engine's. None when the second opinion
     #: is switched off, or when party *is* the requested engine.
