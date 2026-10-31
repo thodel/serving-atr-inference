@@ -134,3 +134,26 @@ def restart_unit(unit: str) -> RestartResult:
     if reset_code != 0 and reset_out:
         detail += f" (reset-failed exited {reset_code}: {reset_out})"
     return RestartResult(ok=False, detail=detail, calls=tuple(calls))
+
+
+def stop_unit(unit: str) -> RestartResult:
+    """``systemctl --user stop <unit>`` (#178). ``ok`` is the exit status only."""
+    code, out = run_systemctl("stop", unit)
+    return RestartResult(ok=code == 0, detail=out if code else "", calls=(("stop", unit),))
+
+
+def start_unit(unit: str) -> RestartResult:
+    """``systemctl --user start <unit>`` (#178). Whether it answers is the route's probe."""
+    code, out = run_systemctl("start", unit)
+    return RestartResult(ok=code == 0, detail=out if code else "", calls=(("start", unit),))
+
+
+def is_active(unit: str) -> bool | None:
+    """Whether the unit is running; None when ``systemctl`` cannot say."""
+    code, out = run_systemctl("is-active", unit)
+    state = out.strip().splitlines()[-1] if out.strip() else ""
+    if state in ("active", "activating", "reloading"):
+        return True
+    if state in ("inactive", "failed", "deactivating"):
+        return False
+    return None

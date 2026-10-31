@@ -19,6 +19,7 @@ from atr_serving.config import (
 )
 from atr_serving.manager import ModelManager
 from atr_serving.power import PowerMeter
+from atr_serving.engine_activity import EngineActivity
 from atr_serving.registry import Registry, load_registry
 from atr_serving.segcache import SegmentationCache
 from atr_serving.shared_registry import RegistryWatch
@@ -128,6 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.registry = registry
     app.state.model_manager = manager
     app.state.power = meter
+    app.state.engine_activity = EngineActivity()
     app.state.registry_watch = watch
     # One segmentation per page rather than one per line-level engine (#205).
     # Per process, because that is the scope in which one page's recognitions

@@ -418,6 +418,7 @@ own 30 s, or the bot times out first and blames this box.
 
 - `GET /train/gpu` — the trainer's cards, always its own reading (a trainer without `/gpu` is a `502`).
 - `GET /gpu` — this box's cards: the engines, the gateway's vLLM children and the vLLM budget (#139).
+- `GET /engines`, `POST /engines/{name}/unload|load` — engine residency (#178): which `atr-*` unit runs and what it holds on the cards; `unload` stops an engine only when this gateway has no call to it in flight, its last call ended at least `ATR_ENGINE_UNLOAD_IDLE_S` (300 s) ago and its own `/health` is not busy, else `409`; logged with the peer and the MiB freed.
 - `GET /gpu/energy[?model=…]` — the power meter: watt-hours per card since the gateway started, from `power.draw` every 2 s (`ATR_POWER_SAMPLE_S`, 0 = off), the unwatched seconds, calls per model and foreign processes seen. A batch reads it before and after a model and subtracts; with `model`, it also names that model's card (#240).
 
 | Endpoint | Returns | Use |

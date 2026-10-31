@@ -23,7 +23,10 @@ from atr_serving import __version__
 from atr_serving import gpu as gpu_probe
 from atr_serving.api.auth import require_api_key
 from atr_serving.api.schemas import (
+    EngineInfo,
+    EngineResidencyResponse,
     EngineRestartResponse,
+    EnginesResponse,
     EngineStatus,
     HealthResponse,
     Line,
@@ -45,6 +48,7 @@ from atr_serving.registry import ModelSpec, Registry
 from atr_serving.segcache import segmentation_id
 from atr_serving.seam import PROMOTION_GATE_HEADER
 from atr_serving import units
+from atr_serving.engine_activity import EngineActivity, Tracked
 
 router = APIRouter()
 
@@ -63,10 +67,22 @@ def _settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
+def _activity(request: Request) -> EngineActivity:
+    activity = getattr(request.app.state, "engine_activity", None)
+    if activity is None:                     # an app built without one (tests)
+        activity = request.app.state.engine_activity = EngineActivity()
+    return activity
+
+
 def _kraken_client(request: Request):
-    """Resolve the kraken engine client (overridable on app.state for tests)."""
+    """Resolve the kraken engine client (overridable on app.state for tests).
+
+    Counted on the engine activity (#178): an engine that is reading is never
+    unloaded, and this is where the gateway knows it is.
+    """
     client = getattr(request.app.state, "kraken_client", None)
-    return client if client is not None else get_kraken_client(_settings(request))
+    client = client if client is not None else get_kraken_client(_settings(request))
+    return Tracked(client, "kraken", _activity(request))
 
 
 def _manager(request: Request):
@@ -84,8 +100,10 @@ def _engine_client(request: Request, engine: str):
     ``app.state.engine_clients[engine]``."""
     overrides = getattr(request.app.state, "engine_clients", None)
     if overrides and engine in overrides:
-        return overrides[engine]
-    return get_engine_client(engine, _settings(request))
+        client = overrides[engine]
+    else:
+        client = get_engine_client(engine, _settings(request))
+    return Tracked(client, engine, _activity(request))
 
 
 def _count(request: Request, model: str) -> None:
@@ -282,6 +300,132 @@ async def restart_engine(name: str, request: Request) -> EngineRestartResponse:
     return EngineRestartResponse(
         engine=name, unit=unit, restarted=True, reachable=reachable, detail=detail,
     )
+
+
+# ── engine residency (#178) ─────────────────────────────────────────────────
+
+def _unit_vram(cards, unit: str) -> int | None:
+    """MiB the unit's processes hold over all cards; None when a row has no figure."""
+    rows = [p for card in cards for p in card.processes if p.service == unit]
+    if any(p.used_mib is None for p in rows):
+        return None
+    return sum(p.used_mib for p in rows)
+
+
+def _read_cards():
+    try:
+        return gpu_probe.inspect()
+    except Exception as exc:  # noqa: BLE001 — no nvidia-smi, a wedged driver
+        logger.debug("engines: nvidia-smi not read: {}", exc)
+        return None
+
+
+def _engine_info(settings: Settings, activity: EngineActivity, name: str, unit: str,
+                 cards) -> EngineInfo:
+    in_flight = activity.in_flight(name)
+    idle = activity.idle_s(name)
+    resident = units.is_active(unit)
+    if in_flight:
+        reason = f"{in_flight} call(s) in flight"
+    elif idle < settings.engine_unload_idle_s:
+        reason = (f"last call ended {idle:.0f}s ago, under the "
+                  f"{settings.engine_unload_idle_s:.0f}s it must be idle")
+    elif resident is False:
+        reason = "not running"
+    else:
+        reason = ""
+    return EngineInfo(name=name, unit=unit, resident=resident,
+                      vram_mb=None if cards is None else _unit_vram(cards, unit),
+                      busy=bool(in_flight), idle_s=round(idle, 1),
+                      evictable=not reason, reason=reason)
+
+
+def _engine_or_404(request: Request, name: str) -> tuple[str, str]:
+    """The engine's unit and URL. The allowlist is ``engine_urls()``: a name that
+    is not one of this gateway's engines is refused before anything runs."""
+    engines = _settings(request).engine_urls()
+    unit = units.unit_of(name, engines)
+    if unit is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{name!r} is not a recognition engine of this gateway; "
+                   f"known: {', '.join(sorted(engines))}")
+    return unit, engines[name]
+
+
+def _who(request: Request) -> str:
+    """Who asked, for the log: the peer, never the key."""
+    return request.client.host if request.client else "unknown"
+
+
+@router.get("/engines", response_model=EnginesResponse, tags=["meta"],
+            dependencies=[Depends(require_api_key)])
+async def list_engines(request: Request) -> EnginesResponse:
+    """Each engine's unit, whether it runs, what it holds and whether it may go (#178)."""
+    settings, activity = _settings(request), _activity(request)
+
+    def read() -> list[EngineInfo]:
+        cards = _read_cards()
+        return [_engine_info(settings, activity, name, units.unit_of(name, settings.engine_urls()),
+                             cards)
+                for name in sorted(settings.engine_urls())]
+
+    return EnginesResponse(engines=await run_in_threadpool(read),
+                           unload_idle_s=settings.engine_unload_idle_s)
+
+
+@router.post("/engines/{name}/unload", response_model=EngineResidencyResponse,
+             tags=["meta"], dependencies=[Depends(require_api_key)])
+async def unload_engine(name: str, request: Request) -> EngineResidencyResponse:
+    """``systemctl --user stop`` one engine — only when nothing is reading with it.
+
+    Refused with 409, before anything runs, when this gateway has a call to it
+    in flight, when its last call ended less than ``engine_unload_idle_s`` ago,
+    or when its own ``/health`` says it is busy (#149). Stopping an engine
+    mid-page would look to its caller exactly like a crash of the gateway.
+    Logged with the peer, the time and the MiB freed, so a missing engine later
+    is not mistaken for a crash.
+    """
+    unit, url = _engine_or_404(request, name)
+    settings, activity = _settings(request), _activity(request)
+    cards = await run_in_threadpool(_read_cards)
+    info = await run_in_threadpool(_engine_info, settings, activity, name, unit, cards)
+    if info.busy or info.idle_s < settings.engine_unload_idle_s:
+        raise HTTPException(status_code=409, detail=f"{name} is not idle: {info.reason}")
+    async with httpx.AsyncClient(timeout=HEALTH_PROBE_TIMEOUT_S) as client:
+        probe = await _probe_engine(client, name, url)
+    if probe.busy:
+        raise HTTPException(status_code=409, detail=(
+            f"{name} is busy: it accepted the connection and is still working (#149); "
+            "unloading it now would abort the page it is reading"))
+
+    result = await run_in_threadpool(units.stop_unit, unit)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.detail or f"stopping {unit} failed")
+    after_cards = await run_in_threadpool(_read_cards)
+    after = None if after_cards is None else _unit_vram(after_cards, unit)
+    freed = (info.vram_mb - after) if info.vram_mb is not None and after is not None else None
+    logger.info("engine unloaded: {} ({}) by {}; {} MiB before, {} after, {} freed",
+                name, unit, _who(request), info.vram_mb, after, freed)
+    return EngineResidencyResponse(engine=name, unit=unit, action="unload", ok=True,
+                                   vram_before_mb=info.vram_mb, vram_after_mb=after,
+                                   freed_mb=freed)
+
+
+@router.post("/engines/{name}/load", response_model=EngineResidencyResponse,
+             tags=["meta"], dependencies=[Depends(require_api_key)])
+async def load_engine(name: str, request: Request) -> EngineResidencyResponse:
+    """``systemctl --user start`` one engine, then ask its ``/health`` (#178)."""
+    unit, url = _engine_or_404(request, name)
+    result = await run_in_threadpool(units.start_unit, unit)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.detail or f"starting {unit} failed")
+    reachable = await _verify_engine(name, url, deadline_s=RESTART_VERIFY_S)
+    logger.info("engine loaded: {} ({}) by {}; reachable={}", name, unit, _who(request), reachable)
+    return EngineResidencyResponse(
+        engine=name, unit=unit, action="load", ok=True, reachable=reachable,
+        detail="" if reachable else
+        f"{unit} was started; {name} did not answer /health within {RESTART_VERIFY_S:.0f}s")
 
 
 @router.get(
