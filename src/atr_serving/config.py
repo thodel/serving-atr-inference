@@ -171,6 +171,10 @@ class Settings(BaseSettings):
     #: An engine this gateway has not called for this long may be unloaded by
     #: POST /engines/{name}/unload (#178); a younger last call is refused 409.
     engine_unload_idle_s: float = 300.0
+    #: The model-discovery catalogue GET /discoveries serves (#116). None = the
+    #: checkout's config/discovered.yaml, as fresh as the last `git pull`; the
+    #: weekly Action proposes its updates as a PR (#116, variant B).
+    discoveries_path: Path | None = None
     vllm_port_base: int = 8210
     # Budget for resident vLLM models on vllm_gpu, in registry vram_mb; a launch
     # beyond it evicts the least recently used lazy model. Unset (the default),
