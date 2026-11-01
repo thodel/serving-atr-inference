@@ -23,6 +23,11 @@ from atr_serving import __version__
 from atr_serving import gpu as gpu_probe
 from atr_serving.api.auth import require_api_key
 from atr_serving.api.schemas import (
+    FreedEngine,
+    HeadroomLeaseResponse,
+    HeadroomLeasesResponse,
+    HeadroomRenew,
+    HeadroomRequest,
     EngineInfo,
     EngineResidencyResponse,
     EngineRestartResponse,
@@ -50,6 +55,8 @@ from atr_serving.seam import PROMOTION_GATE_HEADER
 from atr_serving import discoveries
 from atr_serving import units
 from atr_serving.engine_activity import EngineActivity, Tracked
+from atr_serving import headroom as hr
+from atr_serving.manager import MIN_HEADROOM, RESERVE_MB
 
 router = APIRouter()
 
@@ -427,6 +434,168 @@ async def load_engine(name: str, request: Request) -> EngineResidencyResponse:
         engine=name, unit=unit, action="load", ok=True, reachable=reachable,
         detail="" if reachable else
         f"{unit} was started; {name} did not answer /health within {RESTART_VERIFY_S:.0f}s")
+
+
+# ── headroom leases (agentic_historian#473) ─────────────────────────────────
+
+def _leases(request: Request) -> hr.LeaseBook:
+    book = getattr(request.app.state, "headroom", None)
+    if book is None:                       # an app built without one (tests)
+        book = request.app.state.headroom = hr.LeaseBook(
+            None, start_unit=units.start_unit)
+    return book
+
+
+def _lease_response(lease: hr.Lease, free_mib: int | None = None,
+                    state: str | None = None) -> HeadroomLeaseResponse:
+    return HeadroomLeaseResponse(
+        lease_id=lease.id, card=lease.card, model=lease.model,
+        needed_mib=lease.needed_mib, free_mib=free_mib,
+        freed=[FreedEngine(engine=f.engine, unit=f.unit, mib=f.mib) for f in lease.freed],
+        expires_at=lease.expires_at, ttl_s=lease.ttl_s, state=state or lease.state,
+        holder=lease.holder, pending=list(lease.pending), last_error=lease.last_error)
+
+
+def _ttl(settings: Settings, asked: float | None) -> float:
+    return max(60.0, min(asked or settings.headroom_ttl_s, settings.headroom_max_ttl_s))
+
+
+def _gone_or_404(book: hr.LeaseBook, lease_id: str) -> HTTPException:
+    why = book.ended(lease_id)
+    if why:
+        return HTTPException(status_code=410, detail=f"lease {lease_id} has ended ({why}); "
+                                                     "what it freed is being or was restored")
+    return HTTPException(status_code=404, detail=f"no lease {lease_id}")
+
+
+@router.get("/headroom", response_model=HeadroomLeasesResponse, tags=["meta"],
+            dependencies=[Depends(require_api_key)])
+async def list_leases(request: Request) -> HeadroomLeasesResponse:
+    """The leases this gateway holds, and what each will load back."""
+    return HeadroomLeasesResponse(leases=[_lease_response(lease)
+                                          for lease in _leases(request).all()])
+
+
+@router.post("/headroom", response_model=HeadroomLeaseResponse, tags=["meta"],
+             dependencies=[Depends(require_api_key)])
+async def take_headroom(body: HeadroomRequest, request: Request) -> HeadroomLeaseResponse:
+    """Free ``body.model``'s card of our own idle engines until it fits, under a lease.
+
+    Only ``atr-*`` engines of this gateway, on that card, idle and not busy, are
+    candidates — the rule of ``/engines/{name}/unload`` (#178). Longest idle first,
+    and only as many as needed. When even all of them would not make room, nothing
+    is unloaded and 409 names the shortfall: a half-cleared card helps nobody.
+    One lease per card; a second is 409 with the holder. When the model fits
+    already, the answer is ``lease_id: null`` and nothing is touched; with
+    ``dry_run`` the answer says what would be freed, and nothing is touched either.
+    """
+    settings, activity, book = _settings(request), _activity(request), _leases(request)
+    spec = _registry(request).get(body.model)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"unknown model {body.model!r}")
+    if not spec.vram_mb:
+        raise HTTPException(status_code=422, detail=(
+            f"{body.model} declares no vram_mb; how much room it needs is unknown, "
+            "and freeing the card on a guess is not what a lease is for"))
+    card_index = spec.gpu_affinity if spec.gpu_affinity is not None else settings.vllm_gpu
+    need = hr.needed_mib(spec.vram_mb, min_headroom=MIN_HEADROOM, reserve_mb=RESERVE_MB)
+    await run_in_threadpool(book.reap)
+    held = book.on_card(card_index)
+    if held is not None:
+        raise HTTPException(status_code=409, detail={
+            "reason": f"card {card_index} is leased to {held.model} ({held.holder or 'unknown'}) "
+                      f"until {time.strftime('%H:%M:%S', time.localtime(held.expires_at))}",
+            "lease_id": held.id, "needed_mib": need})
+
+    cards = await run_in_threadpool(_read_cards)
+    if cards is None:
+        raise HTTPException(status_code=503, detail="nvidia-smi could not be read; "
+                                                    "nothing was unloaded")
+    card = next((c for c in cards if c.index == card_index), None)
+    if card is None:
+        raise HTTPException(status_code=422, detail=f"no card {card_index} on this host")
+
+    engines = settings.engine_urls()
+    candidates, idle_ones = [], []
+    for name in sorted(engines):
+        unit = units.unit_of(name, engines)
+        mib = sum(p.used_mib or 0 for p in card.processes if p.service == unit)
+        if unit is None or mib <= 0:
+            continue
+        info = await run_in_threadpool(_engine_info, settings, activity, name, unit, cards)
+        if info.evictable:
+            idle_ones.append((name, unit, mib, info.idle_s))
+    if idle_ones:
+        async with httpx.AsyncClient(timeout=HEALTH_PROBE_TIMEOUT_S) as client:
+            probes = await asyncio.gather(*(_probe_engine(client, n, engines[n])
+                                            for n, *_ in idle_ones))
+        candidates = [hr.Candidate(engine=n, unit=u, mib=m, idle_s=i)
+                      for (n, u, m, i), probe in zip(idle_ones, probes) if not probe.busy]
+
+    free = card.memory_free_mib
+    chosen = hr.plan(need, free, candidates)
+    if not chosen.fits:
+        theirs = sum(p.used_mib or 0 for p in card.processes
+                     if not (p.service or "").startswith(units.UNIT_PREFIX))
+        raise HTTPException(status_code=409, detail={
+            "reason": f"{body.model} needs {need} MiB on card {card_index}; {free} free and "
+                      f"{sum(c.mib for c in candidates)} in idle engines of ours — "
+                      f"{chosen.shortfall_mib} MiB short. Nothing was unloaded.",
+            "needed_mib": need, "free_mib": free, "shortfall_mib": chosen.shortfall_mib,
+            "evictable": [{"engine": c.engine, "mib": c.mib} for c in candidates],
+            "not_ours_mib": theirs})
+    if not chosen.chosen:
+        return HeadroomLeaseResponse(lease_id=None, card=card_index, model=body.model,
+                                     needed_mib=need, free_mib=free, state="fits")
+    if body.dry_run:
+        return HeadroomLeaseResponse(
+            lease_id=None, card=card_index, model=body.model, needed_mib=need,
+            free_mib=free, state="would-free",
+            freed=[FreedEngine(engine=c.engine, unit=c.unit, mib=c.mib) for c in chosen.chosen])
+
+    stopped: list[hr.Freed] = []
+    for cand in chosen.chosen:
+        result = await run_in_threadpool(units.stop_unit, cand.unit)
+        if not result.ok:
+            for done in stopped:                     # all or nothing, also halfway
+                await run_in_threadpool(units.start_unit, done.unit)
+            raise HTTPException(status_code=502, detail=(
+                f"stopping {cand.unit} failed ({result.detail}); the {len(stopped)} "
+                "engine(s) already stopped were started again"))
+        stopped.append(hr.Freed(engine=cand.engine, unit=cand.unit, mib=cand.mib))
+    lease = book.add(card=card_index, model=body.model, needed=need, freed=stopped,
+                     ttl_s=_ttl(settings, body.ttl_s), holder=body.holder or _who(request))
+    after = await run_in_threadpool(_read_cards)
+    free_after = next((c.memory_free_mib for c in after or [] if c.index == card_index), None)
+    logger.info("headroom: lease {} for {} on card {} by {}: freed {} ({} MiB), {} MiB free, "
+                "expires in {:.0f}s", lease.id, body.model, card_index, lease.holder,
+                [f.engine for f in stopped], sum(f.mib for f in stopped), free_after,
+                lease.ttl_s)
+    return _lease_response(lease, free_after)
+
+
+@router.post("/headroom/{lease_id}/renew", response_model=HeadroomLeaseResponse,
+             tags=["meta"], dependencies=[Depends(require_api_key)])
+async def renew_headroom(lease_id: str, request: Request,
+                         body: HeadroomRenew | None = None) -> HeadroomLeaseResponse:
+    """The heartbeat: another ``ttl_s`` from now. 410 once the lease has ended."""
+    book = _leases(request)
+    lease = book.renew(lease_id, _ttl(_settings(request), body.ttl_s if body else None))
+    if lease is None:
+        raise _gone_or_404(book, lease_id)
+    return _lease_response(lease)
+
+
+@router.delete("/headroom/{lease_id}", response_model=HeadroomLeaseResponse,
+               tags=["meta"], dependencies=[Depends(require_api_key)])
+async def release_headroom(lease_id: str, request: Request) -> HeadroomLeaseResponse:
+    """Give the card back now: start what the lease stopped. A unit that does not
+    start keeps the lease in ``restoring`` and is retried on every tick."""
+    book = _leases(request)
+    lease = await run_in_threadpool(book.release, lease_id, f"released by {_who(request)}")
+    if lease is None:
+        raise _gone_or_404(book, lease_id)
+    return _lease_response(lease, state="ended" if not lease.pending else "restoring")
 
 
 # ── model discovery (#116) ──────────────────────────────────────────────────

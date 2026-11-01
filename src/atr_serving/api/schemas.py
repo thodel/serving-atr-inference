@@ -91,6 +91,54 @@ class EnginesResponse(BaseModel):
     unload_idle_s: float
 
 
+class HeadroomRequest(BaseModel):
+    """Make room on ``model``'s card for ``ttl_s`` seconds (agentic_historian#473)."""
+
+    model: str
+    ttl_s: float | None = None
+    #: Who asks, for the log and for ``GET /headroom``: a run name, a host.
+    holder: str = ""
+    #: Only say what would be freed; unload nothing and take no lease. What a
+    #: batch asks at its preflight, before it walks the share (#472, #473).
+    dry_run: bool = False
+
+
+class HeadroomRenew(BaseModel):
+    ttl_s: float | None = None
+
+
+class FreedEngine(BaseModel):
+    engine: str
+    unit: str
+    mib: int
+
+
+class HeadroomLeaseResponse(BaseModel):
+    """A lease, or ``lease_id: null`` when the model fitted without freeing anything.
+
+    ``state`` is ``held`` while the client renews, ``restoring`` once the gateway
+    is bringing the engines back and one of them has not started yet, ``ended``
+    when everything it freed runs again.
+    """
+
+    lease_id: str | None
+    card: int
+    model: str
+    needed_mib: int
+    free_mib: int | None = None
+    freed: list[FreedEngine] = Field(default_factory=list)
+    expires_at: float | None = None
+    ttl_s: float | None = None
+    state: str = "held"
+    holder: str = ""
+    pending: list[str] = Field(default_factory=list)
+    last_error: str = ""
+
+
+class HeadroomLeasesResponse(BaseModel):
+    leases: list[HeadroomLeaseResponse]
+
+
 class EngineResidencyResponse(BaseModel):
     """What ``unload``/``load`` did: ``systemctl``'s word, and the card's."""
 
