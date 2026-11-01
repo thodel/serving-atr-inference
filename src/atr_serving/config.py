@@ -171,6 +171,15 @@ class Settings(BaseSettings):
     #: An engine this gateway has not called for this long may be unloaded by
     #: POST /engines/{name}/unload (#178); a younger last call is refused 409.
     engine_unload_idle_s: float = 300.0
+    #: Where POST /headroom keeps its leases (agentic_historian#473), so a gateway
+    #: restart in the middle of a lease still brings the engines back.
+    headroom_state_path: Path = Path("~/.local/state/atr-serving/headroom.json").expanduser()
+    #: A lease's default and longest life without renewal; the client renews
+    #: every five minutes, so 15 min is generous to a slow run and finite to a dead one.
+    headroom_ttl_s: float = 900.0
+    headroom_max_ttl_s: float = 3600.0
+    #: How often expired leases are restored and failed restores retried.
+    headroom_check_s: float = 30.0
     #: The model-discovery catalogue GET /discoveries serves (#116). None = the
     #: checkout's config/discovered.yaml, as fresh as the last `git pull`; the
     #: weekly Action proposes its updates as a PR (#116, variant B).

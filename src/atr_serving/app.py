@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -19,7 +20,9 @@ from atr_serving.config import (
 )
 from atr_serving.manager import ModelManager
 from atr_serving.power import PowerMeter
+from atr_serving import units
 from atr_serving.engine_activity import EngineActivity
+from atr_serving.headroom import LeaseBook
 from atr_serving.registry import Registry, load_registry
 from atr_serving.segcache import SegmentationCache
 from atr_serving.shared_registry import RegistryWatch
@@ -110,11 +113,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # with the server, not here, so building an app for a test reads no card.
     meter = PowerMeter(interval_s=settings.power_sample_s) if settings.power_sample_s > 0 else None
 
+    # The gateway holds the headroom leases, not the client (agentic_historian#473):
+    # what it unloaded it loads back itself, also after a restart of its own.
+    leases = LeaseBook(settings.headroom_state_path, start_unit=units.start_unit)
+
+    async def reaper() -> None:  # pragma: no cover - lifecycle loop
+        while True:
+            try:
+                await asyncio.to_thread(leases.reap)
+            except Exception as exc:  # noqa: BLE001 — the loop must survive one bad tick
+                logger.error("headroom reaper: {}", exc)
+            await asyncio.sleep(settings.headroom_check_s)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):  # pragma: no cover - lifecycle hook
         if meter is not None:
             meter.start()
+        reaping = asyncio.create_task(reaper())
         yield
+        reaping.cancel()
         if meter is not None:
             meter.stop()
         manager.shutdown()
@@ -130,6 +147,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.model_manager = manager
     app.state.power = meter
     app.state.engine_activity = EngineActivity()
+    app.state.headroom = leases
     app.state.registry_watch = watch
     # One segmentation per page rather than one per line-level engine (#205).
     # Per process, because that is the scope in which one page's recognitions
