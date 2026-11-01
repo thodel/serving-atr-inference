@@ -44,16 +44,43 @@ class Clock:
 
 
 class Spec:
-    def __init__(self, vram_mb, gpu_affinity=1):
-        self.vram_mb, self.gpu_affinity = vram_mb, gpu_affinity
+    def __init__(self, model_id, vram_mb, gpu_affinity=1, engine="vllm"):
+        self.id, self.vram_mb, self.gpu_affinity, self.engine = model_id, vram_mb, gpu_affinity, engine
+        self.residency = "lazy"
 
 
 class FakeRegistry:
-    MODELS = {"qwen-12g": Spec(12_000), "huge": Spec(40_000), "tiny": Spec(4_000),
-              "unknown-size": Spec(None)}
+    MODELS = {m: Spec(m, v) for m, v in (("qwen-12g", 12_000), ("huge", 40_000),
+                                          ("big", 25_000), ("tiny", 4_000),
+                                          ("unknown-size", None))}
 
     def get(self, model_id):
         return self.MODELS.get(model_id)
+
+
+class FakeManager:
+    """The lazy vLLM models resident on card 1, and the manager's own LRU rule:
+    evict from the front until free + freed covers the need (#248)."""
+
+    def __init__(self):
+        self.lazy: list[tuple[str, int]] = []
+        self.resident: list[str] = []
+
+    def resident_model_ids(self):
+        return [m for m, _ in self.lazy] + self.resident
+
+    def lazy_footprints(self, cards=None):
+        return list(self.lazy)
+
+    def eviction_plan(self, spec, free_mb=None, cards=None):
+        need = hr.needed_mib(spec.vram_mb, min_headroom=1.15, reserve_mb=2048)
+        victims, freed = [], 0
+        for model, mib in self.lazy:
+            if free_mb + freed >= need:
+                break
+            victims.append((model, mib))
+            freed += mib
+        return type("Plan", (), {"victims": victims})()
 
 
 @pytest.fixture
@@ -64,6 +91,8 @@ def env(monkeypatch, tmp_path):
     app.state.engine_activity = EngineActivity(clock=clock)
     app.state.registry = FakeRegistry()
     app.state.registry_watch = None
+    manager = app.state.model_manager = FakeManager()
+    card = {"base_free": FREE_WITH_ALL}
     held = dict(ENGINES)
     calls, fail_start = [], {"n": 0}
 
@@ -85,7 +114,8 @@ def env(monkeypatch, tmp_path):
         procs = [Process(pid=100 + i, used_mib=mib, service=unit)
                  for i, (unit, mib) in enumerate(held.items())]
         procs.append(Process(pid=999, used_mib=10_392, service="gunicorn.service", user="change"))
-        free = FREE_WITH_ALL + sum(ENGINES[u] for u in ENGINES if u not in held)
+        free = (card["base_free"] + sum(ENGINES[u] for u in ENGINES if u not in held)
+                - sum(mib for _, mib in manager.lazy))
         return [Card(index=1, name="A40", memory_total_mib=46_068, memory_used_mib=0,
                      memory_free_mib=free, utilisation_pct=0, memory_utilisation_pct=0,
                      processes=procs)]
@@ -105,7 +135,8 @@ def env(monkeypatch, tmp_path):
     clock.t += 1000                    # nothing has been called for 1000 s
     return type("Env", (), {"client": TestClient(app), "app": app, "clock": clock,
                             "calls": calls, "held": held, "probe": probe, "book": book,
-                            "fail_start": fail_start, "path": tmp_path / "headroom.json"})()
+                            "fail_start": fail_start, "path": tmp_path / "headroom.json",
+                            "manager": manager, "card": card})()
 
 
 def _lease(env, model="qwen-12g", ttl_s=900):
@@ -268,3 +299,79 @@ def test_a_dry_run_says_what_it_would_free_and_touches_nothing(env):
     assert _changes(env) == [] and env.book.all() == []
     no = env.client.post("/headroom", headers=HEADERS, json={"model": "huge", "dry_run": True})
     assert no.status_code == 409 and _changes(env) == []
+
+
+# ── the lazy vLLM models the launch evicts anyway (#248) ─────────────────────
+
+def _dry(env, model="qwen-12g"):
+    return env.client.post("/headroom", headers=HEADERS, json={"model": model, "dry_run": True})
+
+
+#: Card 1 on 01.11.2026, measured: 30,981 MiB free with the engines resident.
+TODAY = 30_981
+
+
+def test_when_the_lazy_model_alone_makes_room_no_engine_is_unloaded(env):
+    """A lazy model beside the engines leaves 14,397 MiB free, short of 15,848 —
+    which read as "unload party". But the launch evicts the lazy model itself."""
+    env.card["base_free"] = TODAY
+    env.manager.lazy = [("apertus-8b", 16_584)]
+    body = _dry(env).json()
+    assert body["state"] == "fits" and body["freed"] == []
+    assert body["manager_evicts"] == [{"model": "apertus-8b", "mib": 16_584}]
+    assert _lease(env).json()["lease_id"] is None and _changes(env) == []
+
+
+def test_when_the_lazy_model_is_not_enough_only_party_goes(env):
+    """Free 742 MiB after a 9000 MiB lazy model; 15848 needed. The lazy model
+    gives 9000, party 11858: party goes, trocr and kraken stay."""
+    env.manager.lazy = [("small-lazy", 9_000)]
+    body = _dry(env).json()
+    assert body["state"] == "would-free"
+    assert [f["engine"] for f in body["freed"]] == ["party"]
+    assert body["manager_evicts"] == [{"model": "small-lazy", "mib": 9_000}]
+    lease = _lease(env).json()
+    assert [f["engine"] for f in lease["freed"]] == ["party"]
+    assert _changes(env) == [("stop", "atr-party.service")]
+
+
+def test_a_model_the_lazy_model_makes_room_for_is_no_longer_refused(env):
+    """Without the lazy model in the sum this was 409: 981 free and 15,830 in
+    engines are short of the 30,798 ``big`` needs; the 30,000 the launch evicts
+    are what make the room — and then no engine has to go at all."""
+    env.card["base_free"] = TODAY
+    env.manager.lazy = [("big-lazy", 30_000)]
+    need = hr.needed_mib(25_000, min_headroom=1.15, reserve_mb=2048)
+    free = TODAY - 30_000
+    assert free + 30_000 >= need > free + sum(ENGINES.values())
+    r = _dry(env, "big")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "fits" and r.json()["freed"] == []
+    assert r.json()["manager_evicts"] == [{"model": "big-lazy", "mib": 30_000}]
+
+
+def test_too_little_even_with_the_lazy_models_unloads_nothing(env):
+    env.manager.lazy = [("small-lazy", 1_000)]
+    r = _lease(env, "huge")
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["manager_evictable"] == [{"model": "small-lazy", "mib": 1_000}]
+    assert _changes(env) == []
+
+
+def test_a_resident_model_needs_no_room(env):
+    env.manager.resident = ["qwen-12g"]
+    body = _dry(env).json()
+    assert body["state"] == "resident" and body["freed"] == [] and _changes(env) == []
+
+
+def test_a_model_that_is_not_vllm_counts_no_lazy_model(env):
+    """Only a vLLM launch makes the manager evict; an engine model does not."""
+    env.card["base_free"] = TODAY
+    env.manager.lazy = [("apertus-8b", 16_584)]
+    FakeRegistry.MODELS["engine-12g"] = Spec("engine-12g", 12_000, engine="kraken")
+    try:
+        body = _dry(env, "engine-12g").json()
+    finally:
+        FakeRegistry.MODELS.pop("engine-12g")
+    assert body["manager_evicts"] == [] and body["state"] == "would-free"
