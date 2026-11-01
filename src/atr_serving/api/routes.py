@@ -486,7 +486,8 @@ async def take_headroom(body: HeadroomRequest, request: Request) -> HeadroomLeas
     and only as many as needed. When even all of them would not make room, nothing
     is unloaded and 409 names the shortfall: a half-cleared card helps nobody.
     One lease per card; a second is 409 with the holder. When the model fits
-    already, the answer is ``lease_id: null`` and nothing is touched.
+    already, the answer is ``lease_id: null`` and nothing is touched; with
+    ``dry_run`` the answer says what would be freed, and nothing is touched either.
     """
     settings, activity, book = _settings(request), _activity(request), _leases(request)
     spec = _registry(request).get(body.model)
@@ -546,6 +547,11 @@ async def take_headroom(body: HeadroomRequest, request: Request) -> HeadroomLeas
     if not chosen.chosen:
         return HeadroomLeaseResponse(lease_id=None, card=card_index, model=body.model,
                                      needed_mib=need, free_mib=free, state="fits")
+    if body.dry_run:
+        return HeadroomLeaseResponse(
+            lease_id=None, card=card_index, model=body.model, needed_mib=need,
+            free_mib=free, state="would-free",
+            freed=[FreedEngine(engine=c.engine, unit=c.unit, mib=c.mib) for c in chosen.chosen])
 
     stopped: list[hr.Freed] = []
     for cand in chosen.chosen:

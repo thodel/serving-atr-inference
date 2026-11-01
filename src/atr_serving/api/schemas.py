@@ -98,6 +98,9 @@ class HeadroomRequest(BaseModel):
     ttl_s: float | None = None
     #: Who asks, for the log and for ``GET /headroom``: a run name, a host.
     holder: str = ""
+    #: Only say what would be freed; unload nothing and take no lease. What a
+    #: batch asks at its preflight, before it walks the share (#472, #473).
+    dry_run: bool = False
 
 
 class HeadroomRenew(BaseModel):

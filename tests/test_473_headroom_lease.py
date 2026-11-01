@@ -257,3 +257,14 @@ def test_a_failed_restore_is_retried_not_swallowed(env, caplog):
 def test_the_ttl_is_clamped(env):
     body = _lease(env, ttl_s=10**6).json()
     assert body["ttl_s"] == 3600
+
+
+def test_a_dry_run_says_what_it_would_free_and_touches_nothing(env):
+    r = env.client.post("/headroom", headers=HEADERS, json={"model": "qwen-12g", "dry_run": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "would-free" and body["lease_id"] is None
+    assert [f["engine"] for f in body["freed"]] == ["party"]
+    assert _changes(env) == [] and env.book.all() == []
+    no = env.client.post("/headroom", headers=HEADERS, json={"model": "huge", "dry_run": True})
+    assert no.status_code == 409 and _changes(env) == []
