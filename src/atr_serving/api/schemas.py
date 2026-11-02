@@ -113,6 +113,17 @@ class FreedEngine(BaseModel):
     mib: int
 
 
+class ManagerEviction(BaseModel):
+    """A lazy vLLM model the launch evicts anyway, and what it gives back (#248).
+
+    Not the lease's doing and not restored by it: the manager evicts least
+    recently used lazy models whenever a launch needs their room.
+    """
+
+    model: str
+    mib: int
+
+
 class HeadroomLeaseResponse(BaseModel):
     """A lease, or ``lease_id: null`` when the model fitted without freeing anything.
 
@@ -127,6 +138,8 @@ class HeadroomLeaseResponse(BaseModel):
     needed_mib: int
     free_mib: int | None = None
     freed: list[FreedEngine] = Field(default_factory=list)
+    #: Lazy vLLM models the launch evicts on its own (#248); the lease restores none.
+    manager_evicts: list[ManagerEviction] = Field(default_factory=list)
     expires_at: float | None = None
     ttl_s: float | None = None
     state: str = "held"

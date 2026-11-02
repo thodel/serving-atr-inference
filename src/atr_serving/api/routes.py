@@ -25,6 +25,7 @@ from atr_serving.api.auth import require_api_key
 from atr_serving.api.schemas import (
     FreedEngine,
     HeadroomLeaseResponse,
+    ManagerEviction,
     HeadroomLeasesResponse,
     HeadroomRenew,
     HeadroomRequest,
@@ -533,24 +534,46 @@ async def take_headroom(body: HeadroomRequest, request: Request) -> HeadroomLeas
                       for (n, u, m, i), probe in zip(idle_ones, probes) if not probe.busy]
 
     free = card.memory_free_mib
-    chosen = hr.plan(need, free, candidates)
+    # The lazy vLLM models the launch evicts anyway (#248). The manager makes room
+    # for a vLLM model on its card by evicting least recently used lazy models;
+    # counting their memory as taken unloaded engines for room the launch was
+    # about to make itself — or refused a model that evicting both would fit.
+    manager = _manager(request)
+    vllm_launch = (spec.engine == "vllm" and card_index == settings.vllm_gpu
+                   and manager is not None)
+    if vllm_launch and body.model in manager.resident_model_ids():
+        return HeadroomLeaseResponse(lease_id=None, card=card_index, model=body.model,
+                                     needed_mib=need, free_mib=free, state="resident")
+    lazy = (await run_in_threadpool(manager.lazy_footprints, cards)) if vllm_launch else []
+    lazy_mib = sum(mib for _, mib in lazy)
+
+    chosen = hr.plan(need, free + lazy_mib, candidates)
     if not chosen.fits:
         theirs = sum(p.used_mib or 0 for p in card.processes
                      if not (p.service or "").startswith(units.UNIT_PREFIX))
         raise HTTPException(status_code=409, detail={
-            "reason": f"{body.model} needs {need} MiB on card {card_index}; {free} free and "
+            "reason": f"{body.model} needs {need} MiB on card {card_index}; {free} free, "
+                      f"{lazy_mib} in lazy vLLM models the launch would evict and "
                       f"{sum(c.mib for c in candidates)} in idle engines of ours — "
                       f"{chosen.shortfall_mib} MiB short. Nothing was unloaded.",
             "needed_mib": need, "free_mib": free, "shortfall_mib": chosen.shortfall_mib,
             "evictable": [{"engine": c.engine, "mib": c.mib} for c in candidates],
+            "manager_evictable": [{"model": m, "mib": mib} for m, mib in lazy],
             "not_ours_mib": theirs})
+    engines_mib = sum(c.mib for c in chosen.chosen)
+    evicts = []
+    if vllm_launch:
+        # What the launch then evicts, with the engines gone — its own plan, not a copy.
+        plan = await run_in_threadpool(manager.eviction_plan, spec, free + engines_mib, cards)
+        evicts = [ManagerEviction(model=m, mib=mib) for m, mib in plan.victims]
     if not chosen.chosen:
         return HeadroomLeaseResponse(lease_id=None, card=card_index, model=body.model,
-                                     needed_mib=need, free_mib=free, state="fits")
+                                     needed_mib=need, free_mib=free, manager_evicts=evicts,
+                                     state="fits")
     if body.dry_run:
         return HeadroomLeaseResponse(
             lease_id=None, card=card_index, model=body.model, needed_mib=need,
-            free_mib=free, state="would-free",
+            free_mib=free, state="would-free", manager_evicts=evicts,
             freed=[FreedEngine(engine=c.engine, unit=c.unit, mib=c.mib) for c in chosen.chosen])
 
     stopped: list[hr.Freed] = []
@@ -571,7 +594,9 @@ async def take_headroom(body: HeadroomRequest, request: Request) -> HeadroomLeas
                 "expires in {:.0f}s", lease.id, body.model, card_index, lease.holder,
                 [f.engine for f in stopped], sum(f.mib for f in stopped), free_after,
                 lease.ttl_s)
-    return _lease_response(lease, free_after)
+    response = _lease_response(lease, free_after)
+    response.manager_evicts = evicts
+    return response
 
 
 @router.post("/headroom/{lease_id}/renew", response_model=HeadroomLeaseResponse,

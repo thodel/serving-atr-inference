@@ -626,3 +626,33 @@ def test_the_derived_budget_decides_evictions(monkeypatch):
     assert m.resident_model_ids() == [OCS]
     assert launcher.handles[HEBREW].terminated
     assert len(reads) == 2                     # read per launch, not cached
+
+
+# ── the plan, without acting on it (#248) ────────────────────────────────────
+
+@pytest.mark.parametrize("second", [HEBREW, X4B])
+def test_the_plan_names_what_the_launch_then_evicts(monkeypatch, second):
+    """``POST /headroom`` counts the lazy models the launch evicts anyway with
+    ``eviction_plan``; the launch must then evict exactly those, or the lease
+    and the manager disagree about the same card."""
+    m, launcher, _ = _xix_resident(monkeypatch)
+    plan = m.eviction_plan(m.registry.get(second))
+    assert [mid for mid, _ in plan.victims] == [XIX]
+    assert plan.victims[0][1] == FOOTPRINT[XIX], "measured, not the registry figure"
+    assert m.resident_model_ids() == [XIX], "a plan terminates nothing"
+    m.ensure_resident(second)
+    assert launcher.handles[XIX].terminated and m.resident_model_ids() == [second]
+
+
+def test_the_plan_with_more_free_memory_evicts_nothing(monkeypatch):
+    """With the engines unloaded by a lease, 13654 + 15830 is enough for the 4B
+    beside xix, and 24000 is within the budget: the launch keeps xix."""
+    m, _, _ = _xix_resident(monkeypatch)
+    plan = m.eviction_plan(m.registry.get(X4B), free_mb=13654 + 15830)
+    assert plan.victims == [] and plan.fits
+
+
+def test_the_lazy_footprints_are_listed_least_recently_used_first(monkeypatch):
+    m, launcher, _ = _xix_resident(monkeypatch)
+    m.ensure_resident(X2B)
+    assert m.lazy_footprints() == [(XIX, FOOTPRINT[XIX]), (X2B, FOOTPRINT[X2B])]

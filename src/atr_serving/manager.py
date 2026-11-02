@@ -441,6 +441,26 @@ class VllmLauncher:
 
 
 @dataclass
+class EvictionPlan:
+    """What a launch of one model would evict, before anything is terminated (#248).
+
+    ``victims`` are ``(model id, MiB it gives back)``, least recently used first.
+    ``free_mb`` is None when the card could not be read; the launch decides then.
+    """
+
+    need: int
+    free_mb: int | None
+    victims: list
+    freed_mb: int
+    over_budget: bool
+    budget: "object"
+
+    @property
+    def fits(self) -> bool | None:
+        return None if self.free_mb is None else self.free_mb + self.freed_mb >= self.need
+
+
+@dataclass
 class _Resident:
     spec: ModelSpec
     handle: VllmHandle
@@ -697,6 +717,54 @@ class ModelManager:
             "a card that cannot hold it; `GET /gpu` names what is holding it."
         )
 
+    def eviction_plan(self, spec: ModelSpec, free_mb: int | None = None,
+                      cards: list | None = None, *, read_card: bool = True) -> EvictionPlan:
+        """What :meth:`_make_room_for` would evict for ``spec`` — and nothing terminated.
+
+        The one place the choice is made, so that ``POST /headroom`` counts the
+        lazy models the launch will evict anyway exactly as the launch does
+        (#248); two copies of this loop would drift as the client's and the
+        lease's arithmetic had.
+
+        ``free_mb`` is the card's free memory; ``read_card`` reads it when it is
+        not given (the headroom route passes what the card would have once the
+        lease has unloaded engines).
+        """
+        need = self._need_mb(spec)
+        if free_mb is None and read_card:
+            memory = gpu_probe.card_memory(self.settings.vllm_gpu)
+            free_mb = None if memory is None else memory[0]     # None: the launch decides
+        with self._state_lock:
+            lazy = [(mid, r) for mid, r in self._resident.items()   # front = LRU
+                    if r.spec.residency == "lazy" and mid != spec.id]
+        # The full reading costs /proc for every row; take it only when a lazy
+        # resident's footprint decides something. vram_budget reuses it, or
+        # takes its own when the budget is derived and nothing else needed one.
+        if cards is None and lazy and free_mb is not None and free_mb < need:
+            cards = self._inspect()
+        budget = vram_budget(self.settings, cards)
+
+        wanted = spec.vram_mb or 0     # no vram_mb: the budget cannot see this model
+        used, freed, victims = self._used_mb(), 0, []
+        for mid, r in lazy:
+            over_budget = used + wanted > budget.mb
+            if not over_budget and (free_mb is None or free_mb + freed >= need):
+                break
+            mib = self._footprint(r, cards)
+            victims.append((mid, mib))
+            used -= r.spec.vram_mb or 0
+            freed += mib
+        return EvictionPlan(need=need, free_mb=free_mb, victims=victims, freed_mb=freed,
+                            over_budget=used + wanted > budget.mb, budget=budget)
+
+    def lazy_footprints(self, cards: list | None = None) -> list[tuple[str, int]]:
+        """Every lazy resident and what evicting it gives back, least recently used first."""
+        with self._state_lock:
+            lazy = [(mid, r) for mid, r in self._resident.items() if r.spec.residency == "lazy"]
+        if lazy and cards is None:
+            cards = self._inspect()
+        return [(mid, self._footprint(r, cards)) for mid, r in lazy]
+
     def _make_room_for(self, spec: ModelSpec) -> list[str]:
         """Evict what ``spec`` needs evicted, or refuse it — never both.
 
@@ -715,42 +783,24 @@ class ModelManager:
           sat on GPU 1 — on every hebrew request, each followed by a cold start
           of xix.
 
-        So the plan is made before anything is terminated: least recently used
-        lazy models first, as many as the budget and the card together need,
-        each counted at what it gives back (:meth:`_footprint`). If not even all
-        of them make room on the card, none is evicted. Returns the evicted ids.
+        So the plan is made before anything is terminated (:meth:`eviction_plan`):
+        least recently used lazy models first, as many as the budget and the card
+        together need, each counted at what it gives back (:meth:`_footprint`). If
+        not even all of them make room on the card, none is evicted. Returns the
+        evicted ids.
         """
-        need = self._need_mb(spec)
-        memory = gpu_probe.card_memory(self.settings.vllm_gpu)
-        free_mb = None if memory is None else memory[0]     # None: the launch decides
-        lazy = [(mid, r) for mid, r in self._resident.items()   # front = LRU
-                if r.spec.residency == "lazy"]
-        # The full reading costs /proc for every row; take it only when a lazy
-        # resident's footprint decides something. vram_budget reuses it, or
-        # takes its own when the budget is derived and nothing else needed one.
-        cards = self._inspect() if lazy and free_mb is not None and free_mb < need else None
-        budget = vram_budget(self.settings, cards)
-
-        wanted = spec.vram_mb or 0     # no vram_mb: the budget cannot see this model
-        used, freed, victims = self._used_mb(), 0, []
-        for mid, r in lazy:
-            over_budget = used + wanted > budget.mb
-            if not over_budget and (free_mb is None or free_mb + freed >= need):
-                break
-            victims.append(mid)
-            used -= r.spec.vram_mb or 0
-            freed += self._footprint(r, cards)
-
-        if free_mb is not None and free_mb + freed < need:
-            note = (f" Evicting {', '.join(victims)} would give back {freed} MB, not "
+        plan = self.eviction_plan(spec)
+        victims = [mid for mid, _ in plan.victims]
+        if plan.free_mb is not None and plan.free_mb + plan.freed_mb < plan.need:
+            note = (f" Evicting {', '.join(victims)} would give back {plan.freed_mb} MB, not "
                     "enough, so nothing was evicted." if victims else "")
-            raise self._refusal(spec, free_mb, need, note)
-        if used + wanted > budget.mb:
+            raise self._refusal(spec, plan.free_mb, plan.need, note)
+        if plan.over_budget:
             logger.warning("vLLM budget {} exceeded by {} and no lazy model to evict; "
-                           "launching anyway", budget.reason, spec.id)
+                           "launching anyway", plan.budget.reason, spec.id)
         for mid in victims:
             logger.info("Evicting LRU vLLM model {} to fit {} (budget {}, {} MiB free, "
-                        "{} needed)", mid, spec.id, budget.reason, free_mb, need)
+                        "{} needed)", mid, spec.id, plan.budget.reason, plan.free_mb, plan.need)
             self._drop(mid)
         return victims
 
