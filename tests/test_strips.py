@@ -137,3 +137,11 @@ def test_a_strip_gets_k_line_budgets_unless_it_names_its_own():
     assert generation_budget(ModelSpec(**base, lines_per_crop=4), Settings()) == 2048
     assert generation_budget(ModelSpec(**base, lines_per_crop=4, max_new_tokens=600),
                              Settings()) == 600
+
+
+def test_the_strip_probes_leave_the_encoder_room():
+    """2026-11-01: at the page's 1.96 MP, Aarau strips ran the card out of memory
+    inside Apertus' fp32 vision encoder. Half the pixels, half its peak."""
+    registry = load_registry(ROOT / "config" / "models.yaml")
+    for model_id in ("apertus-1.5-8b-strip4", "apertus-1.5-8b-strip4-x2"):
+        assert registry.get(model_id).max_pixels <= 1_000_000
