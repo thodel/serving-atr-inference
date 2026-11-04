@@ -1173,6 +1173,13 @@ models:
   # strip keeps some context; the x2 variant also gives each letter (8-12 px)
   # one to two of the tokenizer's 16 px cells instead of less than one (#314).
   # The pair answers which of the two matters. Same weights, own vLLM instances.
+  #
+  # max_pixels 1 MP, not the page's 1.96: the fp32 vision tokenizer needs
+  # ~1.87 GiB per activation at 1.96 MP, and on 2026-11-01 four Aarau strips in
+  # a row ran card 1 out of memory inside the encoder (29.3 GiB held, 1.87 GiB
+  # more wanted, < 1 GiB free) once the engines beside it had grown by ~1.7 GB.
+  # Half the pixels is half the encoder's peak. A strip of four lines at 1 MP
+  # still has several times the pixels per letter of a page at 1.96 MP.
   - id: apertus-1.5-8b-strip4
     engine: vllm
     vllm_venv: vllm-apertus
@@ -1194,7 +1201,7 @@ models:
     languages: [de, fr, it, la]
     scripts: []
     centuries: []
-    max_pixels: 1960000
+    max_pixels: 1000000
     vram_mb: 18000
     residency: lazy
     gpu_affinity: 1
@@ -1218,7 +1225,7 @@ models:
     languages: [de, fr, it, la]
     scripts: []
     centuries: []
-    max_pixels: 1960000
+    max_pixels: 1000000
     vram_mb: 18000
     residency: lazy
     gpu_affinity: 1
