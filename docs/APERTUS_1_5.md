@@ -108,7 +108,51 @@ Qualität) und, wo Ground Truth existiert, `score_ground_truth`.
 | Beschreibt es Fotos und Grafiken korrekt? | Demo, Ordner-Lauf | plausibel; die Model Card meldet gute VQA-Werte |
 | Erkennt es Bildtyp, Epoche, Beschriftungen? | Demo mit JSON-Prompt | wahrscheinlich grob; die feine Auflösung ist durch den VQ-Tokenizer begrenzt |
 | Wie oft erfindet es Details? | Stichprobe von Hand | die eigentliche Frage des Tests |
-| Liest es Handschrift? | `--task transcribe`, Batch | fraglich (Basismodell, VQ-Tokenizer) |
+| Liest es Handschrift? | `--task transcribe`, Batch | gemessen, siehe „Handschrift: was gemessen ist“ |
+
+## Was der Betrieb gelehrt hat (26.10.–05.11.2026)
+
+Jede dieser Änderungen war vorher ein Absturz auf idhefix, in dieser Reihenfolge:
+
+| PR | Fehler | Lösung |
+|---|---|---|
+| #234 | upstream kennt `apertus1p5` nicht, das swiss-ai-Image ist CUDA 13 | eigene venv `vllm-apertus` mit Fork über cu129-Kernels |
+| #237 | Kaltstart > 300 s, ein verwaister EngineCore hielt 30 GB | Prozessgruppen, `startup_timeout_s: 900`, `--safetensors-load-strategy prefetch` |
+| #238 | ein Bild über mehrere Prefill-Stücke verteilt | `--max-num-batched-tokens 16384` |
+| #239 | OOM im fp32-Bild-Encoder bei einer ganzen Seite | `--kv-cache-memory-bytes 3 GiB` |
+| #243 | 2×-Streifen der Aarauer 5000-px-Scans brachten die Engine zum Absturz | Streifen auf das Pixelbudget begrenzt |
+| #251 | weiter OOM bei 1.96 MP, nachdem die Engines daneben gewachsen waren | Budget der Streifen 1 MP |
+
+**Speicher.** Der Bild-Tokenizer rechnet in fp32 mit 256 Kanälen in voller
+Auflösung: Bei 1.96 MP sind das 1.87 GiB pro Aktivierung und ~7–9 GiB Spitze.
+vLLMs Profiling sieht diese Spitze nicht. Auf Karte 1 bleibt neben trocr, party
+und kraken (zusammen ~14 GB, Stand 01.11.) wenig Reserve. Ganze Seiten bei
+1.96 MP sind damit wieder knapp, Streifen bei 1 MP haben Luft.
+
+**Streifen (#241).** `lines_per_crop` und `crop_scale` lassen ein Zeilenmodell
+mehrere aufeinanderfolgende Zeilen einer Region als einen Ausschnitt lesen, auf
+Wunsch vergrössert (innerhalb `max_pixels`). Dazu kommen zwei Einträge:
+`apertus-1.5-8b-strip4` (nativ) und `apertus-1.5-8b-strip4-x2` (2×).
+
+## Handschrift: was gemessen ist
+
+Zero-shot auf den 276 GT-Seiten. Verglichen wird über die 166 Seiten mit
+gesicherter Identität, CER als Median (training-atr-models#315, #317):
+
+| Lesart | CER | Seiten mit erfundenem Text (≥ 60 %) |
+|---|---:|---:|
+| Qwen3.5-4B Kurrent-Fine-Tune | 11.2 % | 1 |
+| `apertus-1.5-8b-strip4-x2` | **22.4 %** | 3 |
+| `apertus-1.5-8b-strip4` | 30.4 % | 10 |
+| `apertus-1.5-8b` (Seite) | 31.1 % | 9 |
+| `apertus-1.5-8b-line` | 42.4 % | 16 |
+
+**Grund ist der diskrete Tokenizer.** Er vergibt einen Code pro 16 × 16 Pixel.
+Buchstaben, die kleiner als eine Zelle sind, gehen verloren; das zeigt der
+Rekonstruktionstest (`scripts/apertus_vq_roundtrip.py`, #314).
+Vergrösserte Streifen geben jedem Buchstaben wieder Zellen. Die LoRA-Probe auf
+solchen Streifen ist in training-atr-models vorbereitet:
+`docs/APERTUS_1_5.md` dort, mit Spec, Smoke-Test und Runbook (#316).
 
 ## Fallback: transformers statt vLLM
 
