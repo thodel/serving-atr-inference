@@ -75,6 +75,17 @@ _model_lock = threading.Lock()
 #: production. Its own lock, so a /segment never waits for a recognition.
 _regions_lock = threading.Lock()
 
+# Give the CUDA caching allocator's idle blocks back after every request (#158).
+# Measured on idhefix on 05.11.2026 after ten days of one process: 712 MiB
+# allocated, 7,396 MiB reserved. The rest was activation peaks of blla on large
+# pages that the allocator kept for reuse and never returned, and every MiB of it
+# is a MiB the gateway's vLLM budget does not have. The price is a fresh
+# cudaMalloc for the next request's peak, milliseconds against the seconds a
+# page takes. "0" turns it off, to measure the other side of that trade.
+RELEASE_CUDA_CACHE = os.getenv("KRAKEN_RELEASE_CUDA_CACHE", "1") != "0"
+#: One warning per distinct failure, not one per request.
+_cache_release_failure: str | None = None
+
 
 def _model_file(model_id: str) -> Path:
     """A kraken model reference → a weights file on this box.
@@ -140,12 +151,30 @@ def _load(model_id: str):
         del evicted
         # The eviction is pointless if the VRAM is not actually returned, and a
         # slow OOM is worse than the reload this cache exists to avoid.
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as exc:                           # pragma: no cover
-            logger.warning("could not release CUDA cache after eviction: {}", exc)
+        _release_cuda_cache(always=True)
     return net
+
+
+def _release_cuda_cache(always: bool = False) -> None:
+    """Return the allocator's unused cached blocks to the driver (#158).
+
+    Only blocks no live tensor holds: ``empty_cache`` takes the allocator's own
+    lock, so a forward pass running on another thread keeps its memory. The
+    resident recognition models are live tensors and stay. ``always`` is the
+    eviction, which needs it whatever ``KRAKEN_RELEASE_CUDA_CACHE`` says. Never
+    raises: a request that worked must not fail on housekeeping.
+    """
+    global _cache_release_failure
+    if not (always or RELEASE_CUDA_CACHE):
+        return
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception as exc:  # noqa: BLE001
+        message = f"{type(exc).__name__}: {exc}"
+        if message != _cache_release_failure:
+            logger.warning("could not release the CUDA cache: {}", message)
+            _cache_release_failure = message
 
 
 def _read_image(data: bytes) -> Image.Image:
@@ -349,7 +378,7 @@ def _cuda_memory() -> dict | None:
     allocator keeps cached for reuse, ``max_reserved_mib`` the peak since start.
     Allocated growing means a leak; reserved growing while allocated stays flat
     means the cache — the question #158 has to answer before anything is done
-    about it. Read-only: nothing here calls ``empty_cache``.
+    about it. Read-only; the release is :func:`_release_cuda_cache`.
 
     ``None`` on CPU, and ``None`` rather than an exception when torch cannot
     answer: /health must always answer, or the gateway reports a working kraken
@@ -390,6 +419,15 @@ async def list_models():
 
 @app.post("/segment", response_model=SegmentResponse)
 async def segment(image: UploadFile = File(...), mode: str = Form(default="baseline")):
+    try:
+        return await _segment(image)
+    finally:
+        # After the regions too (YOLO is a forward pass), and after a failure:
+        # the 23 GB of 21.09. came from one oversized input (#158).
+        await run_in_threadpool(_release_cuda_cache)
+
+
+async def _segment(image: UploadFile) -> SegmentResponse:
     img = _read_image(await image.read())
     # Off the event loop (#111): the loop stays free for other requests and
     # /health while blla and the region detector work.
@@ -413,6 +451,13 @@ async def recognize(
     model: str = Form(...),
     lines: str | None = Form(default=None),  # the caller's lines: read on them, no blla
 ):
+    try:
+        return await _recognize(image, model, lines)
+    finally:
+        await run_in_threadpool(_release_cuda_cache)  # #158, as in /segment
+
+
+async def _recognize(image: UploadFile, model: str, lines: str | None) -> RecognitionResult:
     t0 = time.perf_counter()
     img = _read_image(await image.read())
     given_lines: list[Line] = []

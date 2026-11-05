@@ -162,6 +162,12 @@ How a request is recognized depends on the model's engine and level:
   16.09. and more since (#158), and the vLLM budget is what is left after them and a
   2048 MiB reserve (see [Two GPU views](#two-gpu-views)). Card 0 belongs to a
   neighbouring service.
+- **kraken gives its CUDA cache back after every request (#158).** It grew because
+  the caching allocator kept blla's activation peaks: on 05.11.2026, after ten days,
+  712 MiB allocated against 7,396 MiB reserved. `/segment` and `/recognize` now end
+  with `torch.cuda.empty_cache()`, failures included; `KRAKEN_RELEASE_CUDA_CACHE=0`
+  turns it off. `/health` → `cuda` shows the effect: `reserved_mib` should stay near
+  `allocated_mib` between requests, while `max_reserved_mib` still records the peak.
 - **Two vLLMs since 21.09. (#157):** `.venvs/vllm` (0.11) for every model, and
   `.venvs/vllm-next` (0.29.0+cu129) for the ones whose registry entry says
   `vllm_venv: vllm-next` — today only `qwen3.5-4b-german-xix-v2`. See
