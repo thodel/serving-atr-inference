@@ -375,3 +375,71 @@ def test_a_given_line_without_any_geometry_is_refused(kraken_svc, monkeypatch):
                                      "lines": _json.dumps([{"order": 0}])},
                                      files={"image": ("page.png", _png(), "image/png")})
     assert asyncio.run(call()).status_code == 400
+
+
+# ── the CUDA cache goes back after every request (#158) ─────────────────────
+
+def _counting_cache(monkeypatch, module, *, available=True, fail=False):
+    calls = []
+
+    def empty_cache():
+        calls.append(threading.current_thread().name)
+        if fail:
+            raise RuntimeError("CUDA error: device busy")
+
+    monkeypatch.setattr(module.torch, "cuda", types.SimpleNamespace(
+        is_available=lambda: available, empty_cache=empty_cache))
+    return calls
+
+
+def _run(module, request):
+    async def scenario():
+        async with _client(module) as client:
+            return await request(client)
+    return asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("request_", [_segment, _recognize])
+def test_every_request_gives_the_cache_back(kraken_svc, monkeypatch, request_):
+    """Measured 05.11.2026: 712 MiB allocated, 7,396 MiB reserved. The reserved
+    rest is what this returns, once per request."""
+    calls = _counting_cache(monkeypatch, kraken_svc)
+    assert _run(kraken_svc, request_).status_code == 200
+    assert len(calls) == 1
+    assert calls[0] != threading.main_thread().name, "off the event loop"
+
+
+def test_a_failed_request_gives_the_cache_back_too(kraken_svc, monkeypatch):
+    """The 23 GB of 21.09. came from one oversized input; an exception must not
+    leave its peak behind."""
+    calls = _counting_cache(monkeypatch, kraken_svc)
+
+    def oversized(_img):
+        raise RuntimeError("CUDA out of memory")
+    monkeypatch.setattr(kraken_svc, "_run_segmentation", oversized)
+    assert _run(kraken_svc, _segment).status_code == 500
+    assert len(calls) == 1
+
+
+def test_a_failing_release_never_fails_the_request(kraken_svc, monkeypatch):
+    calls = _counting_cache(monkeypatch, kraken_svc, fail=True)
+    assert _run(kraken_svc, _recognize).status_code == 200
+    assert _run(kraken_svc, _recognize).status_code == 200
+    assert len(calls) == 2
+
+
+def test_it_can_be_turned_off_but_eviction_still_releases(kraken_svc, monkeypatch):
+    calls = _counting_cache(monkeypatch, kraken_svc)
+    monkeypatch.setattr(kraken_svc, "RELEASE_CUDA_CACHE", False)
+    monkeypatch.setattr(kraken_svc, "MODEL_CACHE_SIZE", 1)
+    assert _run(kraken_svc, _segment).status_code == 200
+    assert calls == []
+    _run(kraken_svc, lambda c: _recognize(c, "model-a"))
+    _run(kraken_svc, lambda c: _recognize(c, "model-b"))   # evicts model-a
+    assert len(calls) == 1
+
+
+def test_on_cpu_nothing_is_released(kraken_svc, monkeypatch):
+    calls = _counting_cache(monkeypatch, kraken_svc, available=False)
+    assert _run(kraken_svc, _recognize).status_code == 200
+    assert calls == []
