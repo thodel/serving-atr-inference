@@ -227,6 +227,63 @@ models:
       - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
       - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
 
+  # The E4B arm of the Gemma 4 ladder (training-atr-models#83, G3): the same four
+  # XIX corpora and the same prompt as qwen3.5-4b-german-xix-v2, on
+  # google/gemma-4-E4B-it, QLoRA r=64, one epoch, trained at `granularity: line`.
+  #
+  # `level: line` is a measurement (G6, training-atr-models#86, 05.11.2026, 15 XIX
+  # validation pages on asteraix, vLLM 0.29.0): lines CER 0.143 (646 lines), whole
+  # pages 1.16 (length ratio 0.21). A line-trained Gemma reads no pages, like
+  # every line-trained Qwen measured here (#165).
+  #
+  # `max_soft_tokens: 140` is not tuning. Gemma 4 takes its visual budget in five
+  # soft-token steps and rounds a pixel request UP to one: training asked for
+  # max_pixels 262144 and got step 140, which carries 140 x 48 x 48 = 322560
+  # pixels — hence `max_pixels` below. At vLLM's default step the same adapter
+  # reads lines at CER 0.90 (G6): it does not fail, it reads nothing. The merged
+  # directory gets its processor from the BASE (merge_loras.processor_source),
+  # whose step is 280, so the step has to come from the launch flag.
+  #
+  # Served merged, not as a LoRA: resolve_model_path serves the merged directory
+  # or `hf_repo` itself, and `hf_repo` is an adapter, not a model vLLM can load.
+  # G6 served it unmerged with --enable-lora, which this launcher has no notion
+  # of. The adapter excludes the vision and audio towers, so the merge changes
+  # the language model only.
+  #
+  # Registered disabled until it has been merged on idhefix and has read one line
+  # through the gateway. vram_mb is the base's bf16 checkpoint (15,992,595,884
+  # bytes); merge_loras.py prints the measured size of the merge.
+  - id: gemma4-e4b-german-xix-v1
+    engine: vllm
+    enabled: false
+    disabled_reason: >-
+      Not merged on this box yet (scripts/merge_loras.py --only
+      gemma4-e4b-german-xix-v1 in .venvs/vllm-next); enabled once the merge has
+      read one line through the gateway (training-atr-models#83).
+    vllm_venv: vllm-next  # Gemma 4 needs transformers 5; vLLM 0.29.0 is what G6 measured
+    vllm_args:
+      - --mm-processor-kwargs
+      - '{"max_soft_tokens": 140}'
+      - --limit-mm-per-prompt
+      - '{"image": 1, "audio": 0}'
+    hf_repo: dh-unibe/gemma4-e4b-german-xix-v1   # private, the LoRA adapter
+    base_model: google/gemma-4-E4B-it
+    task: htr
+    level: line          # lines 0.143, pages 1.16 (G6); never `page`
+    max_pixels: 322560   # what soft-token step 140 carries, the budget it trained at
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 15300
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
   # The first fine-tune here trained at `granularity: page`, and that is the whole
   # point of it: every other dh-unibe VLM reads one line per call because that is
   # what it saw in training (#165). This one saw whole pages — 171 validation
