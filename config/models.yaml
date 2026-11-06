@@ -250,16 +250,14 @@ models:
   # of. The adapter excludes the vision and audio towers, so the merge changes
   # the language model only.
   #
-  # Registered disabled until it has been merged on idhefix and has read one line
-  # through the gateway. vram_mb is the base's bf16 checkpoint (15,992,595,884
-  # bytes); merge_loras.py prints the measured size of the merge.
+  # Merged on idhefix with .venvs/vllm-next (06.11.2026): 15147 MiB of weights,
+  # so vram_mb 15300 stays. Enabled because the gateway never serves a disabled
+  # vLLM entry, so the first read through /recognize can only come after this
+  # (INFRASTRUCTURE.md, "When the gate did not promote a model"). If that read
+  # fails, the entry goes back to `enabled: false` (training-atr-models#83).
   - id: gemma4-e4b-german-xix-v1
     engine: vllm
-    enabled: false
-    disabled_reason: >-
-      Not merged on this box yet (scripts/merge_loras.py --only
-      gemma4-e4b-german-xix-v1 in .venvs/vllm-next); enabled once the merge has
-      read one line through the gateway (training-atr-models#83).
+    enabled: true
     vllm_venv: vllm-next  # Gemma 4 needs transformers 5; vLLM 0.29.0 is what G6 measured
     vllm_args:
       - --mm-processor-kwargs
