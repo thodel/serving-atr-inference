@@ -62,11 +62,16 @@ def test_the_prompt_is_the_trained_one(spec):
     assert spec.prompt == "Transcribe the handwritten text in this image exactly as written."
 
 
-def test_it_is_not_advertised_before_it_is_merged(spec):
-    """Not merged on idhefix when this entry was written; enabling it is a step
-    for the box, after the merge has read a line."""
-    assert spec.enabled is False
-    assert "merge_loras.py" in (spec.disabled_reason or "")
+#: What merge_loras.py measured on idhefix, 06.11.2026 (training-atr-models#83).
+MERGED_MIB = 15147
+
+
+def test_it_is_enabled_and_sized_for_the_merge(spec):
+    """Merged on idhefix in .venvs/vllm-next; enabled so the first read through
+    /recognize can happen at all (the gateway never serves a disabled vLLM
+    entry). The launch is sized from vram_mb, so it must hold the merge."""
+    assert spec.enabled is True and not spec.disabled_reason
+    assert spec.vram_mb >= MERGED_MIB
 
 
 def test_launch_args_reach_the_command_line(spec, tmp_path, monkeypatch):
