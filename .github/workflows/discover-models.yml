@@ -16,6 +16,7 @@ permissions:
   issues: write         # the rolling report issue
   contents: write       # push the catalogue branch (#116)
   pull-requests: write  # propose the catalogue as a PR (#116)
+  actions: write        # start test.yml on the proposed branch (#255)
 
 jobs:
   discover:
@@ -57,9 +58,11 @@ jobs:
       # The catalogue is proposed, not committed: a verdict is recorded by hand
       # in that file, and a weekly run must not land on main without review.
       # One rolling branch and one open PR, updated in place. A PR opened with
-      # GITHUB_TOKEN starts no other workflow, so its CI is run by hand or by
-      # the next push to it; the repository must allow Actions to create PRs
-      # (Settings → Actions → General).
+      # GITHUB_TOKEN starts no other workflow, so the script starts test.yml on
+      # the branch itself (workflow_dispatch is the exception), and it refuses to
+      # propose a catalogue the gateway's loader would not read (#255). The
+      # repository must allow Actions to create PRs (Settings → Actions →
+      # General).
       - name: Propose the catalogue as a PR
         if: inputs.dry_run != 'true'
         env:
