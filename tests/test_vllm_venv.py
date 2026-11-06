@@ -111,17 +111,19 @@ def test_max_num_seqs_only_for_vllm_models():
         ModelSpec(id="t", engine="trocr", hf_repo="org/t", max_num_seqs=8)
 
 
-def test_only_the_qwen35_models_use_the_second_vllm():
+def test_only_the_models_vllm_011_cannot_load_use_the_second_vllm():
     """Moving a proven model to another vLLM is a decision, not a side effect.
 
     The list grows only for a model that cannot run on the default vLLM at all:
-    both entries below are Qwen3.5 bases, and `.venvs/vllm-next` is the only venv
-    here whose transformers knows `qwen3_5`. A model appearing here for any other
-    reason is the side effect this test exists to catch.
+    two Qwen3.5 bases, whose `qwen3_5` only `.venvs/vllm-next`'s transformers
+    knows, and one Gemma 4 base, which needs transformers 5 as well
+    (training-atr-models#83). A model appearing here for any other reason is the
+    side effect this test exists to catch.
     """
     registry = load_registry(REPO_ROOT / "config" / "models.yaml")
     on_next = sorted(s.id for s in registry.all() if s.vllm_venv == "vllm-next")
-    assert on_next == ["qwen3.5-4b-german-kurrent-xvi-xix-page-v1",
+    assert on_next == ["gemma4-e4b-german-xix-v1",
+                       "qwen3.5-4b-german-kurrent-xvi-xix-page-v1",
                        "qwen3.5-4b-german-xix-v2"]
 
 
