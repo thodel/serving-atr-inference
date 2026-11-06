@@ -549,6 +549,8 @@ def merge_one(spec, out_dir: Path) -> None:
     merged = peft_model.merge_and_unload()
     out_dir.mkdir(parents=True, exist_ok=True)
     merged.save_pretrained(out_dir, safe_serialization=True)
+    if (line := restore_dropped_base_tensors(spec.base_model, out_dir, mapping)):
+        print(f"[{spec.id}] {line}")
     # Tokenizer/processor: from the base unless the adapter changed the vocabulary
     # — see processor_source. The previous version took it from the adapter on the
     # assumption that it "carries the chat template + added tokens"; for a LoRA
@@ -558,6 +560,106 @@ def merge_one(spec, out_dir: Path) -> None:
     print(f"[{spec.id}] processor from {src}")
     AutoProcessor.from_pretrained(src, trust_remote_code=True).save_pretrained(out_dir)
     print(f"[{spec.id}] DONE -> {out_dir}")
+
+
+# ── what the save left out ───────────────────────────────────────────────────
+#
+# 06.11.2026, idhefix, gemma4-e4b-german-xix-v1 (training-atr-models#83): the merge
+# said DONE, the gateway launched it, and vLLM 0.29 refused the checkpoint —
+# "Following weights were not initialized from checkpoint": k_proj, v_proj and
+# k_norm of language-model layers 24–41, 54 tensors. Gemma 4 E4B shares the KV
+# cache of its last 18 layers with earlier ones; transformers 5 builds those layers
+# without their own K/V projections, so it never loads the base's tensors for them
+# and save_pretrained never writes them. vLLM builds them anyway and wants them.
+#
+# Unused by the forward pass is not unused by the loader, so whatever the base's
+# checkpoint holds and the save dropped goes back in, from the base, as its own
+# shard with an index. The adapter's changes are all in the tensors the save kept:
+# a module transformers did not build is one peft had nothing to attach to (the
+# E4B adapter has no K/V LoRA on layers 24–41, checked 06.11.2026).
+
+#: The shard the restored base tensors are written to.
+RESTORED_SHARD = "model-restored-base.safetensors"
+INDEX_NAME = "model.safetensors.index.json"
+
+
+def dropped_base_tensors(base_keys, saved_keys,
+                         mapping: dict[str, str] | None = None) -> dict[str, str]:
+    """``{name in the merge: name in the base}`` for what the save left out.
+
+    ``mapping`` is the base load's ``key_mapping`` (regex → replacement, first match
+    wins, as transformers applies it): the merge saves the renamed names, so the
+    comparison is made after renaming. Pure, so the incident is a test.
+    """
+    import re
+
+    saved = set(saved_keys)
+    out: dict[str, str] = {}
+    for key in base_keys:
+        target = key
+        for pattern, replacement in (mapping or {}).items():
+            renamed, n = re.subn(pattern, replacement, key)
+            if n:
+                target = renamed
+                break
+        if target not in saved:
+            out[target] = key
+    return out
+
+
+def _safetensors_keys(files) -> dict[str, Path]:
+    from safetensors import safe_open
+
+    where: dict[str, Path] = {}
+    for f in files:
+        with safe_open(str(f), "pt") as h:
+            for k in h.keys():
+                where[k] = Path(f)
+    return where
+
+
+def restore_dropped_base_tensors(base_model: str, out_dir: Path,
+                                 mapping: dict[str, str] | None = None) -> str | None:
+    """Write the base tensors the save dropped into ``out_dir``; one line, or None.
+
+    None when nothing was dropped (or nothing was saved to compare with). The
+    restored tensors go to :data:`RESTORED_SHARD`, and the index is written or
+    extended so that transformers and vLLM both read the directory as one
+    sharded checkpoint.
+    """
+    import json
+
+    # The restored shard counts as saved, so a second run finds nothing to do.
+    saved_files = sorted(out_dir.glob("*.safetensors"))
+    if not any(p.name != RESTORED_SHARD for p in saved_files):
+        return None
+    from huggingface_hub import snapshot_download
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    base_dir = Path(snapshot_download(base_model, allow_patterns=["*.safetensors"]))
+    base_where = _safetensors_keys(sorted(base_dir.glob("*.safetensors")))
+    saved_where = _safetensors_keys(saved_files)
+    plan = dropped_base_tensors(base_where, saved_where, mapping)
+    if not plan:
+        return None
+
+    tensors = {}
+    for target, source in plan.items():
+        with safe_open(str(base_where[source]), "pt") as h:
+            tensors[target] = h.get_tensor(source)
+    save_file(tensors, str(out_dir / RESTORED_SHARD), metadata={"format": "pt"})
+
+    index_path = out_dir / INDEX_NAME
+    if index_path.is_file():
+        index = json.loads(index_path.read_text())
+    else:
+        index = {"metadata": {}, "weight_map": {k: p.name for k, p in saved_where.items()}}
+    index["weight_map"].update({k: RESTORED_SHARD for k in plan})
+    index_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n")
+
+    return (f"restored {len(plan)} base tensors the save dropped (e.g. "
+            f"{', '.join(sorted(plan)[:2])}) -> {RESTORED_SHARD}")
 
 
 # ── what the merge weighs ────────────────────────────────────────────────────
