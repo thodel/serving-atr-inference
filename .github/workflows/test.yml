@@ -16,6 +16,9 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  # The weekly catalogue PR is pushed with GITHUB_TOKEN, which starts neither
+  # trigger above; scripts/propose_catalogue.py dispatches this instead (#255).
+  workflow_dispatch:
 
 permissions:
   contents: read

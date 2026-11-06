@@ -13,7 +13,10 @@ nothing. These pin:
   with the permissions that takes;
 * ``scripts/propose_catalogue.py`` does nothing when the file did not change,
   pushes one rolling branch and opens one PR when it did, and does not open a
-  second while the first is open.
+  second while the first is open;
+* it refuses to propose a catalogue the loader would not read, and starts
+  ``test.yml`` on the pushed branch, because a PR pushed with GITHUB_TOKEN
+  starts no workflow of its own (#255).
 """
 
 import json
@@ -125,7 +128,7 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "discover-models.yml"
 def test_the_action_writes_the_catalogue_and_proposes_it():
     wf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     assert wf["permissions"] == {"issues": "write", "contents": "write",
-                                 "pull-requests": "write"}
+                                 "pull-requests": "write", "actions": "write"}
     steps = {s.get("name"): s for s in wf["jobs"]["discover"]["steps"]}
     assert "--dry-run" not in steps["Discover models"]["run"], "a dry run writes nothing"
     names = list(steps)
@@ -162,16 +165,20 @@ def repo(tmp_path):
     log = tmp_path / "gh.log"
     gh = bindir / "gh"
     gh.write_text(f"""#!/bin/sh
-echo "$1 $2" >> {log}
+# one call, one line: the PR body is several
+printf '%s\\n' "$(echo "$*" | tr '\\n' ' ')" >> {log}
 case "$*" in
   "pr list"*) cat {tmp_path}/open_prs 2>/dev/null || true ;;
   "pr create"*) echo https://github.com/x/y/pull/7 ;;
+  "workflow run"*) if [ -e {tmp_path}/dispatch_fails ]; then
+      echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; fi ;;
 esac
 """)
     gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
     env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
     return type("Repo", (), {"work": work, "origin": origin, "log": log, "env": env,
-                             "open_prs": tmp_path / "open_prs"})()
+                             "open_prs": tmp_path / "open_prs",
+                             "dispatch_fails": tmp_path / "dispatch_fails"})()
 
 
 def _propose(repo):
@@ -180,7 +187,8 @@ def _propose(repo):
 
 
 def _gh_calls(repo):
-    return repo.log.read_text().splitlines() if repo.log.exists() else []
+    return ([c.strip() for c in repo.log.read_text().splitlines()]
+            if repo.log.exists() else [])
 
 
 def test_an_unchanged_catalogue_proposes_nothing(repo):
@@ -199,7 +207,8 @@ def test_a_changed_catalogue_is_pushed_to_one_branch_and_opened_once(repo):
     assert "discovery/catalogue" in _git(repo.origin, "branch")
     shown = _git(repo.origin, "show", "discovery/catalogue:config/discovered.yaml")
     assert "a/b" in shown
-    assert [c.split()[:2] for c in _gh_calls(repo)] == [["pr", "list"], ["pr", "create"]]
+    assert [c.split()[:2] for c in _gh_calls(repo)] == [
+        ["pr", "list"], ["pr", "create"], ["workflow", "run"]]
     assert _git(repo.origin, "rev-parse", "main") != _git(repo.origin, "rev-parse",
                                                            "discovery/catalogue"), "main untouched"
 
@@ -209,7 +218,64 @@ def test_an_open_pr_is_updated_by_the_push_not_opened_again(repo):
     (repo.work / "config" / "discovered.yaml").write_text("version: 1\ncandidates: []\n# x\n")
     done = _propose(repo)
     assert done.returncode == 0 and "#42 already open" in done.stdout
-    assert [c.split()[:2] for c in _gh_calls(repo)] == [["pr", "list"]]
+    assert [c.split()[:2] for c in _gh_calls(repo)] == [["pr", "list"], ["workflow", "run"]]
+
+
+# ── #255: the PR gets its tests, and a broken catalogue gets no PR ──────────
+
+TESTS = REPO_ROOT / ".github" / "workflows" / "test.yml"
+
+
+def _a_change(repo):
+    (repo.work / "config" / "discovered.yaml").write_text(
+        "version: 1\ncandidates:\n- {id: a/b, source: hf, first_seen: '2026-10-27', "
+        "last_seen: '2026-10-27'}\n")
+
+
+def test_the_tests_can_be_dispatched():
+    wf = yaml.safe_load(TESTS.read_text(encoding="utf-8"))
+    triggers = wf.get("on", wf.get(True))       # YAML 1.1 reads a bare `on` as True
+    assert "workflow_dispatch" in triggers
+    assert {"push", "pull_request"} <= set(triggers), "the ordinary triggers stay"
+
+
+def test_the_tests_are_started_on_the_pushed_branch(repo):
+    _a_change(repo)
+    done = _propose(repo)
+    assert done.returncode == 0, done.stderr
+    assert "workflow run test.yml --ref discovery/catalogue" in _gh_calls(repo)
+    assert "test.yml started on discovery/catalogue" in done.stdout
+
+
+def test_nothing_to_propose_starts_no_tests(repo):
+    assert _propose(repo).returncode == 0
+    assert not any(c.startswith("workflow run") for c in _gh_calls(repo))
+
+
+def test_a_failed_dispatch_fails_the_run_and_says_the_pr_has_no_ci(repo):
+    repo.dispatch_fails.write_text("")
+    _a_change(repo)
+    done = _propose(repo)
+    assert done.returncode != 0
+    assert "the PR has no CI" in done.stderr and "actions: write" in done.stderr
+    assert "discovery/catalogue" in _git(repo.origin, "branch"), "the PR still exists"
+
+
+@pytest.mark.parametrize("text,named", [
+    ("version: 1\ncandidates:\n- {id: a/b, source: hf, first_seen: '2026-10-27', "
+     "last_seen: '2026-10-27', verdict: rejected, by: t, at: '2026-10-27'}\n",
+     "needs a reason"),
+    ("version: 1\ncandidates:\n- {id: a/b, source: hf\n", ""),        # not YAML
+    ("version: 2\ncandidates: []\n", "version"),
+])
+def test_a_catalogue_the_loader_refuses_is_not_proposed(repo, text, named):
+    (repo.work / "config" / "discovered.yaml").write_text(text)
+    done = _propose(repo)
+    assert done.returncode == 1
+    assert "would not load, so it is not proposed" in done.stderr
+    assert named in done.stderr
+    assert _gh_calls(repo) == []
+    assert "discovery/catalogue" not in _git(repo.origin, "branch")
 
 
 def test_the_endpoint_reads_what_the_action_writes(tmp_path):
