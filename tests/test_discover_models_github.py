@@ -275,7 +275,8 @@ class TestWorkflowYaml:
         assert on_section is not None
         assert "schedule" in on_section
         assert "workflow_dispatch" in on_section
-        assert wf.get("permissions", {}).get("issues") == "write"
+        # The report is the catalogue PR's text since #112; nothing writes an issue.
+        assert "issues" not in wf.get("permissions", {})
 
     def test_schedule_is_weekly(self):
         workflow_path = REPO_ROOT / ".github" / "workflows" / "discover-models.yml"
