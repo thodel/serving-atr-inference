@@ -349,6 +349,10 @@ def _scrub(value: Any, secret: str) -> Any:
 #: *each* phase: 20 s would allow 20 to connect plus 20 to answer — past the
 #: callers' 30 s that ``Settings.train_timeout_s`` exists to stay under.
 TRAINER_CONNECT_TIMEOUT_S = 5.0
+#: A survey (training-atr-models#200) asks GitHub or Zenodo for the record, the
+#: tree and up to a handful of licence files in a row. Still under the 30 s a
+#: Discord interaction or an MCP broker waits.
+GT_SURVEY_TIMEOUT_S = 28.0
 
 
 class TrainerClient:
@@ -511,6 +515,28 @@ class TrainerClient:
     async def verify(self, body: dict[str, Any]) -> dict:
         """Check a request's dataset against the hub. Queues nothing."""
         return await self._request("POST", "/jobs/verify", json=body)
+
+    # ── foreign ground truth (training-atr-models#200) ──────────────────────
+    async def gt_sources(self, check_hf: bool = True) -> dict:
+        """The trainer's register of foreign ground truth."""
+        return await self._request("GET", "/gt/sources",
+                                   params={"check_hf": "true" if check_hf else "false"})
+
+    async def gt_survey(self, body: dict[str, Any]) -> dict:
+        """Read-only survey of a GitHub repository or Zenodo record.
+
+        Several requests to GitHub or Zenodo happen behind this one, so it gets
+        :data:`GT_SURVEY_TIMEOUT_S` rather than the client's default.
+        """
+        return await self._request("POST", "/gt/survey", json=body,
+                                   timeout=max(self.timeout, GT_SURVEY_TIMEOUT_S))
+
+    async def gt_import(self, body: dict[str, Any]) -> dict:
+        """Start an import of a registered source; the trainer answers with the job."""
+        return await self._request("POST", "/gt/import", json=body)
+
+    async def gt_import_status(self, job_id: str) -> dict:
+        return await self._request("GET", f"/gt/import/{job_id}")
 
 
 def get_trainer_client(settings) -> TrainerClient:
