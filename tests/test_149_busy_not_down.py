@@ -114,7 +114,7 @@ def _client(party, grace_s: float) -> TestClient:
 def _post(client, route="/recognize"):
     started = time.perf_counter()
     response = client.post(route, headers=HEADERS, files={"image": IMG},
-                           data={"model": KRAKEN_MODEL})
+                           data={"model": KRAKEN_MODEL, "second_opinion": "party"})
     return response, time.perf_counter() - started
 
 

@@ -976,19 +976,57 @@ def _require_image(raw: bytes, filename: str) -> None:
         ) from exc
 
 
+#: What the ``second_opinion`` form field accepts (#265). One engine for now; a
+#: name rather than a boolean so a second one does not need a second field.
+SECOND_OPINION_ENGINES = ("party",)
+
+
+def _wants_second_opinion(value: str | None) -> bool:
+    """Whether this request asked for a second opinion (#265).
+
+    Off unless asked. Party read every image alongside the requested engine
+    until 12.11.2026, and from 01.11. to 12.11. 1,463 of its 1,550 readings
+    (94 %) arrived after the grace period and were dropped — while each of
+    those pages held its finished answer for the full 30 s. On a 2,047-page
+    batch that was most of the wall time. No caller read the field; the batch
+    runner stored it. So the cost now falls on whoever asks for it.
+
+    An unknown value is a 422, not a silent "no": a caller who misspelled
+    ``party`` would otherwise wait for a reading that never comes.
+    """
+    if value is None or not value.strip():
+        return False
+    name = value.strip().lower()
+    if name in SECOND_OPINION_ENGINES:
+        return True
+    raise HTTPException(
+        status_code=422,
+        detail=(f"second_opinion={value!r}: the gateway offers "
+                f"{', '.join(SECOND_OPINION_ENGINES)} (or leave it out)"),
+    )
+
+
 async def _party_second_opinion(request: Request, engine: str, raw: bytes,
-                                filename: str, ctype: str) -> SecondOpinion | None:
+                                filename: str, ctype: str,
+                                wanted: bool = False) -> SecondOpinion | None:
     """Party's reading of the same image, for attaching to another engine's result.
 
     Returns None — not an error — in the two cases where a second opinion is
-    meaningless: the switch is off, or party *is* the engine that was asked for.
+    meaningless: nobody asked for one (``wanted``, #265), or party *is* the
+    engine that was asked for. Asked for while the gateway's switch is off, it
+    returns the reason instead, so the caller does not read the absence as
+    "party saw nothing".
 
     **Never raises.** Party is an addition to the answer; if it fails, the caller
     still gets the transcription it requested and the reason the extra one is
     missing. Raising here would turn a working recognition into a 502.
     """
-    if engine == "party" or not _settings(request).party_second_opinion:
+    if not wanted or engine == "party":
         return None
+    if not _settings(request).party_second_opinion:
+        return SecondOpinion(
+            engine="party", model="party",
+            error="switched off on this gateway (ATR_PARTY_SECOND_OPINION=false)")
     started = time.perf_counter()
     try:
         res = await _engine_client(request, "party").recognize(
@@ -1040,7 +1078,11 @@ async def recognize(
     image: UploadFile = File(...),
     model: str = Form(...),
     lines: str | None = Form(None),
+    second_opinion: str | None = Form(
+        None, description="'party' to have party read the same image alongside; "
+                          "off unless asked (#265)"),
 ) -> RecognitionResult:
+    wanted = _wants_second_opinion(second_opinion)
     engine, spec = _resolve_spec_strict(request, model)   # 404 on an unrunnable id (#21)
     _count(request, model)
     raw = await image.read()
@@ -1061,12 +1103,12 @@ async def recognize(
     kraken_ref = (spec.local_path or spec.zenodo_id or spec.id) if spec else model
     trocr_ref = (spec.local_path or spec.hf_repo or spec.id) if spec else model
 
-    # Party reads every image alongside the requested engine. Started here and
-    # awaited at the end, so the two run concurrently: the cost of the second
-    # opinion is the slower of the two, not the sum. It is a task rather than an
-    # awaited call for exactly that reason.
+    # Party reads the image alongside the requested engine when the caller asked
+    # for it (#265). Started here and awaited at the end, so the two run
+    # concurrently: the cost of the second opinion is the slower of the two, not
+    # the sum. It is a task rather than an awaited call for exactly that reason.
     party_task = asyncio.ensure_future(
-        _party_second_opinion(request, engine, raw, filename, ctype)
+        _party_second_opinion(request, engine, raw, filename, ctype, wanted)
     )
 
     grace_s = _settings(request).party_second_opinion_grace_s
@@ -1156,6 +1198,9 @@ async def ocr(
     image: UploadFile = File(...),
     model: str = Form(...),
     seg_mode: str = Form("baseline"),
+    second_opinion: str | None = Form(
+        None, description="'party' to have party read the same image alongside; "
+                          "off unless asked (#265)"),
 ) -> OcrResponse:
     """Page-level convenience for agentic_historian's ``KrakenHTTPClient``,
     projected down to the minimal ``{text, confidence, model, version}`` shape.
@@ -1171,6 +1216,7 @@ async def ocr(
     and an engine failure a 502, so an empty ``text`` with ``lines == 0`` means the
     page genuinely had no detected lines.
     """
+    wanted = _wants_second_opinion(second_opinion)
     engine, spec = _resolve_spec_strict(request, model)   # 404 on an unrunnable id (#21)
     _count(request, model)
     raw = await image.read()
@@ -1181,7 +1227,7 @@ async def ocr(
     _require_image(raw, filename)
     # Concurrent with the engine below — see /recognize for why it is a task.
     party_task = asyncio.ensure_future(
-        _party_second_opinion(request, engine, raw, filename, ctype)
+        _party_second_opinion(request, engine, raw, filename, ctype, wanted)
     )
     try:
         if engine == "kraken":
