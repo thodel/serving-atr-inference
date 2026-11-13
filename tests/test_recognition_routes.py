@@ -257,7 +257,7 @@ def test_second_opinion_is_attached_to_a_kraken_result(fake: FakeKrakenClient):
     party = FakePartyClient()
     resp = _client_with_party(fake, party).post(
         "/recognize", headers=HEADERS, files={"image": IMG},
-        data={"model": "10.5281/zenodo.7516057"},
+        data={"model": "10.5281/zenodo.7516057", "second_opinion": "party"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -276,7 +276,7 @@ def test_a_failing_second_opinion_does_not_fail_the_request(fake: FakeKrakenClie
     party = FakePartyClient(fail=True)
     resp = _client_with_party(fake, party).post(
         "/recognize", headers=HEADERS, files={"image": IMG},
-        data={"model": "10.5281/zenodo.7516057"},
+        data={"model": "10.5281/zenodo.7516057", "second_opinion": "party"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -288,7 +288,8 @@ def test_a_failing_second_opinion_does_not_fail_the_request(fake: FakeKrakenClie
 def test_party_as_the_engine_gets_no_second_opinion_of_itself(fake: FakeKrakenClient):
     party = FakePartyClient()
     resp = _client_with_party(fake, party).post(
-        "/recognize", headers=HEADERS, files={"image": IMG}, data={"model": "party"},
+        "/recognize", headers=HEADERS, files={"image": IMG},
+        data={"model": "party", "second_opinion": "party"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -303,7 +304,8 @@ def test_ocr_carries_the_second_opinion_but_stays_minimal_without_one(
     party = FakePartyClient()
     body = _client_with_party(fake, party).post(
         "/ocr", headers=HEADERS, files={"image": IMG},
-        data={"model": "10.5281/zenodo.7516057", "seg_mode": "baseline"},
+        data={"model": "10.5281/zenodo.7516057", "seg_mode": "baseline",
+              "second_opinion": "party"},
     ).json()
     assert body["second_opinion"]["text"] == "Raths buecher"
     # and without one, the legacy projection is unchanged — pinned by

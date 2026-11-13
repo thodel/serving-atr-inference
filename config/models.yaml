@@ -435,7 +435,7 @@ models:
       - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-post-1500
       - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii
 
-  # ── Party HTR — its own always-on service (runs for every image) ──────────
+  # ── Party HTR — its own always-on service (second opinion only when asked, #265) ──
   - id: party
     engine: party
     zenodo_id: "10.5281/zenodo.20642057"

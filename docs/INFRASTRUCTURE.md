@@ -125,7 +125,7 @@ flowchart TB
   clients -- "X-API-Key" --> gw
   gw -- "segmentation for TrOCR and line VLMs<br/>kraken pages in one call" --> kr
   gw -- "TrOCR: one call per line crop<br/>6 crops at a time" --> tr
-  gw -- "party pages<br/>and a second opinion on every request" --> pa
+  gw -- "party pages<br/>and a second opinion when asked" --> pa
   gw -- "asks for a port" --> mm
   mm -- "starts on the first request" --> vl
   gw -- "VLM page: one call<br/>VLM line: one call per crop" --> vl
@@ -154,9 +154,10 @@ How a request is recognized depends on the model's engine and level:
 | `/recognize` | vllm, line level | kraken segmentation, then one chat call per line crop |
 | `/v1/chat/completions` | vllm | passed through to a resident model |
 
-- **party runs beside every request** as a second opinion (`party_second_opinion`,
-  on by default), except when party is the engine that was asked for. Its text comes
-  back in `second_opinion`; a failed second opinion never fails the request.
+- **party reads beside a request that asks** (`second_opinion=party` on `/recognize`
+  and `/ocr`, #265). Its text comes back in `second_opinion`, after at most 30 s
+  more; a failed or late second opinion never fails the request.
+  `ATR_PARTY_SECOND_OPINION=false` refuses it box-wide.
 - `/ocr` accepts only kraken and TrOCR; a VLM goes through `/recognize`.
 - **Card 1 is the only card serving uses.** The engines held about 15.8 GB of it on
   16.09. and more since (#158), and the vLLM budget is what is left after them and a
