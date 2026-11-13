@@ -129,8 +129,15 @@ class Entry:
     #: Kept for the report so a row does not need a second lookup.
     title: str | None = None
     #: Which backend could load it, from :mod:`atr_serving.base_models` (#115).
-    #: ``None`` is "not judged yet" or "none could" — ``reason`` says which.
+    #: ``None`` is "not judged yet" or "none could" — ``judgement`` says which.
     backend: str | None = None
+    #: What judging it found, when that is not a verdict (#112): the evidence
+    #: for a backend, or why none could load it. ``None`` means never judged,
+    #: which is what makes the next run judge it — once. ``reason`` stays the
+    #: reason *for a verdict*; a candidate still ``new`` has no verdict to give
+    #: a reason for, but its judgement is what lets a report count it rather
+    #: than list it.
+    judgement: str | None = None
 
     @property
     def key(self) -> str:

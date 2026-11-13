@@ -27,11 +27,18 @@ Two things it does around the push (#255):
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 
 CATALOGUE = "config/discovered.yaml"
+#: What discover_models.py wrote in the step before (``--out``).
+REPORT = "discovery_report.json"
+#: Rows of usable arrivals shown in full; the rest are counted.
+SHOWN = 10
 BRANCH = "discovery/catalogue"
 TITLE = "Discovery: Katalog der Modellkandidaten aktualisieren"
 #: Started on BRANCH after each push; needs `workflow_dispatch:` in its `on:`
@@ -74,11 +81,110 @@ def dispatch_tests() -> int:
     return 0
 
 
-def body(stamp: str) -> str:
+def _link(entry: dict) -> str:
+    if entry.get("source") == "zenodo":
+        return f"[zenodo:{entry['id']}](https://zenodo.org/records/{entry['id']})"
+    return f"[{entry['id']}](https://huggingface.co/{entry['id']})"
+
+
+#: The judgements a report counts instead of listing, by the words that name
+#: them in :mod:`atr_serving.base_models`. Anything else is counted by its text.
+WHY_NOT = (
+    ("nothing identifies a backend", "nichts weist auf ein Backend hin"),
+    ("vision tower but no chat template", "Vision-Tower ohne Chat-Template"),
+    ("an archive", "Archiv, könnte ein .mlmodel enthalten"),
+    ("weights but no .mlmodel", "Gewichte, aber kein .mlmodel"),
+    ("parameter count", "Parameterzahl nicht veröffentlicht"),
+    ("no public files", "keine öffentlichen Dateien"),
+)
+
+
+def _why_not(judgement: str | None) -> str:
+    text = judgement or ""
+    for needle, label in WHY_NOT:
+        if needle in text:
+            return label
+    return "noch nicht beurteilt" if not text else text[:60]
+
+
+def digest(report: dict, stamp: str) -> str:
+    """The weekly message: what arrived that could be a base, in a minute (#112).
+
+    The epic's measure, not an inventory. The usable arrivals are listed (with
+    what decided they are usable); everything without a backend is counted by
+    why, because a heuristic that does not recognise a repository is not
+    allowed to reject it (#115) and a person will not read 800 rows either.
+    """
+    cat = report.get("catalogue") or {}
+    unseen = cat.get("unseen") or []
+    changed = cat.get("changed") or []
+    undecided = cat.get("undecided") or []
+    counts = cat.get("counts") or {}
+    judgements = cat.get("judgements") or {}
+    usable = sorted((e for e in unseen if e.get("backend")),
+                    key=lambda e: -(e.get("downloads") or 0))
+    waiting = [e for e in undecided if e.get("backend")]
+    # Rejected by the machine in this run. The unseen rows were written before
+    # `decide` replaced their entries, so they still say `new`: the judgement is
+    # what tells.
+    auto = {key for key, j in judgements.items() if j.get("automatic") and j.get("reason")}
+    rejected_now = len(auto)
+
+    lines = [f"**Discovery {stamp}:** {len(unseen)} neu seit dem letzten Lauf, davon "
+             f"**{len(usable)} verwendbar** · {len(changed)} seit einem Urteil geändert · "
+             f"{len(waiting)} ältere verwendbare warten auf ein Urteil", ""]
+    if usable:
+        lines += ["### Neu und als Basis verwendbar", "",
+                  "| Kandidat | Backend | woran erkannt | Downloads |", "|---|---|---|---:|"]
+        for e in usable[:SHOWN]:
+            lines.append(f"| {_link(e)} | {e['backend']} | {e.get('judgement') or ''} | "
+                         f"{e.get('downloads') if e.get('downloads') is not None else '–'} |")
+        if len(usable) > SHOWN:
+            lines.append(f"\n… und {len(usable) - SHOWN} weitere (`GET /discoveries?since={stamp}`)")
+        lines.append("")
+    if changed:
+        lines += ["### Seit einem Urteil geändert", ""]
+        lines += [f"- {_link(c.get('entry') or {})} ({(c.get('entry') or {}).get('verdict')}): "
+                  f"{c.get('why')}" for c in changed[:5]]
+        lines.append("")
+    unusable = [e for e in unseen if not e.get("backend")
+                and f"{e.get('source')}:{e.get('id')}" not in auto]
+    if unusable:
+        why = Counter(_why_not(e.get("judgement")) for e in unusable)
+        lines += ["### Neu, aber ohne erkanntes Backend (gezählt, nicht abgelehnt)", ""]
+        lines += [f"- {n} × {label}" for label, n in why.most_common()]
+        lines.append("")
+    gone = len([e for e in unseen if f"{e.get('source')}:{e.get('id')}" in auto])
+    if gone:
+        lines += [f"{gone} weitere Neue wurden automatisch abgelehnt: keine Datei, die "
+                  "Gewichte sein könnte, oder ein Bauteil fehlt, ohne das hier nicht "
+                  "trainiert werden kann (Grund je Eintrag im Katalog).", ""]
+    lines += [f"Katalog: {counts.get('new', 0)} offen, {counts.get('watching', 0)} beobachtet, "
+              f"{counts.get('rejected', 0)} abgelehnt ({rejected_now} in diesem Lauf "
+              f"automatisch), {counts.get('adopted', 0)} übernommen."]
+    if report.get("errors"):
+        lines += ["", "Nicht erreicht: " + "; ".join(str(e) for e in report["errors"])]
+    lines += ["", "Ein Urteil: `scripts/discover_models.py --decide hf:OWNER/MODEL --verdict "
+              "watching|rejected|adopted --reason \"…\"`. Die offenen verwendbaren am Gateway: "
+              "`GET /discoveries?verdict=new&backend=vllm` (bzw. `trocr`, `kraken`).",
+              "", f"`{CATALOGUE}` wie dieser Lauf ihn hinterlassen hat. Geöffnet von "
+              "`scripts/propose_catalogue.py` (#116, #112)."]
+    return "\n".join(lines)
+
+
+def body(stamp: str, report_path: str = REPORT) -> str:
+    """The PR text: the digest, or the plain notice when there is no report."""
+    path = Path(report_path)
+    if path.exists():
+        try:
+            return digest(json.loads(path.read_text(encoding="utf-8")), stamp)
+        except (ValueError, KeyError, TypeError) as e:
+            print(f"{report_path} could not be summarised ({e}); plain notice instead",
+                  file=sys.stderr)
     return (f"Weekly model discovery, {stamp}: `{CATALOGUE}` as this run left it.\n\n"
             "Review before merging: a verdict in this file is recorded by hand "
             "(`scripts/discover_models.py --decide …`), and the run only adds "
-            "candidates and moves `last_seen`. The full report is the rolling issue.\n\n"
+            "candidates and moves `last_seen`.\n\n"
             "Opened by `scripts/propose_catalogue.py` (#116).")
 
 
@@ -101,6 +207,11 @@ def main() -> int:
     open_prs = run("gh", "pr", "list", "--head", BRANCH, "--state", "open",
                    "--json", "number", "--jq", ".[].number").stdout.split()
     if open_prs:
+        # The push updates the diff; the text is this week's digest only if it
+        # is rewritten as well — otherwise the open PR says last week's news.
+        edited = run("gh", "pr", "edit", open_prs[0], "--body", body(stamp), check=False)
+        if edited.returncode:
+            print(edited.stderr, file=sys.stderr)
         print(f"PR #{open_prs[0]} already open for {BRANCH}: updated by the push")
         return dispatch_tests()
     made = run("gh", "pr", "create", "--head", BRANCH, "--base", "main",
