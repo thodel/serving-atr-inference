@@ -351,6 +351,18 @@ is expected, not an alarm. Until 16.09.2026, the trainer and the gateway also
 coordinated a shared card (`/gpu-claim`, `/admin/release-gpu`, `gpu_release.py`). That
 coordination was removed in #139 because the two machines no longer share a card.
 
+### Foreign ground truth (`/train/gt/*`, training-atr-models#200)
+
+Forwarded to the trainer like the job routes. The trainer decides; the gateway
+refuses two things itself, so the refusal costs no round trip to asteraix.
+
+| route | trainer | what it does | refused here |
+|---|---|---|---|
+| `GET /train/gt/sources` | `GET /gt/sources` | the register: licence, where it is written, image rights, target, `uploaded` | — |
+| `POST /train/gt/survey {url}` | `POST /gt/survey` | reads a GitHub repository or Zenodo record, uploads nothing, drafts a register entry; 28 s timeout instead of 20 | — |
+| `POST /train/gt/import {id, dry_run, parts, all_parts}` | `POST /gt/import` | imports a **registered** source as a job, `dry_run` by default | a body with a `public` key (422) |
+| `GET /train/gt/import/{job_id}` | `GET /gt/import/{job_id}` | status, report lines, end of the log | an id that is not `<UTC stamp>-<source>` (422) |
+
 ## The research share
 
 `//resstore.unibe.ch/wbkolleg_dh_1` is mounted at **`/mnt/wbkolleg_dh_1` on both hosts**:
