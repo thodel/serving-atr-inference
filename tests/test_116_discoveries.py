@@ -127,13 +127,15 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "discover-models.yml"
 
 def test_the_action_writes_the_catalogue_and_proposes_it():
     wf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    assert wf["permissions"] == {"issues": "write", "contents": "write",
-                                 "pull-requests": "write", "actions": "write"}
+    assert wf["permissions"] == {"contents": "write", "pull-requests": "write",
+                                 "actions": "write"}
     steps = {s.get("name"): s for s in wf["jobs"]["discover"]["steps"]}
     assert "--dry-run" not in steps["Discover models"]["run"], "a dry run writes nothing"
     names = list(steps)
     assert names.index("Discover models") < names.index("Propose the catalogue as a PR")
     assert "propose_catalogue.py" in steps["Propose the catalogue as a PR"]["run"]
+    assert not any("--github-issue" in (s.get("run") or "") for s in steps.values()), \
+        "the weekly report is the PR text (#112); the rolling issue is gone"
 
 
 # ── propose_catalogue.py ────────────────────────────────────────────────────
@@ -218,7 +220,9 @@ def test_an_open_pr_is_updated_by_the_push_not_opened_again(repo):
     (repo.work / "config" / "discovered.yaml").write_text("version: 1\ncandidates: []\n# x\n")
     done = _propose(repo)
     assert done.returncode == 0 and "#42 already open" in done.stdout
-    assert [c.split()[:2] for c in _gh_calls(repo)] == [["pr", "list"], ["workflow", "run"]]
+    assert [c.split()[:2] for c in _gh_calls(repo)] == [
+        ["pr", "list"], ["pr", "edit"], ["workflow", "run"]], \
+        "the push updates the diff; the text has to be rewritten too (#112)"
 
 
 # ── #255: the PR gets its tests, and a broken catalogue gets no PR ──────────
@@ -283,3 +287,90 @@ def test_the_endpoint_reads_what_the_action_writes(tmp_path):
     path = _catalogue(tmp_path / "d.yaml")
     assert json.loads(json.dumps(sorted(discoveries.load(path)))) == [
         "hf:dh-unibe/a", "hf:x/old", "zenodo:123"]
+
+
+# ── #112: the PR text is the weekly message ─────────────────────────────────
+def _propose_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("propose_catalogue_112", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _row(cid, *, backend=None, judgement=None, downloads=None, source="hf"):
+    return {"id": cid, "source": source, "verdict": "new", "backend": backend,
+            "judgement": judgement, "downloads": downloads}
+
+
+REPORT = {
+    "errors": [],
+    "catalogue": {
+        "counts": {"new": 3, "watching": 0, "rejected": 1, "adopted": 0},
+        "unseen": [
+            _row("a/vlm", backend="vllm", judgement="1.0B, chat template", downloads=900),
+            _row("a/odd", judgement="nothing identifies a backend that could load it"),
+            _row("7", source="zenodo",
+                 judgement="no model file in the record (Zenodo type: publication): x.pdf"),
+        ],
+        "changed": [],
+        "undecided": [_row("b/old", backend="trocr")],
+        "judgements": {
+            "hf:a/vlm": {"backend": "vllm", "reason": None, "automatic": False},
+            "hf:a/odd": {"backend": None, "reason": "nothing identifies a backend",
+                         "automatic": False},
+            "zenodo:7": {"backend": None, "reason": "no model file", "automatic": True},
+        },
+    },
+}
+
+
+def test_the_digest_lists_what_could_be_a_base_and_counts_the_rest():
+    text = _propose_module().digest(REPORT, "2026-11-16")
+
+    assert "3 neu seit dem letzten Lauf, davon **1 verwendbar**" in text
+    assert "[a/vlm](https://huggingface.co/a/vlm) | vllm | 1.0B, chat template | 900" in text
+    assert "1 × nichts weist auf ein Backend hin" in text
+    assert "a/odd" not in text, "a candidate without a backend is counted, not listed"
+    assert "1 ältere verwendbare warten" in text
+
+
+def test_a_machine_rejection_is_not_counted_as_still_open():
+    """The unseen rows were written before `decide` replaced their entries, so
+    they still say `new`; the digest must not call them 'not rejected'."""
+    text = _propose_module().digest(REPORT, "2026-11-16")
+
+    section = text.split("(gezählt, nicht abgelehnt)")[1].split("\n\n", 2)[1]
+    assert "no model file" not in section
+    assert "1 weitere Neue wurden automatisch abgelehnt" in text
+
+
+def test_the_digest_reads_in_a_minute():
+    """#112's measure: the weekly message is not an inventory."""
+    many = {**REPORT, "catalogue": {**REPORT["catalogue"], "unseen": [
+        _row(f"x/{i}", backend="vllm", judgement="chat template", downloads=i)
+        for i in range(80)]}}
+    text = _propose_module().digest(many, "2026-11-16")
+
+    assert text.count("| vllm |") == 10
+    assert "… und 70 weitere" in text
+    assert len(text) < 4000
+
+
+def test_without_a_report_the_text_is_the_plain_notice(tmp_path):
+    text = _propose_module().body("2026-11-16", str(tmp_path / "absent.json"))
+
+    assert "Weekly model discovery, 2026-11-16" in text
+    assert "rolling issue" not in text, "there is no rolling issue any more (#66 is closed)"
+
+
+def test_an_open_pr_gets_this_weeks_digest(repo):
+    repo.open_prs.write_text("42\n")
+    (repo.work / "discovery_report.json").write_text(json.dumps(REPORT))
+    (repo.work / "config" / "discovered.yaml").write_text("version: 1\ncandidates: []\n# x\n")
+
+    assert _propose(repo).returncode == 0
+    edit = next(c for c in _gh_calls(repo) if c.startswith("pr edit"))
+    assert "42" in edit and "davon **1 verwendbar**" in edit
+

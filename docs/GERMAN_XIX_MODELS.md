@@ -536,13 +536,16 @@ of weight loading, so the wrong order spends almost the entire run loading model
 runner (`docs/BATCH_ATR.md` there) does this; anything else driving the gateway
 over several models should too.
 
-## Party runs on every image
+## Party reads an image only when asked
 
-`/recognize` attaches party's reading of the same image as `second_opinion` unless
-party *is* the requested engine (`party_second_opinion` in `Settings`, on by
-default). It runs concurrently, so it costs the slower of the two rather than the
-sum — but over a three-model comparison it is three identical party readings per
-page. Keep them (a free fourth baseline, which is how the batch runner records
-them), or set `ATR_PARTY_SECOND_OPINION=false` for the duration of a large batch.
-It is a process-wide setting, not per-request, so switching it off switches it off
-for the live pipeline too.
+`/recognize` and `/ocr` attach party's reading of the same image as `second_opinion`
+only for a request that sends `second_opinion=party` (#265). Party is not called
+when it is itself the requested engine. It runs concurrently with the requested
+engine, and a finished answer waits for it at most `party_second_opinion_grace_s`
+(30 s).
+
+Until 12.11.2026 party read every image unasked. From 01.11. to 12.11. 94 % of
+those readings arrived after the 30 s and were dropped, while each page held its
+finished answer for the full grace period. On the 2,047-page St. Gallen Missiven
+batch that was most of the wall time. `ATR_PARTY_SECOND_OPINION=false` still
+refuses it box-wide; a request that asks then gets the reason in `second_opinion`.

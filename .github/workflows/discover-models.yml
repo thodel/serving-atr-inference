@@ -7,13 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (skip GitHub issue update)"
+        description: "Dry run (propose nothing)"
         required: false
         default: "false"
         type: boolean
 
 permissions:
-  issues: write         # the rolling report issue
   contents: write       # push the catalogue branch (#116)
   pull-requests: write  # propose the catalogue as a PR (#116)
   actions: write        # start test.yml on the proposed branch (#255)
@@ -67,14 +66,8 @@ jobs:
         if: inputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # The PR text is the weekly report (#112): what arrived that could be a
+        # base, listed, and the rest counted. The rolling issue it replaced (#66)
+        # has been closed since 21.09.2026, and the step that wrote it skipped
+        # every run that had triaged its arrivals already.
         run: python scripts/propose_catalogue.py
-
-      - name: Update GitHub issue
-        if: inputs.dry_run != 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >
-          python scripts/discover_models.py
-          --github-issue
-          --report-path discovery_report.json
-          --md-path discovery_report.md

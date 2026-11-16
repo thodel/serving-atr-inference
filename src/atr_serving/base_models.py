@@ -54,6 +54,7 @@ __all__ = [
     "QLORA_MEASUREMENT",
     "RepoFacts",
     "judge",
+    "judge_zenodo",
 ]
 
 BACKENDS = ("kraken", "trocr", "vllm")
@@ -228,3 +229,54 @@ def judge(facts: RepoFacts) -> Judgement:
     return Judgement(
         reason="nothing identifies a backend that could load it — weights, but "
                "no .mlmodel, no VisionEncoderDecoder and no vision tower")
+
+
+#: What a Zenodo record can hold that might be a model's weights. A kraken model
+#: is a ``.mlmodel``; anything else here is weights for some other framework.
+ZENODO_WEIGHTS = (".mlmodel", ".safetensors", ".pt", ".pth", ".bin", ".ckpt",
+                  ".onnx", ".h5", ".keras", ".gguf", ".pkl")
+#: Archives can hold a ``.mlmodel`` without the listing showing it.
+ZENODO_ARCHIVES = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".7z", ".gz")
+
+
+def judge_zenodo(files: list[str] | tuple[str, ...],
+                 resource_type: str | None = None) -> Judgement:
+    """Which backend could load a Zenodo record, from its file listing alone (#112).
+
+    Every hit of Zenodo's search carries its files and its resource type, so
+    this needs no request of its own. Until 13.11.2026 no Zenodo candidate was
+    judged at all — 663 of the catalogue's 1,405 entries — on the grounds that
+    "there is no file listing here"; the search answer had one all along.
+
+    Only the certain case is automatic, as on the Hub: a record whose files
+    contain nothing that could be weights is not a model, the way a repository
+    with only a card is not one. An archive is not certain — a kraken model is
+    often deposited zipped — and neither is a weights file in another format:
+    both are left for a person, with the reason.
+    """
+    names = [str(f) for f in files or ()]
+    kind = f" (Zenodo type: {resource_type})" if resource_type else ""
+    if not names:
+        return Judgement(
+            reason=f"no public files in the record{kind}, so it was not judged — "
+                   "restricted or embargoed, not empty")
+    lowered = [n.lower() for n in names]
+    mlmodel = next((n for n, low in zip(names, lowered) if low.endswith(".mlmodel")), None)
+    if mlmodel:
+        return Judgement(backend="kraken", evidence=f"a .mlmodel: {mlmodel}")
+    archive = next((n for n, low in zip(names, lowered)
+                    if low.endswith(ZENODO_ARCHIVES)), None)
+    if archive:
+        return Judgement(
+            reason=f"an archive, {archive}, which may hold a .mlmodel — the listing "
+                   f"cannot say{kind}")
+    weights = next((n for n, low in zip(names, lowered)
+                    if low.endswith(ZENODO_WEIGHTS)), None)
+    if weights:
+        return Judgement(
+            reason=f"weights but no .mlmodel ({weights}): not a kraken model, and "
+                   f"the bases of the other backends come from the Hub{kind}")
+    shown = ", ".join(names[:3]) + (f", … ({len(names)} files)" if len(names) > 3 else "")
+    return Judgement(reason=f"no model file in the record{kind}: {shown}",
+                     automatic=True)
+
