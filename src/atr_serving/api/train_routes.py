@@ -28,6 +28,7 @@ remote trainer's 5xx text keeps its status but gains the trainer's URL, because
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Literal
 
@@ -306,3 +307,48 @@ async def cancel_job(request: Request, job_id: str) -> dict:
 @router.delete("/jobs/{job_id}")
 async def delete_job(request: Request, job_id: str) -> dict:
     return await _forward(_client(request).delete(job_id))
+
+
+# ── foreign ground truth (training-atr-models#200) ──────────────────────────
+#
+# Forwarded like the job routes. The trainer decides: survey reads any GitHub or
+# Zenodo record and uploads nothing; import takes only a register id. Two checks
+# are repeated here, because this is the door callers come through and a
+# refusal here costs no round trip to asteraix: a body naming ``public`` is
+# refused (a human makes a dataset public, in the HF interface), and an import
+# job id must look like one before it becomes part of a URL.
+
+#: An import job id as the trainer makes it (``<UTC stamp>-<source>``).
+GT_JOB_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-z0-9._-]{1,80}$")
+
+
+@router.get("/gt/sources")
+async def gt_sources(request: Request, check_hf: bool = Query(True)) -> dict:
+    """The register of foreign ground truth: what ``/train/gt/import`` accepts."""
+    return await _forward(_client(request).gt_sources(check_hf=check_hf))
+
+
+@router.post("/gt/survey")
+async def gt_survey(request: Request, body: dict = Body(...)) -> dict:
+    """Licence, where it is written, size, image path and commit of a GitHub
+    repository or Zenodo record, and a draft register entry. Uploads nothing."""
+    return await _forward(_client(request).gt_survey(body))
+
+
+@router.post("/gt/import", status_code=202)
+async def gt_import(request: Request, body: dict = Body(...)) -> dict:
+    """Import a **registered** source as a job; ``dry_run`` unless set false."""
+    if "public" in body:
+        raise HTTPException(
+            status_code=422,
+            detail=("an import is never public: a human makes a dataset public in "
+                    "the HF interface once the image rights are clear "
+                    "(training-atr-models#193, #200)"))
+    return await _forward(_client(request).gt_import(body))
+
+
+@router.get("/gt/import/{job_id}")
+async def gt_import_status(request: Request, job_id: str) -> dict:
+    if not GT_JOB_RE.match(job_id):
+        raise HTTPException(status_code=422, detail=f"not an import job id: {job_id!r}")
+    return await _forward(_client(request).gt_import_status(job_id))

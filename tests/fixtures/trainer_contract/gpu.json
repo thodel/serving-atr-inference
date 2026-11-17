@@ -43,5 +43,6 @@
   ],
   "unplaced_processes": [],
   "job_attribution_available": true,
-  "known_job_pids": 1
+  "known_job_pids": 1,
+  "waiting": null
 }

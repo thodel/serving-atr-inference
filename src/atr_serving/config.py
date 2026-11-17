@@ -90,11 +90,13 @@ class Settings(BaseSettings):
     kraken_url: str = "http://127.0.0.1:8201"
     trocr_url: str = "http://127.0.0.1:8202"
     party_url: str = "http://127.0.0.1:8203"
-    #: Party transcribes every image alongside the requested engine
-    #: (config/models.yaml calls it "always-on"). It costs real latency — its
-    #: decoder generates token by token, measured at ~8 s per line — so this is a
-    #: switch rather than a constant: a slow second opinion must be removable
-    #: without a redeploy.
+    #: Whether a caller **may** have party read its image alongside the requested
+    #: engine (``second_opinion=party`` on ``/recognize`` and ``/ocr``). Until
+    #: 12.11.2026 party read every image unasked, and 94 % of its readings came
+    #: after the grace period and were dropped (#265); now it reads only for a
+    #: request that asks. This switch stays as the box-wide way to refuse even
+    #: that without a redeploy: party's decoder generates token by token, ~8 s
+    #: per line. Off, a request that asks gets the reason in ``second_opinion``.
     party_second_opinion: bool = True
     #: How long the requested engine's result may wait for party once it is ready
     #: (#149). Counted from the primary result, not from the request: the two run

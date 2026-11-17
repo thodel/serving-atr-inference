@@ -30,13 +30,16 @@ from atr_serving.base_models import (  # noqa: E402
     RepoFacts,
     judge,
 )
+from atr_serving import discoveries  # noqa: E402
 from atr_serving.discoveries import CatalogueError, Entry, Observation, triage  # noqa: E402
 from scripts.discover_models import (  # noqa: E402
     AUTOMATIC_BY,
     HF_SEARCH_TERMS,
     DiscoveryReport,
+    ZenodoRecord,
     fetch_repo_facts,
     format_arrivals,
+    judge_open,
     judge_unseen,
 )
 
@@ -338,6 +341,8 @@ def test_an_unreachable_hub_leaves_the_candidate_undecided():
 
     assert result.entries["hf:a/one"].verdict == "new"
     assert result.entries["hf:a/one"].backend is None
+    assert result.entries["hf:a/one"].judgement is None, \
+        "a hub that did not answer is no judgement, or the candidate is never asked again"
 
 
 def test_an_unreachable_hub_candidate_is_asked_about_again_next_week():
@@ -363,16 +368,105 @@ def test_only_the_unseen_cost_a_hub_call():
     assert more == []
 
 
-def test_a_zenodo_candidate_is_not_judged_rather_than_misjudged():
-    """There is no file listing for it here; kraken's own index (htrmopo) is
-    the check #115 names, and it needs a box with internet."""
-    result = triage({}, [Observation(id="7516057", source="zenodo")], today=TODAY)
+def zenodo_run(records: dict, *, entries=None):
+    """A triage of Zenodo records, judged from their search hits."""
+    result = triage(entries or {}, [Observation(id=i, source="zenodo") for i in records],
+                    today=TODAY)
+    found = judge_open(None, result, today=TODAY,
+                       fetch=lambda *a: pytest.fail("the hub was asked about Zenodo"),
+                       zenodo=records)
+    return result, found
 
-    found = judge_unseen(None, result, today=TODAY,
-                         fetch=lambda *a: pytest.fail("the hub was asked"))
 
-    assert found == {}
-    assert result.entries["zenodo:7516057"].verdict == "new"
+def record(zid, files, rtype="dataset"):
+    return ZenodoRecord(zenodo_id=zid, title="t", doi="", keywords=[],
+                        zenodo_url=f"https://zenodo.org/records/{zid}",
+                        files=list(files), resource_type=rtype)
+
+
+def test_a_zenodo_mlmodel_is_a_kraken_base_without_a_request():
+    """The search hit carries the files; 663 records went unjudged for want of
+    a listing that was there all along (#112)."""
+    result, _ = zenodo_run({"7516057": record("7516057", ["catmus.mlmodel", "README.md"])})
+
+    entry = result.entries["zenodo:7516057"]
+    assert entry.backend == "kraken" and entry.verdict == "new"
+    assert "catmus.mlmodel" in entry.judgement
+
+
+def test_a_zenodo_record_without_a_model_file_is_rejected_automatically():
+    """A preprint or a set of images is not a model, as a card without weights is not."""
+    result, _ = zenodo_run({"1": record("1", ["paper.pdf", "data.tiff"], "publication")})
+
+    entry = result.entries["zenodo:1"]
+    assert entry.verdict == "rejected" and entry.by == AUTOMATIC_BY
+    assert "no model file" in entry.reason and "publication" in entry.reason
+
+
+@pytest.mark.parametrize("files, why", [
+    (["model.zip"], "archive"),
+    (["weights.safetensors"], "no .mlmodel"),
+])
+def test_an_uncertain_zenodo_record_is_judged_but_left_for_a_person(files, why):
+    """A kraken model is often deposited zipped; a listing cannot see inside."""
+    result, _ = zenodo_run({"2": record("2", files)})
+
+    entry = result.entries["zenodo:2"]
+    assert entry.verdict == "new" and entry.backend is None
+    assert why in entry.judgement
+
+
+def test_a_zenodo_record_without_public_files_is_not_judged():
+    """Restricted or embargoed is not empty: it is asked about again next week."""
+    result, found = zenodo_run({"3": record("3", [])})
+
+    assert result.entries["zenodo:3"].judgement is None
+    assert "not judged" in found["zenodo:3"].reason
+
+
+def test_a_zenodo_record_this_run_did_not_see_is_left_alone():
+    result = triage({}, [Observation(id="4", source="zenodo")], today=TODAY)
+
+    assert judge_open(None, result, today=TODAY, fetch=None, zenodo={}) == {}
+    assert result.entries["zenodo:4"].judgement is None
+
+
+# ── the backlog: every open candidate is judged, once (#112) ───────────────
+def test_an_open_candidate_from_before_is_judged_on_the_next_run():
+    """1,135 candidates were waiting with no recorded why; the next run judges them."""
+    old = {"hf:a/one": Entry(id="a/one", source="hf", first_seen="2026-11-02",
+                             last_seen="2026-11-02")}
+    result = triage(old, observed("a/one"), today="2026-11-16")
+    asked: list[str] = []
+
+    judge_open(None, result, today="2026-11-16",
+               fetch=lambda _s, i: asked.append(i) or facts(architectures=("Odd",)))
+
+    assert asked == ["a/one"]
+    entry = result.entries["hf:a/one"]
+    assert entry.verdict == "new"
+    assert "nothing identifies a backend" in entry.judgement
+
+
+def test_a_judged_candidate_is_not_asked_about_again():
+    first, _, _ = judged_run({"a/one": facts(architectures=("Odd",))})
+    second = triage(first.entries, observed("a/one"), today="2026-10-12")
+    more: list[str] = []
+
+    judge_open(None, second, today="2026-10-12",
+               fetch=lambda _s, i: more.append(i) or facts())
+
+    assert more == []
+    assert second.entries["hf:a/one"].judgement
+
+
+def test_the_judgement_survives_the_catalogue_file(tmp_path):
+    first, _, _ = judged_run({"a/one": facts(architectures=("Odd",))})
+
+    path = discoveries.save(first.entries, tmp_path / "discovered.yaml")
+    again = discoveries.load(path)
+
+    assert again["hf:a/one"].judgement == first.entries["hf:a/one"].judgement
 
 
 def test_every_arrival_carries_a_backend_or_a_recorded_reason():

@@ -135,6 +135,11 @@ class ZenodoRecord:
     #: is answerable for Zenodo as it is for the Hub (#113). Empty when the
     #: record carries no such field — absent, not unchanged.
     last_modified: str = field(default="")
+    #: The file names and resource type the search hit carries, which is all
+    #: :func:`atr_serving.base_models.judge_zenodo` needs (#112). An empty list
+    #: is a record without public files, not one without files.
+    files: list[str] = field(default_factory=list)
+    resource_type: str = field(default="")
 
 
 @dataclass
@@ -286,31 +291,62 @@ def fetch_repo_facts(session: requests.Session, model_id: str) -> RepoFacts:
 AUTOMATIC_BY = "discover_models.py"
 
 
-def judge_unseen(session: requests.Session, triage: Triage, *, today: str,
-                 fetch=fetch_repo_facts) -> dict[str, Judgement]:
-    """Judge every candidate nobody has seen before; reject what is clearly not.
+def judge_open(session: requests.Session, triage: Triage, *, today: str,
+               fetch=fetch_repo_facts,
+               zenodo: dict[str, "ZenodoRecord"] | None = None) -> dict[str, Judgement]:
+    """Judge every open candidate that was never judged; reject what is clearly not.
 
     Returns the judgements by catalogue key. A judgement whose reason is a fact
-    about the repository is written as ``rejected`` straight away — #115's
+    about the candidate is written as ``rejected`` straight away — #115's
     ``rejected: no weights file, only a model card`` should be written once and
-    never re-asked. A reason that is a fact about this run is reported and left
-    for a person.
+    never re-asked. Any other outcome is kept on the entry as ``judgement`` and
+    the verdict stays ``new``, for a person: a heuristic can be wrong about a
+    repository it does not recognise.
+
+    *Open and never judged*, not *unseen* (#112). Until 13.11.2026 only a
+    candidate's first run judged it, and only on the Hub; what that run found
+    was not kept unless it was a rejection. 1,135 candidates were waiting for a
+    verdict, 1,133 of them without a backend and without a recorded why — so a
+    report could only list them. A recorded ``judgement`` is what stops the
+    next run asking again; a hub that did not answer records none, so that
+    candidate is asked again next week.
+
+    Zenodo records are judged from the search hit (``zenodo``, by id), with no
+    request of their own; a record this run did not see is left as it is.
     """
     judged: dict[str, Judgement] = {}
-    for entry in triage.unseen:
-        if entry.source != "hf":
-            # Zenodo has no file listing here. kraken's own index (htrmopo) is
-            # the check #115 names, and it needs a box with internet; until
-            # then these arrive unjudged rather than wrongly judged.
+    zenodo = zenodo or {}
+    for entry in triage.needs_a_decision:
+        if entry.backend is not None or entry.judgement is not None:
             continue
-        verdict = judge_repo(fetch(session, entry.id))
+        if entry.source == "zenodo":
+            record = zenodo.get(entry.id)
+            if record is None:
+                continue
+            verdict = base_models.judge_zenodo(record.files, record.resource_type)
+            if not record.files:
+                judged[entry.key] = verdict      # reported, not recorded: may open up
+                continue
+        else:
+            facts = fetch(session, entry.id)
+            verdict = judge_repo(facts)
+            if not facts.fetched:
+                judged[entry.key] = verdict      # reported, not recorded: ask again
+                continue
         judged[entry.key] = verdict
-        entry.backend = verdict.backend
-        triage.entries[entry.key].backend = verdict.backend
+        # The triage lists and the catalogue hold the same objects (`triage`),
+        # but the catalogue is what is written back, so it is the one set.
+        stored = triage.entries[entry.key]
+        stored.backend = verdict.backend
+        stored.judgement = verdict.evidence if verdict.backend else verdict.reason
         if verdict.automatic and verdict.reason:
             discoveries.decide(triage.entries, entry.key, "rejected",
                                by=AUTOMATIC_BY, at=today, reason=verdict.reason)
     return judged
+
+
+#: The name before #112, kept for anything that still imports it.
+judge_unseen = judge_open
 
 
 def judge_repo(facts: RepoFacts) -> Judgement:
@@ -457,6 +493,7 @@ def discover_zenodo_models(
 
                         doi = str(metadata.get("doi", "") or "")
 
+                        rtype = metadata.get("resource_type") or {}
                         record = ZenodoRecord(
                             zenodo_id=zid,
                             title=str(metadata.get("title", "") or ""),
@@ -464,6 +501,10 @@ def discover_zenodo_models(
                             keywords=keywords,
                             zenodo_url=f"https://zenodo.org/records/{zid}",
                             last_modified=str(hit.get("updated", "") or ""),
+                            files=[str(f.get("key", "")) for f in (hit.get("files") or [])
+                                   if isinstance(f, dict) and f.get("key")],
+                            resource_type=str(rtype.get("type", "") if isinstance(rtype, dict)
+                                              else rtype or ""),
                         )
                         if zid not in all_records:
                             all_records[zid] = record
@@ -782,10 +823,12 @@ def discover(
     if catalogue is not None:
         today = today or dt.date.today().isoformat()
         report.triage = triage_run(report, catalogue=catalogue, today=today)
-        # And of those, which could be a base_model at all (#115). Only the
-        # unseen: a judgement is a hub call each, and a verdict already
-        # recorded is not re-asked.
-        report.judgements = judge_unseen(session, report.triage, today=today)
+        # And of those, which could be a base_model at all (#115). Every open
+        # candidate once (#112): a judgement is a hub call each on the Hub, none
+        # on Zenodo, and a judgement already recorded is not re-asked.
+        report.judgements = judge_open(
+            session, report.triage, today=today,
+            zenodo={r.zenodo_id: r for r in report.new_zenodo_models})
 
     return report
 
