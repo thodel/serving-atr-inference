@@ -263,13 +263,17 @@ class AtrClient:
     @staticmethod
     def _result(response: httpx.Response, *, model: str, engine: str) -> AtrResult:
         data = response.json()
+        # /ocr answers ``lines`` as their count (len(result.lines)), /recognize
+        # as the lines themselves; list(count) raised on every page with a line
+        # (agentic_historian#878). Only a list is lines; a count has no field.
+        lines = data.get("lines")
         return AtrResult(
             text=data.get("text", ""),
             confidence=float(data.get("confidence", 0.0) or 0.0),
             model=data.get("model", model),
             service_version=data.get("version", "?"),
             engine=data.get("engine", engine) or engine,
-            lines=list(data.get("lines") or []),
+            lines=list(lines) if isinstance(lines, list) else [],
             segmented_by=data.get("segmented_by"),
             timing_ms=_timing_of(data),
             truncated=bool(data.get("truncated", False)),

@@ -187,3 +187,28 @@ def test_recognize_sends_the_pages_own_lines_when_given():
     c.recognize(b"img", "m1")
     assert b'name="lines"' in posted[0] and b'"boundary"' in posted[0]
     assert b'name="lines"' not in posted[1], "no lines, no field: the gateway segments"
+
+
+@pytest.mark.parametrize("count", [0, 1, 37])
+def test_an_ocr_answer_whose_lines_is_a_count_builds_a_result(count):
+    """/ocr answers ``lines`` as ``len(result.lines)`` — a number — while
+    /recognize answers the lines themselves. ``list(count)`` passed on 0 and
+    raised "'int' object is not iterable" on every page with a line, so through
+    agentic_historian's shim every kraken and TrOCR reading failed
+    (agentic_historian#878). The count has no field here and is dropped."""
+    ocr = {**RESULT, "engine": "kraken", "lines": count}
+    c = _client(lambda r: httpx.Response(200, json=ocr))
+    res = c.transcribe(b"img", "m1")
+    assert res.text == RESULT["text"] and res.lines == []
+
+
+@pytest.mark.parametrize("lines", [None, "3", {"n": 3}])
+def test_lines_that_are_no_list_never_break_the_result(lines):
+    c = _client(lambda r: httpx.Response(200, json={**RESULT, "lines": lines}))
+    assert c.recognize(b"img", "m1").lines == []
+
+
+def test_a_list_of_lines_is_kept_as_it_was():
+    rows = [{"order": 0, "text": "Wir"}, {"order": 1, "text": "Johans"}]
+    c = _client(lambda r: httpx.Response(200, json={**RESULT, "lines": rows}))
+    assert c.recognize(b"img", "m1").lines == rows
