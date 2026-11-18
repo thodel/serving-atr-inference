@@ -32,6 +32,7 @@ from loguru import logger
 
 from atr_serving import gpu as gpu_probe
 from atr_serving.config import REPO_ROOT, Settings
+from atr_serving.hf_cache import HfRevision, read_revision, requested_ref
 from atr_serving.registry import ModelSpec, Registry
 
 
@@ -128,6 +129,23 @@ def resolve_model_path(spec: ModelSpec, settings: Settings) -> str:
     if merged.is_dir() and any(merged.glob("config.json")):
         return str(merged)
     return spec.hf_repo or spec.id
+
+
+def served_hf_revision(spec: ModelSpec, settings: Settings, *, loaded: bool,
+                       env=None) -> HfRevision | None:
+    """The commit of ``spec.hf_repo`` vLLM loads for ``spec``, from the hub cache (#200).
+
+    None unless vLLM serves the repository itself: a model with a merged copy
+    in ``vllm_merged_dir`` is served from that directory, and naming the repo's
+    commit for it would cite weights that did not run. Other engines load in
+    their own services, whose cache this process does not know.
+    """
+    if spec.engine != "vllm" or not spec.hf_repo:
+        return None
+    if resolve_model_path(spec, settings) != spec.hf_repo:
+        return None
+    return read_revision(spec.hf_repo, requested_ref(spec.vllm_args),
+                         loaded=loaded, env=env)
 
 
 #: What the registry's ``vram_mb`` does **not** cover. It is the size of the
@@ -465,6 +483,8 @@ class _Resident:
     spec: ModelSpec
     handle: VllmHandle
     port: int
+    #: The commit this instance loaded, read when it became healthy (#200).
+    hf_revision: HfRevision | None = None
 
 
 class _Attempt:
@@ -550,6 +570,12 @@ class ModelManager:
     def resident_model_ids(self) -> list[str]:
         with self._state_lock:
             return list(self._resident.keys())
+
+    def hf_revision(self, model_id: str) -> HfRevision | None:
+        """The commit the resident instance of ``model_id`` loaded, or None (#200)."""
+        with self._state_lock:
+            r = self._resident.get(model_id)
+        return r.hf_revision if r else None
 
     def port_for(self, model_id: str) -> int | None:
         with self._state_lock:
@@ -662,8 +688,11 @@ class ModelManager:
             # caller through here is the next attempt, not the next leak.
             self._ports.release(port)
             raise
+        # Read now, not when /models is asked: vLLM resolved the ref during
+        # this start, and a later download could move it under a running model.
+        revision = served_hf_revision(spec, self.settings, loaded=True)
         with self._state_lock:
-            self._resident[model_id] = _Resident(spec, handle, port)
+            self._resident[model_id] = _Resident(spec, handle, port, revision)
         logger.info("vLLM resident: {} on :{} (gpu {})", model_id, port,
                     self.settings.vllm_gpu)
         return port

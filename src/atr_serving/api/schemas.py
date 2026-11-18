@@ -18,6 +18,7 @@ from atr_serving.contracts import (
     SecondOpinion,
     SegmentResponse,
 )
+from atr_serving.hf_cache import HfRevision
 from atr_serving.registry import ModelSpec
 
 __all__ = [
@@ -171,6 +172,12 @@ class ModelInfo(ModelSpec):
     """Registry spec plus runtime state."""
 
     resident: bool = False
+    #: The commit of ``hf_repo`` from the hub cache (#200): the one the resident
+    #: instance loaded (``loaded: true``), or for a model not running, what the
+    #: cache would load now (``loaded: false``). None when vLLM does not serve
+    #: the repo itself or the cache cannot say — never the configured ref.
+    #: Runtime state, not a registry field: it is read on this box, not written.
+    hf_revision: HfRevision | None = None
 
 
 class ModelsResponse(BaseModel):

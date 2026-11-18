@@ -46,7 +46,8 @@ from atr_serving.api.schemas import (
 from atr_serving.clients import EngineError, get_engine_client, get_kraken_client, get_vllm_client
 from atr_serving.image_io import validate_format
 from atr_serving.config import Settings
-from atr_serving.manager import GpuBusyError, ManagerError, vllm_pids, vram_budget
+from atr_serving.manager import (GpuBusyError, ManagerError, served_hf_revision, vllm_pids,
+                                 vram_budget)
 from atr_serving.pipeline import (
     generation_budget, recognize_lines, recognize_page_vllm, visual_budget,
 )
@@ -691,7 +692,18 @@ async def get_discovery(key: str, request: Request) -> dict:
 )
 async def list_models(request: Request) -> ModelsResponse:
     registry = _registry(request)
-    resident = set(_manager(request).resident_model_ids())
+    manager = _manager(request)
+    settings = _settings(request)
+    resident = set(manager.resident_model_ids())
+    recorded = getattr(manager, "hf_revision", None)
+
+    def _revision(spec: ModelSpec):
+        # A resident model reports what it loaded, read at its launch; anything
+        # else what the cache would load now, marked as such (#200).
+        if spec.id in resident:
+            return recorded(spec.id) if recorded else None
+        return served_hf_revision(spec, settings, loaded=False)
+
     # `enabled: false` means "registered, not servable on this host" (#30/#36), and
     # until now only the overlay honoured it — the tracked registry's entries were
     # listed regardless. tests/test_api.py has asserted the absence of disabled
@@ -702,7 +714,8 @@ async def list_models(request: Request) -> ModelsResponse:
     # consumer, each of whom would have spent a request discovering it cannot run.
     return ModelsResponse(
         models=[
-            ModelInfo(**spec.model_dump(), resident=spec.id in resident)
+            ModelInfo(**spec.model_dump(), resident=spec.id in resident,
+                      hf_revision=_revision(spec))
             for spec in registry.all() if spec.enabled
         ]
     )
