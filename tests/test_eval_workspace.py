@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -484,6 +485,16 @@ def test_a_real_measurement_leaves_nothing_unexpected(tmp_path, then, status, ke
     if kept:
         assert "KEPT" in err and "rm -rf" in err
         assert (remaining[0] / "server.log").exists(), "the server's log is kept with it"
+
+
+@pytestmark_bash
+def test_the_claimed_card_and_port_reach_child_processes(tmp_path):
+    """serve.sh (scripts/eval_env.sh, #180) runs as a child of eval_serve and
+    needs both; unexported, it would refuse to start every measurement."""
+    done, _ = _measure(tmp_path, "eval_begin test-model\n"
+                                 "bash -c 'echo \"child GPU=$GPU PORT=$PORT\"'\n")
+    assert done.returncode == 0, done.stderr
+    assert re.search(r"child GPU=\d+ PORT=\d+", done.stdout), done.stdout
 
 
 @pytestmark_bash
