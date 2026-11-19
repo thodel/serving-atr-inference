@@ -18,9 +18,16 @@ together.
 ATR_TRAINING_REPO=~/Repo/training-atr-models \
 ATR_TRAINING_PYTHON=~/Repo/training-atr-models/.venvs/kraken-train/bin/python \
 bash scripts/measure_model.sh qwen3vl-medieval-german-v3 [--n 15] [--vllm next] \
-    [--pages <model|job id | eval_pages archive>] [--serve <dir|hf repo>] [--keep] \
-    [-- <further eval_granularity.py arguments>]
+    [--pages <model|job id | eval_pages archive> | --page-set <eval_sets/<set>/vlm-pages-<side>>] \
+    [--serve <dir|hf repo>] [--keep] [-- <further eval_granularity.py arguments>]
 ```
+
+On asteraix (19.11.2026), from `~/Repo/serving-atr-inference`, set these as well:
+
+- `ATR_EVAL_PYTHON` to the `kraken-train` python, because the system python has no
+  pydantic;
+- `ATR_MERGE_PYTHON` to `.venvs/vlm-train/bin/python`;
+- the `ATR_TRAIN_*_ROOT` values from the training repo's `.env`.
 
 It claims a card, builds the venv, draws the held-out pages, merges the adapter, serves
 it on 127.0.0.1 and waits for `/health`, or for the server's death, with its log. Then it
@@ -32,6 +39,15 @@ runs `eval_granularity.py` from training-atr-models and takes everything down.
   default, with the page selection beside it as `<report>.selection.json`, so the
   measurement can be repeated. An existing report is never overwritten.
 - **A failed step keeps the workspace,** with `server.log`, as below.
+- **The merge python is checked** before the merge: before the claim when
+  `ATR_MERGE_PYTHON` names it, and after the venv is built otherwise. `merge_loras.py`
+  needs torch, transformers, peft, pydantic-settings, loguru and pyyaml.
+- **`--page-set`** measures on a frozen held-out benchmark (`build_page_benchmark.py`,
+  e.g. `/mnt/wbkolleg_dh_1/Textrecognition_Training/eval_sets/german-kurrent-xvi-xix-v1/vlm-pages-test`)
+  instead of pages drawn from the model's own job. This is the way for a model trained on
+  UBELIX, whose job and pages are not on the share. `eval_granularity.py` checks the draw
+  against its `benchmark.json`. Whether the model trained on the set's documents depends
+  on its training split, and the command cannot prove that; the report names the set.
 
 The skeleton below is what the command does, for a measurement that needs a step of its
 own.
