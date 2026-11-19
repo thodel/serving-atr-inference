@@ -9,7 +9,32 @@ Part of #179 ("one measurement is one command"). Four pieces exist:
 - held-out test pages with the proof they were not trained on (#181,
   `scripts/eval_pages.py`).
 
-All of them write into the directory that is taken down.
+All of them write into the directory that is taken down, and one command puts them
+together.
+
+## One command: `scripts/measure_model.sh`
+
+```bash
+ATR_TRAINING_REPO=~/Repo/training-atr-models \
+ATR_TRAINING_PYTHON=~/Repo/training-atr-models/.venvs/kraken-train/bin/python \
+bash scripts/measure_model.sh qwen3vl-medieval-german-v3 [--n 15] [--vllm next] \
+    [--pages <model|job id | eval_pages archive>] [--serve <dir|hf repo>] [--keep] \
+    [-- <further eval_granularity.py arguments>]
+```
+
+It claims a card, builds the venv, draws the held-out pages, merges the adapter, serves
+it on 127.0.0.1 and waits for `/health`, or for the server's death, with its log. Then it
+runs `eval_granularity.py` from training-atr-models and takes everything down.
+
+- **Checked before any card is claimed:** the training repo, its `eval_granularity.py`,
+  and a python that imports what that script needs. A refusal there costs nothing.
+- **The report goes outside the workspace:** `~/atr-eval-reports/<stamp>-<id>.json` by
+  default, with the page selection beside it as `<report>.selection.json`, so the
+  measurement can be repeated. An existing report is never overwritten.
+- **A failed step keeps the workspace,** with `server.log`, as below.
+
+The skeleton below is what the command does, for a measurement that needs a step of its
+own.
 
 ## Why
 
