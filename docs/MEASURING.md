@@ -1,10 +1,15 @@
 # A measurement on a spare card: claim, set up, take down
 
-Part of #179 ("one measurement is one command"). Two pieces exist so far: claiming a
-card visibly (#184, `scripts/claim_gpu.py`) and taking a measurement down on every
-exit (#183, `scripts/eval_cleanup.sh` + `scripts/eval_workspace.py`). The venv (#180)
-and the test pages (#181) are still built by hand, but they go into the directory that
-is taken down.
+Part of #179 ("one measurement is one command"). Four pieces exist:
+
+- claiming a card visibly (#184, `scripts/claim_gpu.py`);
+- taking a measurement down on every exit (#183, `scripts/eval_cleanup.sh` +
+  `scripts/eval_workspace.py`);
+- the venv with Python headers, in one call (#180, `scripts/eval_env.sh`);
+- held-out test pages with the proof they were not trained on (#181,
+  `scripts/eval_pages.py`).
+
+All of them write into the directory that is taken down.
 
 ## Why
 
@@ -25,13 +30,38 @@ eval_begin qwen3vl-medieval-german-v3          # or: eval_begin <id> --keep
 # WS:        ~/atr-eval/<stamp>-<id>-<pid>/ with measurement.json
 # ATR_VLLM_MERGED_DIR=$WS/merged, exported, so merge_loras writes into WS
 
-uv venv "$WS/venv" …                            # #180, by hand for now
+bash scripts/eval_env.sh "$WS/env"              # #180; --vllm next for a vllm-next model
+python3 scripts/eval_pages.py qwen3vl-medieval-german-v3 --n 15 --out "$WS/pages"   # #181
 .venvs/vlm-train/bin/python scripts/merge_loras.py --only qwen3vl-medieval-german-v3
-eval_serve "$WS/venv/bin/vllm" serve "$ATR_VLLM_MERGED_DIR/qwen3vl-medieval-german-v3" \
-    --host 127.0.0.1 --port "$PORT"
+eval_serve "$WS/env/serve.sh" "$ATR_VLLM_MERGED_DIR/qwen3vl-medieval-german-v3"
 …wait for /health, run eval_granularity.py (training-atr-models)…
 # the report goes OUTSIDE "$WS": the directory is deleted
 ```
+
+## The venv: `scripts/eval_env.sh`
+
+```
+bash scripts/eval_env.sh <dir> [--vllm 0.11|next]
+```
+
+- **Python headers without root.** asteraix has no `python3.12-dev`, and Triton
+  compiles a helper against `Python.h` when vLLM starts. Without the headers vLLM
+  dies with a gcc error after the weights are loaded. The script installs uv's
+  standalone CPython 3.12 into `<dir>/uvpy` (it carries `include/python3.12`) with
+  `--no-bin`, and removes any python shim uv leaves in `~/.local/bin` all the same.
+- **The same pins as the gateway.** `--vllm 0.11` builds what `make_venvs.sh vllm`
+  builds, and `--vllm next` what `make_venvs.sh vllm-next` builds. The variant follows
+  the model's `vllm_venv` in `config/models.yaml`, not the host. A test keeps the
+  torch pins of both scripts equal.
+- **`serve.sh`.** It sets `CPATH`, `CUDA_VISIBLE_DEVICES=$GPU` and
+  `--host 127.0.0.1 --port $PORT`, and refuses to start without `GPU` and `PORT`, which
+  `eval_begin` sets.
+- **Idempotent.** `eval_env.json` is written last, and only after `vllm --version`
+  runs. A second call on a built directory checks and builds nothing. A directory built
+  for the other variant or from other pins, or holding anything the script did not put
+  there, is refused, never mixed.
+
+## On exit
 
 On exit, whether it succeeded, a step failed, Ctrl-C was pressed, or a `kill` came, the
 trap does four things in order:

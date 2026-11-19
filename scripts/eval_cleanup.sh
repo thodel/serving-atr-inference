@@ -44,6 +44,9 @@ eval_begin() {
     lines=$("$ATR_EVAL_PYTHON" "$_EVAL_REPO/scripts/claim_gpu.py" --model "$model" --pid $$ \
             ${EVAL_GPU:+--gpu "$EVAL_GPU"}) || return 1
     eval "$lines"
+    # Exported: the server is a child process, and serve.sh (scripts/eval_env.sh,
+    # #180) refuses to start without the card and port it was given.
+    export GPU PORT
     lines=$("$ATR_EVAL_PYTHON" "$_EVAL_REPO/scripts/eval_workspace.py" create \
             --model "$model" --pid $$) || {
         "$ATR_EVAL_PYTHON" "$_EVAL_REPO/scripts/claim_gpu.py" --release "$GPU" --pid $$ >&2
