@@ -33,7 +33,13 @@ from __future__ import annotations
 #: the runtime re-derives the cap from the processor's own patch_size and
 #: merge_size and reports it, so a base with another grid cannot quietly train
 #: at a different budget; this side has no processor to ask and trusts the value.
-VLM_PIXEL_BUDGET: dict[str, int] = {"line": 256 * 32 * 32, "page": 2048 * 32 * 32}
+#:
+#: ``block`` is k consecutive lines of a region in one image (#186,
+#: training-atr-models#57): 1024 visual tokens, the budget the block arms were
+#: trained at. Missing here until 19.11.2026, so a strip got the line budget, a
+#: quarter of its training scale.
+VLM_PIXEL_BUDGET: dict[str, int] = {"line": 256 * 32 * 32, "block": 1024 * 32 * 32,
+                                    "page": 2048 * 32 * 32}
 
 #: The header the trainer's promotion gate sends, value ``"1"``.
 #:

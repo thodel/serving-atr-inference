@@ -634,7 +634,7 @@ on both.
 
 | here | in training-atr-models | value | if they disagree |
 |---|---|---|---|
-| `seam.VLM_PIXEL_BUDGET` | `contracts.VLM_PIXEL_BUDGET` | `{"line": 262144, "page": 2097152}` — 256 and 2048 visual tokens against Qwen3-VL's 32² grid | silent: a VLM is served images at a scale it never trained on, and answers briefly rather than failing |
+| `seam.VLM_PIXEL_BUDGET` | `contracts.VLM_PIXEL_BUDGET` | `{"line": 262144, "block": 1048576, "page": 2097152}` — 256, 1024 and 2048 visual tokens against Qwen3-VL's 32² grid | silent: a VLM is served images at a scale it never trained on, and answers briefly rather than failing |
 | `seam.PROMOTION_GATE_HEADER` | `promote.PROMOTION_GATE_HEADER` | `X-ATR-Promotion-Gate`, value `1` | quiet: every job completes, the gate gets `404 unknown model`, and every trained model stays disabled |
 
 ## Operations

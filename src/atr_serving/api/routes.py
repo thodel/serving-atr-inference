@@ -1150,7 +1150,8 @@ async def recognize(
                 await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref)
             )
 
-        # vLLM: page = one call; line = segment + per-line chat.
+        # vLLM: page = one call; line = segment + per-line chat; block =
+        # segment + one chat per lines_per_crop lines (#186), one Line each.
         if engine == "vllm":
             assert spec is not None
             port = await _ensure_vllm_port(request, model)

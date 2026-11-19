@@ -95,7 +95,13 @@ class ModelSpec(BaseModel):
     disabled_reason: str | None = None
     base_model: str | None = None
     task: Literal["ocr", "htr"] = "ocr"
-    level: Literal["page", "line"] = "page"
+    #: How the gateway feeds the model (#186): ``page`` — the whole image in one
+    #: call; ``line`` — kraken segments, one call per line; ``block`` — kraken
+    #: segments, one call per ``lines_per_crop`` consecutive lines of a region,
+    #: answered as one ``Line`` with the strip's box (no per-line geometry).
+    #: The level belongs to the model, never to the call: a line-trained model
+    #: reads blocks at CER 0.811 (#186), so it must not be selectable for one.
+    level: Literal["page", "line", "block"] = "page"
     languages: list[str] = Field(default_factory=list)
     scripts: list[str] = Field(default_factory=list)
     centuries: list[int] = Field(default_factory=list)
@@ -123,12 +129,14 @@ class ModelSpec(BaseModel):
     #: ``max_new_tokens`` is: the budget belongs to the fine-tune, and serving at
     #: a different one is a silent distribution shift, not an error.
     max_pixels: int | None = None
-    #: Line-level only: read this many consecutive lines of a region as one
-    #: strip instead of one line at a time. None = one line per crop. A line on
-    #: its own leaves a page model without context; a whole page leaves a letter
-    #: too few pixels (training-atr-models#315, #317).
+    #: Block level only, and required there: k, the number of consecutive lines
+    #: of a region read as one strip. It must be the k the model was trained on
+    #: (6 for the xix block arms, training-atr-models#57) — another k measures
+    #: something other than what was trained. A line on its own leaves a page
+    #: model without context; a whole page leaves a letter too few pixels
+    #: (training-atr-models#315, #317).
     lines_per_crop: int | None = Field(default=None, ge=2)
-    #: Line-level only: enlarge every crop this many times before it is sent.
+    #: Line or block level: enlarge every crop this many times before it is sent.
     #: None = native pixels. See ``pipeline.crop_strip`` for why a model that
     #: reads 16 px cells is helped by pixels that add no information.
     crop_scale: float | None = Field(default=None, gt=1.0, le=4.0)
@@ -194,11 +202,21 @@ class ModelSpec(BaseModel):
 
     @model_validator(mode="after")
     def _check_strips(self) -> ModelSpec:
-        for field in ("lines_per_crop", "crop_scale"):
-            if getattr(self, field) is not None and self.level != "line":
-                raise ValueError(f"model '{self.id}': {field} is only meaningful at level line")
-            if getattr(self, field) is not None and self.engine != "vllm":
-                raise ValueError(f"model '{self.id}': {field} is only served for engine vllm")
+        if self.level == "block":
+            if self.engine != "vllm":
+                raise ValueError(f"model '{self.id}': level block is only served for engine vllm")
+            if self.lines_per_crop is None:
+                raise ValueError(
+                    f"model '{self.id}': level block needs lines_per_crop — the k it was "
+                    "trained on (6 for the xix block arms)")
+        elif self.lines_per_crop is not None:
+            raise ValueError(f"model '{self.id}': lines_per_crop is only meaningful at level block")
+        if self.crop_scale is not None:
+            if self.level == "page":
+                raise ValueError(
+                    f"model '{self.id}': crop_scale is only meaningful at level line or block")
+            if self.engine != "vllm":
+                raise ValueError(f"model '{self.id}': crop_scale is only served for engine vllm")
         return self
 
     @model_validator(mode="after")
