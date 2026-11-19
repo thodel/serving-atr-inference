@@ -129,8 +129,8 @@ vLLMs Profiling sieht diese Spitze nicht. Auf Karte 1 bleibt neben trocr, party
 und kraken (zusammen ~14 GB, Stand 01.11.) wenig Reserve. Ganze Seiten bei
 1.96 MP sind damit wieder knapp, Streifen bei 1 MP haben Luft.
 
-**Streifen (#241).** `lines_per_crop` und `crop_scale` lassen ein Zeilenmodell
-mehrere aufeinanderfolgende Zeilen einer Region als einen Ausschnitt lesen, auf
+**Streifen (#241, seit #186 `level: block`).** `lines_per_crop` und `crop_scale`
+lassen ein Modell mehrere aufeinanderfolgende Zeilen einer Region als einen Ausschnitt lesen, auf
 Wunsch vergrössert (innerhalb `max_pixels`). Dazu kommen zwei Einträge:
 `apertus-1.5-8b-strip4` (nativ) und `apertus-1.5-8b-strip4-x2` (2×).
 

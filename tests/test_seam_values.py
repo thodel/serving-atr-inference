@@ -29,17 +29,18 @@ INFRA = REPO / "docs" / "INFRASTRUCTURE.md"
 
 # ── the values ───────────────────────────────────────────────────────────────
 def test_the_visual_budget_is_the_one_the_fine_tunes_were_trained_at():
-    """256 visual tokens for a line, 2048 for a page, against Qwen3-VL's 32x32
-    merged patch. Written out rather than computed, so the arithmetic in
-    `seam.py` cannot drift from the number without this failing."""
-    assert seam.VLM_PIXEL_BUDGET == {"line": 262144, "page": 2097152}
+    """256 visual tokens for a line, 1024 for a block (#186), 2048 for a page,
+    against Qwen3-VL's 32x32 merged patch — training-atr-models'
+    `contracts.VLM_PIXEL_BUDGET`. Written out rather than computed, so the
+    arithmetic in `seam.py` cannot drift from the number without this failing."""
+    assert seam.VLM_PIXEL_BUDGET == {"line": 262144, "block": 1048576, "page": 2097152}
 
 
 def test_the_gate_header_is_the_name_the_trainer_sends():
     assert seam.PROMOTION_GATE_HEADER == "X-ATR-Promotion-Gate"
 
 
-@pytest.mark.parametrize("value", ["262144", "2097152", "X-ATR-Promotion-Gate"])
+@pytest.mark.parametrize("value", ["262144", "1048576", "2097152", "X-ATR-Promotion-Gate"])
 def test_the_shared_values_table_states_them(value):
     """A value both repositories must agree on belongs where someone looking for
     it will find it, not only in a docstring."""

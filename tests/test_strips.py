@@ -70,12 +70,15 @@ def test_recognize_lines_reads_one_crop_per_strip():
     assert res.text.splitlines()[0] == "strip 1"
 
 
-@pytest.mark.parametrize("extra", [{"lines_per_crop": 4}, {"crop_scale": 2.0}])
-def test_strip_settings_need_a_line_level_vllm_model(extra):
-    with pytest.raises(ValidationError, match="level line"):
-        ModelSpec(id="t", engine="vllm", hf_repo="o/t", level="page", **extra)
+def test_strip_settings_need_a_vllm_model_at_the_right_level():
+    """Since #186 a strip is `level: block`: k belongs there and nowhere else;
+    the enlargement fits a line or a block, never a page."""
+    with pytest.raises(ValidationError, match="only meaningful at level block"):
+        ModelSpec(id="t", engine="vllm", hf_repo="o/t", level="line", lines_per_crop=4)
+    with pytest.raises(ValidationError, match="level line or block"):
+        ModelSpec(id="t", engine="vllm", hf_repo="o/t", level="page", crop_scale=2.0)
     with pytest.raises(ValidationError, match="engine vllm"):
-        ModelSpec(id="t", engine="trocr", hf_repo="o/t", level="line", **extra)
+        ModelSpec(id="t", engine="trocr", hf_repo="o/t", level="line", crop_scale=2.0)
 
 
 def test_the_strip_probe_pair_differs_only_in_scale():
@@ -132,8 +135,9 @@ def test_a_line_reading_carries_no_strip_report():
 def test_a_strip_gets_k_line_budgets_unless_it_names_its_own():
     from atr_serving.config import Settings
     from atr_serving.pipeline import generation_budget
-    base = {"id": "s", "engine": "vllm", "hf_repo": "x/y", "level": "line"}
-    assert generation_budget(ModelSpec(**base), Settings()) == 512
+    base = {"id": "s", "engine": "vllm", "hf_repo": "x/y", "level": "block"}
+    line = {**base, "level": "line"}
+    assert generation_budget(ModelSpec(**line), Settings()) == 512
     assert generation_budget(ModelSpec(**base, lines_per_crop=4), Settings()) == 2048
     assert generation_budget(ModelSpec(**base, lines_per_crop=4, max_new_tokens=600),
                              Settings()) == 600

@@ -1246,7 +1246,7 @@ models:
     hf_repo: swiss-ai/Apertus-v1.5-8B
     description: "Apertus 1.5 8B, four lines per crop (resolution probe; not HTR-tuned)"
     task: htr
-    level: line
+    level: block
     lines_per_crop: 4
     max_new_tokens: 512
     prompt: &apertus_strip_prompt >-
@@ -1272,7 +1272,7 @@ models:
     hf_repo: swiss-ai/Apertus-v1.5-8B
     description: "Apertus 1.5 8B, four lines per crop enlarged 2x (resolution probe; not HTR-tuned)"
     task: htr
-    level: line
+    level: block
     lines_per_crop: 4
     crop_scale: 2.0
     max_new_tokens: 512
