@@ -12,6 +12,7 @@ nothing, and that a failed step or a server that dies is kept and said.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import subprocess
@@ -39,7 +40,9 @@ FAKE_EVAL_ENV = """#!/bin/bash
 set -euo pipefail
 echo "eval_env $*" >> "$STEPS"
 mkdir -p "$1/venv/bin"
-ln -sf "$PY" "$1/venv/bin/python"
+printf '#!/bin/bash\nexport FAKE_VIA="%s"\nPYTHONPATH="%s${PYTHONPATH:+:$PYTHONPATH}" exec "%s" "$@"\n' \
+    "$1/venv/bin/python" "${FAKE_VENV_STUBS-$STUBS}" "$PY" > "$1/venv/bin/python"
+chmod +x "$1/venv/bin/python"
 cat > "$1/serve.sh" <<'EOS'
 #!/bin/bash
 : "${GPU:?GPU}"; : "${PORT:?PORT}"
@@ -71,7 +74,7 @@ json.dump({"jsonl": "eval_pages.jsonl", "pages": ["a.xml"]}, open(os.path.join(o
 """
 
 FAKE_MERGE = """import os, sys
-open(os.environ["STEPS"], "a").write(f"merge {' '.join(sys.argv[1:])} python={sys.executable}\\n")
+open(os.environ["STEPS"], "a").write(f"merge {' '.join(sys.argv[1:])} python={os.environ.get('FAKE_VIA')}\\n")
 model = sys.argv[sys.argv.index("--only") + 1]
 d = os.path.join(os.environ["ATR_VLLM_MERGED_DIR"], model)
 os.makedirs(d)
@@ -87,6 +90,15 @@ json.dump({"argv": sys.argv[1:]}, open(out, "w"))
 """
 
 
+@functools.lru_cache(maxsize=1)
+def _missing_in_a_fresh_python() -> tuple[str, ...]:
+    """The merge dependencies the test interpreter lacks, asked in a new process:
+    in this one, another test may have left a stub ``torch`` in sys.modules."""
+    return tuple(m for m in ("peft", "torch", "transformers", "loguru", "pydantic_settings", "yaml")
+                 if subprocess.run([sys.executable, "-c", f"import {m}"],
+                                   capture_output=True).returncode != 0)
+
+
 def _setup(tmp_path):
     def put(path, text, mode=0o755):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +110,12 @@ def _setup(tmp_path):
     put(trepo / "scripts" / "eval_granularity.py", FAKE_GRANULARITY)
     put(trepo / "src" / "atr_training" / "__init__.py", "")
     put(trepo / "src" / "atr_training" / "textmetrics.py", "def score_pairs(*a): pass\n")
+    stubs = tmp_path / "stubs"
+    for mod in _missing_in_a_fresh_python():
+        put(stubs / mod / "__init__.py", "", mode=0o644)
+    stubs.mkdir(exist_ok=True)
+    put(tmp_path / "mergepy", f'#!/bin/bash\nexport FAKE_VIA="{tmp_path / "mergepy"}"\n'
+                              f'PYTHONPATH="{stubs}" exec "{sys.executable}" "$@"\n')
     env = dict(
         os.environ,
         PATH=f"{tmp_path / 'bin'}:{os.environ['PATH']}",
@@ -113,6 +131,7 @@ def _setup(tmp_path):
         ATR_MEASURE_REPORTS=str(tmp_path / "reports"),
         FAKE_SERVER=str(put(tmp_path / "fake_server.py", FAKE_SERVER)),
         FAKE_GPU_PIDS=str(tmp_path / "gpu-pids"), STEPS=str(tmp_path / "steps"),
+        STUBS=str(tmp_path / "stubs"),
     )
     (tmp_path / "home").mkdir()
     (tmp_path / "gpu-pids").write_text("")
@@ -238,10 +257,51 @@ def test_a_merge_that_produces_nothing_names_the_way_out(tmp_path):
 
 
 def test_the_merge_python_can_be_the_training_venv(tmp_path):
-    done, steps = _run(tmp_path, "m-9", ATR_MERGE_PYTHON=sys.executable)
+    done, steps = _run(tmp_path, "m-9", ATR_MERGE_PYTHON=str(tmp_path / "mergepy"))
     assert done.returncode == 0, done.stderr
     merge = next(s for s in steps if s.startswith("merge"))
-    assert merge.endswith(f"python={sys.executable}")
+    assert merge.endswith(f"python={tmp_path / 'mergepy'}")
+
+
+def test_a_named_merge_python_that_cannot_merge_is_refused_before_the_claim(tmp_path):
+    """vlm-train on asteraix has peft; a venv without it would fail ten
+    minutes and five gigabytes in."""
+    done, steps = _run(tmp_path, "m-11", ATR_MERGE_PYTHON=sys.executable)
+    assert done.returncode == 1 and "cannot run merge_loras.py" in done.stderr
+    assert "ModuleNotFoundError" in done.stderr
+    assert steps == [] and _workspaces(tmp_path) == []
+
+
+def test_the_default_merge_python_is_checked_before_the_merge(tmp_path):
+    done, steps = _run(tmp_path, "m-12", FAKE_VENV_STUBS="")
+    assert done.returncode == 1 and "cannot run merge_loras.py" in done.stderr
+    assert "ATR_MERGE_PYTHON" in done.stderr
+    assert not any(s.startswith("merge") for s in steps)
+
+
+def test_a_frozen_page_set_goes_to_eval_granularity_and_skips_eval_pages(tmp_path):
+    pset = tmp_path / "eval_sets" / "german-kurrent-xvi-xix-v1" / "vlm-pages-test"
+    pset.mkdir(parents=True)
+    (pset / "benchmark.json").write_text("{}")
+    done, steps = _run(tmp_path, "m-13", "--page-set", str(pset))
+    assert done.returncode == 0, done.stderr
+    assert [s.split()[0] for s in steps] == ["eval_env", "merge", "serve", "granularity"]
+    assert f"--page-set {pset} --model m-13" in steps[-1]
+    assert "--root" not in steps[-1] and "--jsonl" not in steps[-1]
+    report = next((tmp_path / "reports").glob("*-m-13.json"))
+    assert not Path(f"{report}.selection.json").exists()
+
+
+def test_a_page_set_without_benchmark_json_is_refused_before_the_claim(tmp_path):
+    (tmp_path / "set").mkdir()
+    done, steps = _run(tmp_path, "m-14", "--page-set", str(tmp_path / "set"))
+    assert done.returncode == 1 and "no benchmark.json" in done.stderr
+    assert steps == [] and _workspaces(tmp_path) == []
+
+
+def test_pages_and_a_page_set_are_one_or_the_other(tmp_path):
+    done, steps = _run(tmp_path, "m-15", "--pages", "x", "--page-set", "y")
+    assert done.returncode == 2 and "not both" in done.stderr and steps == []
 
 
 @pytest.mark.parametrize("args", [[], ["a", "b"], ["m", "--vllm", "latest"], ["m", "--bogus"]])

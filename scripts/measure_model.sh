@@ -4,7 +4,8 @@
 #
 #   ATR_TRAINING_REPO=~/Repo/training-atr-models \
 #   ATR_TRAINING_PYTHON=~/Repo/training-atr-models/.venvs/kraken-train/bin/python \
-#   bash scripts/measure_model.sh <model-id> [--pages <model|job id | archive dir>]
+#   bash scripts/measure_model.sh <model-id> [--pages <model|job id | archive dir>
+#        | --page-set <eval_sets/<set>/vlm-pages-<side>>]
 #        [--n 15] [--seed 42] [--vllm 0.11|next] [--serve <dir|hf repo>]
 #        [--report <file.json>] [--keep] [-- <further eval_granularity.py args>]
 #
@@ -14,6 +15,12 @@
 #   scripts/eval_pages.py    held-out pages, with the separation proof     (#181)
 #   scripts/merge_loras.py   the adapter baked into its base, into the workspace
 #   eval_granularity.py      in training-atr-models: lines, blocks, regions, pages
+#
+# --page-set measures on a frozen held-out benchmark (build_page_benchmark.py)
+# instead of pages drawn from the model's own job: the way for a model whose
+# job is not on the share (trained on UBELIX). eval_granularity.py checks the
+# draw against its benchmark.json; that the model did not train on the set's
+# documents is the training's split, not something this command can prove.
 #
 # Before anything is claimed, the measuring side is checked: the training repo,
 # its eval_granularity.py and a python that imports what it needs. A refusal
@@ -47,11 +54,12 @@ MERGE="${ATR_MEASURE_MERGE:-$REPO/scripts/merge_loras.py}"
 die() { printf 'measure_model: %s\n' "$*" >&2; exit "${2:-1}"; }
 say() { printf '\n\033[1;36m» %s\033[0m\n' "$*" >&2; }
 
-MODEL="" PAGES="" N=15 SEED=42 VARIANT=0.11 SERVE="" REPORT="" KEEP=()
+MODEL="" PAGES="" PAGE_SET="" N=15 SEED=42 VARIANT=0.11 SERVE="" REPORT="" KEEP=()
 GRAN_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --pages)  PAGES="${2:?--pages needs a value}"; shift 2 ;;
+        --page-set) PAGE_SET="${2:?--page-set needs a directory}"; shift 2 ;;
         --n)      N="${2:?--n needs a value}"; shift 2 ;;
         --seed)   SEED="${2:?--seed needs a value}"; shift 2 ;;
         --vllm)   VARIANT="${2:?--vllm needs 0.11 or next}"; shift 2 ;;
@@ -66,6 +74,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$MODEL" ] || die "usage: measure_model.sh <model-id> [options] — see --help" 2
 case "$VARIANT" in 0.11|next) ;; *) die "--vllm must be 0.11 or next, not '$VARIANT'" 2 ;; esac
+[ -z "$PAGES" ] || [ -z "$PAGE_SET" ] || die "--pages or --page-set, not both" 2
 PAGES="${PAGES:-$MODEL}"
 
 # ── 0. the measuring side, before a card is claimed ──────────────────────────
@@ -87,9 +96,26 @@ mkdir -p "$(dirname "$REPORT")"
 REPORT="$(cd "$(dirname "$REPORT")" && pwd)/$(basename "$REPORT")"
 [ ! -e "$REPORT" ] || die "$REPORT exists — a measurement does not overwrite another"
 
-# A prepared archive is used where it lies; anything else is resolved by eval_pages.
+# The python that merges: checked now when it is named, after the venv otherwise.
+merge_check() {
+    "$1" - "$REPO" <<'PY' || die "$1 cannot run merge_loras.py (above) — set ATR_MERGE_PYTHON to a venv with torch, transformers, peft, pydantic-settings, loguru and pyyaml (asteraix: training-atr-models/.venvs/vlm-train)"
+import sys
+sys.path.insert(0, sys.argv[1] + "/src")
+import loguru, peft, pydantic_settings, torch, transformers, yaml  # noqa: F401
+import atr_serving.config  # noqa: F401
+PY
+}
+if [ -z "$SERVE" ] && [ -n "${ATR_MERGE_PYTHON:-}" ]; then
+    merge_check "$ATR_MERGE_PYTHON"
+fi
+
+# A frozen page set is read by eval_granularity.py itself; a prepared archive is
+# used where it lies; anything else is resolved by eval_pages.
 PAGES_DIR="" JSONL=""
-if [ -d "$PAGES" ]; then
+if [ -n "$PAGE_SET" ]; then
+    [ -f "$PAGE_SET/benchmark.json" ] || die "$PAGE_SET has no benchmark.json — not a frozen page set (build_page_benchmark.py)"
+    PAGE_SET="$(cd "$PAGE_SET" && pwd)"
+elif [ -d "$PAGES" ]; then
     [ -f "$PAGES/selection.json" ] || die "$PAGES is a directory without selection.json — not an eval_pages archive"
     PAGES_DIR="$(cd "$PAGES" && pwd)"
 fi
@@ -103,18 +129,24 @@ case "$REPORT" in "$WS"/*) die "the report may not go into $WS — it is deleted
 say "venv (--vllm $VARIANT)"
 bash "$EVAL_ENV" "$WS/env" --vllm "$VARIANT"
 
-if [ -z "$PAGES_DIR" ]; then
-    say "held-out pages for $PAGES"
-    "$ATR_EVAL_PYTHON" "$EVAL_PAGES" "$PAGES" --n "$N" --seed "$SEED" --out "$WS/pages"
-    PAGES_DIR="$WS/pages"
+if [ -n "$PAGE_SET" ]; then
+    SOURCE=(--page-set "$PAGE_SET")
+else
+    if [ -z "$PAGES_DIR" ]; then
+        say "held-out pages for $PAGES"
+        "$ATR_EVAL_PYTHON" "$EVAL_PAGES" "$PAGES" --n "$N" --seed "$SEED" --out "$WS/pages"
+        PAGES_DIR="$WS/pages"
+    fi
+    JSONL=$("$ATR_EVAL_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["jsonl"])' \
+            "$PAGES_DIR/selection.json")
+    SOURCE=(--root "$PAGES_DIR" --jsonl "$JSONL")
 fi
-JSONL=$("$ATR_EVAL_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["jsonl"])' \
-        "$PAGES_DIR/selection.json")
 
 if [ -z "$SERVE" ]; then
     # ATR_VLLM_MERGED_DIR is $WS/merged (eval_begin): always fresh, so always merged.
     SERVE="$ATR_VLLM_MERGED_DIR/$MODEL"
     say "merging $MODEL into $ATR_VLLM_MERGED_DIR"
+    [ -n "${ATR_MERGE_PYTHON:-}" ] || merge_check "$WS/env/venv/bin/python"
     "${ATR_MERGE_PYTHON:-$WS/env/venv/bin/python}" "$MERGE" --only "$MODEL"
     [ -f "$SERVE/config.json" ] \
         || die "no merged model at $SERVE after merge_loras — not a LoRA? pass --serve <hf repo or dir>"
@@ -144,9 +176,13 @@ do
 done
 
 # ── 3. measure; the report and the selection leave the workspace ─────────────
-say "measuring $MODEL on $(basename "$PAGES_DIR") → $REPORT"
-"$TPY" "$GRAN" --root "$PAGES_DIR" --jsonl "$JSONL" --model "$MODEL" --out "$REPORT" \
+say "measuring $MODEL on ${PAGE_SET:-$PAGES_DIR} → $REPORT"
+"$TPY" "$GRAN" "${SOURCE[@]}" --model "$MODEL" --out "$REPORT" \
     --base-url "http://127.0.0.1:$PORT" --no-auth "${GRAN_ARGS[@]}"
 [ -s "$REPORT" ] || die "eval_granularity.py ended without writing $REPORT"
-cp "$PAGES_DIR/selection.json" "$REPORT.selection.json"
-say "done: $REPORT (selection beside it)"
+if [ -z "$PAGE_SET" ]; then
+    cp "$PAGES_DIR/selection.json" "$REPORT.selection.json"
+    say "done: $REPORT (selection beside it)"
+else
+    say "done: $REPORT (the page set's identity is in it)"
+fi
