@@ -107,6 +107,9 @@ def test_a_fresh_build_pins_like_make_venvs_and_stamps_last(repo, tmp_path):
     assert "torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128" in calls[2]
     assert calls[3].endswith(f"-r {repo}/engines/vllm/requirements.txt")
     assert "--extra-index-url" not in calls[3]
+    # merge_loras.py runs in this venv: the gateway config's deps, at its floors.
+    assert calls[4].endswith("pydantic-settings>=2.2 loguru>=0.7 pyyaml>=6.0")
+    assert len(calls) == 5
     stamp = json.loads((out / "eval_env.json").read_text(encoding="utf-8"))
     assert stamp["variant"] == "0.11" and stamp["include"].endswith("include/python3.12")
     assert sorted(p.name for p in out.iterdir()) == ["eval_env.json", "serve.sh", "uvpy", "venv"]
@@ -267,3 +270,14 @@ def test_a_python_without_headers_stops_before_the_venv(repo, tmp_path):
     r = _run(repo, str(tmp_path / "env"), FAKE_UV_NOHEADERS="1")
     assert r.returncode == 1 and "no Python.h" in r.stderr
     assert [c.split()[0] for c in _calls(repo)] == ["python"]
+
+
+def test_the_merge_dependencies_are_the_gateways_floors():
+    """merge_loras.py imports the gateway config, so the measurement venv needs
+    what pyproject.toml asks for there — at the same floors, not other ones."""
+    pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    script = (REPO / "scripts" / "eval_env.sh").read_text(encoding="utf-8")
+    deps = re.search(r"MERGE_DEPS=\(([^)]*)\)", script)[1].split()
+    assert [d.strip('"') for d in deps] == ["pydantic-settings>=2.2", "loguru>=0.7", "pyyaml>=6.0"]
+    for dep in deps:
+        assert dep in pyproject, f"{dep} is not the gateway's floor"

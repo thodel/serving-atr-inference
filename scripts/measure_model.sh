@@ -98,7 +98,7 @@ REPORT="$(cd "$(dirname "$REPORT")" && pwd)/$(basename "$REPORT")"
 
 # The python that merges: checked now when it is named, after the venv otherwise.
 merge_check() {
-    "$1" - "$REPO" <<'PY' || die "$1 cannot run merge_loras.py (above) — set ATR_MERGE_PYTHON to a venv with torch, transformers, peft, pydantic-settings, loguru and pyyaml (asteraix: training-atr-models/.venvs/vlm-train)"
+    "$1" - "$REPO" <<'PY' || die "$1 cannot run merge_loras.py (above) — set ATR_MERGE_PYTHON to a venv with torch, transformers, peft, pydantic-settings, loguru and pyyaml, whose transformers knows the base (Qwen3.5 needs 5.x) — or leave it unset: eval_env.sh puts them in the measurement venv"
 import sys
 sys.path.insert(0, sys.argv[1] + "/src")
 import loguru, peft, pydantic_settings, torch, transformers, yaml  # noqa: F401

@@ -26,8 +26,13 @@ On asteraix (19.11.2026), from `~/Repo/serving-atr-inference`, set these as well
 
 - `ATR_EVAL_PYTHON` to the `kraken-train` python, because the system python has no
   pydantic;
-- `ATR_MERGE_PYTHON` to `.venvs/vlm-train/bin/python`;
 - the `ATR_TRAIN_*_ROOT` values from the training repo's `.env`.
+
+Leave `ATR_MERGE_PYTHON` unset: the measurement venv merges. It carries the
+merge dependencies, and its transformers matches the variant. `vlm-train` on
+asteraix has transformers 4.57, which has no `qwen3_5`, and a Qwen3.5 merge died
+there (20.11.2026). Set it only when `merge_loras.py` asks for a newer peft than
+the measurement venv has.
 
 It claims a card, builds the venv, draws the held-out pages, merges the adapter, serves
 it on 127.0.0.1 and waits for `/health`, or for the server's death, with its log. Then it
