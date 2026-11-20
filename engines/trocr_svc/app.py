@@ -1,6 +1,8 @@
 """
 ATR TrOCR Engine — FastAPI service for medieval/Kurrent/Latin OCR via TrOCR.
 """
+import os
+import socket
 import threading
 from pathlib import Path
 
@@ -41,9 +43,65 @@ TROCR_MODELS = [
     "dh-unibe/trocr-kurrent",
 ]
 
+#: Hub owners whose repos this service loads without being listed above. The
+#: gateway sends a registry entry's ``hf_repo`` (src/atr_serving/api/routes.py,
+#: ``trocr_ref``), so a model published to one of these owners needs only its
+#: entry in config/models.yaml, not a change here.
+HUB_OWNERS = tuple(
+    o.strip() for o in os.getenv("TROCR_HUB_OWNERS", "dh-unibe").split(",") if o.strip()
+)
+
+#: What a model directory must hold for ``from_pretrained`` to load it: the
+#: trainer's register stage copies exactly these (training-atr-models#37).
+_MODEL_DIR_FILES = ("config.json", "preprocessor_config.json")
+
+
+class UnknownModel(ValueError):
+    """A reference this service will not load, with the reason for the caller."""
+
+
+def model_source(model: str) -> str:
+    """A model reference from the gateway → what ``from_pretrained`` gets.
+
+    Three kinds are accepted (training-atr-models#37, T5):
+
+    * an id in :data:`TROCR_MODELS`;
+    * a **local directory**, the ``local_path`` the gateway sends for a model
+      trained on asteraix and registered on the share. A trained model has no
+      hub repo until someone publishes it, which is why it arrives as a path;
+    * a hub repo of one of :data:`HUB_OWNERS`.
+
+    A reference that is plainly a path but names nothing is an error with the
+    host name in it, as in ``atr_serving.kraken_loader.resolve_weights``: with the
+    registry on the share, a mount that differs between trainer and server
+    looks exactly like this.
+    """
+    if model in TROCR_MODELS:
+        return model
+    if model.startswith(("/", "~")):
+        path = Path(model).expanduser()
+        if not path.is_dir():
+            raise UnknownModel(
+                f"{path} does not exist on {socket.gethostname()}. A registered "
+                "model's local_path must name its directory on the machine that "
+                "serves it; the shared registry needs the share mounted at the same "
+                "path on the trainer and here.")
+        missing = [f for f in _MODEL_DIR_FILES if not (path / f).is_file()]
+        if missing:
+            raise UnknownModel(
+                f"{path} holds no {', '.join(missing)}: not a TrOCR model directory.")
+        return str(path)
+    owner, _, name = model.partition("/")
+    if name and "/" not in name and owner in HUB_OWNERS:
+        return model
+    raise UnknownModel(
+        f"Unknown model '{model}'. Available: {TROCR_MODELS}, a registered model "
+        f"directory, or a hub repo of {', '.join(HUB_OWNERS) or 'no owner'}.")
+
 
 def _resolve_model(hf_repo: str) -> tuple[VisionEncoderDecoderModel, Any]:
-    """Download (if needed) and load a TrOCR model + processor from HuggingFace."""
+    """Load a TrOCR model + processor from a hub repo (downloaded once into
+    :data:`CACHE_DIR`) or from a local model directory."""
     logger.info(f"Loading TrOCR model: {hf_repo}")
     model = VisionEncoderDecoderModel.from_pretrained(
         hf_repo, cache_dir=CACHE_DIR
@@ -168,11 +226,10 @@ async def recognize(
     """
     Recognise text in an image using the specified TrOCR model.
     """
-    if model not in TROCR_MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown model '{model}'. Available: {TROCR_MODELS}",
-        )
+    try:
+        source = model_source(model)
+    except UnknownModel as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     contents = await file.read()
     try:
         image = Image.open(BytesIO(contents)).convert("RGB")
@@ -182,7 +239,7 @@ async def recognize(
     logger.info(f"/recognize: running inference with model={model}")
     # run_in_threadpool moves _recognize_one to a thread, so the event loop is
     # free to handle other requests while the GPU works (#95, step 1).
-    text = await run_in_threadpool(_recognize_one, model, image)
+    text = await run_in_threadpool(_recognize_one, source, image)
 
     line = Line(
         baseline=BBox(x0=0, y0=0, x1=0, y1=0),
