@@ -71,8 +71,14 @@ case "$VARIANT" in
         REQS="$ROOT/engines/vllm-next/requirements.txt"
         TORCH=(torch==2.13.0 torchvision==0.28.0)
         TORCH_INDEX=https://download.pytorch.org/whl/cu129
+        # pip (make_venvs.sh) takes the best version across all indexes; uv by
+        # default only the first index that has a package at all. The pytorch
+        # index carries an old `packaging`, flashinfer (via vLLM 0.29) needs
+        # >= 24.2, and uv refused the whole set (asteraix, 20.11.2026). Same
+        # indexes, same trust as make_venvs.sh — so pip's strategy.
         EXTRA=(--extra-index-url https://wheels.vllm.ai/0.29.0/cu129
-               --extra-index-url https://download.pytorch.org/whl/cu129)
+               --extra-index-url https://download.pytorch.org/whl/cu129
+               --index-strategy unsafe-best-match)
         ;;
     *) die "--vllm must be 0.11 or next, not '$VARIANT'" 2 ;;
 esac

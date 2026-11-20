@@ -119,7 +119,17 @@ def test_next_takes_the_cu129_builds_and_the_vllm_next_pins(repo, tmp_path):
     assert "torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu129" in calls[2]
     assert f"-r {repo}/engines/vllm-next/requirements.txt" in calls[3]
     assert calls[3].endswith(" --extra-index-url https://wheels.vllm.ai/0.29.0/cu129"
-                             " --extra-index-url https://download.pytorch.org/whl/cu129")
+                             " --extra-index-url https://download.pytorch.org/whl/cu129"
+                             " --index-strategy unsafe-best-match")
+    # uv's default looks at the first index that has a package and stops: the
+    # pytorch index's old `packaging` made vLLM 0.29 unresolvable on asteraix
+    # (20.11.2026). The 0.11 variant reads PyPI only and needs no strategy.
+
+
+def test_the_0_11_variant_reads_pypi_only(repo, tmp_path):
+    assert _run(repo, str(tmp_path / "env")).returncode == 0
+    reqs_call = _calls(repo)[3]
+    assert "--index-strategy" not in reqs_call and "--extra-index-url" not in reqs_call
 
 
 def test_the_torch_pins_are_the_ones_make_venvs_uses():
