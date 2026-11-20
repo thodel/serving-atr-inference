@@ -85,9 +85,13 @@ esac
 [ -f "$REQS" ] || die "missing $REQS"
 command -v "$UV" >/dev/null || die "uv not found (EVAL_ENV_UV=$UV); install: curl -LsSf https://astral.sh/uv/install.sh | sh"
 
+# What merge_loras.py needs beyond vLLM's own tree: the gateway's config
+# dependencies, at the gateway's own floors (pyproject.toml).
+MERGE_DEPS=("pydantic-settings>=2.2" "loguru>=0.7" "pyyaml>=6.0")
+
 # What the build is made of. Equal fingerprints mean nothing to rebuild.
 REQS_SHA=$(sha256sum "$REQS" | cut -d' ' -f1)
-WANT="$SCHEMA $VARIANT $PYVER ${TORCH[*]} $TORCH_INDEX $REQS_SHA"
+WANT="$SCHEMA $VARIANT $PYVER ${TORCH[*]} $TORCH_INDEX $REQS_SHA ${MERGE_DEPS[*]}"
 
 mkdir -p "$DIR"
 DIR="$(cd "$DIR" && pwd)"
@@ -148,6 +152,11 @@ say "building $DIR/venv (--vllm $VARIANT, torch from $TORCH_INDEX)"
 "$UV" venv --python "$PY" --clear "$DIR/venv"
 "$UV" pip install --python "$DIR/venv/bin/python" "${TORCH[@]}" --index-url "$TORCH_INDEX"
 "$UV" pip install --python "$DIR/venv/bin/python" -r "$REQS" "${EXTRA[@]}"
+# merge_loras.py runs in this venv (measure_model.sh's default): torch,
+# transformers and peft come with vLLM; the gateway config it imports needs
+# these too. This venv is the right merger besides: vllm-next's transformers 5
+# knows qwen3_5, which the training venv's 4.57 does not (asteraix, 20.11.2026).
+"$UV" pip install --python "$DIR/venv/bin/python" "${MERGE_DEPS[@]}"
 
 # ── 3. serve.sh ──────────────────────────────────────────────────────────────
 cat > "$DIR/serve.sh" <<SERVE
