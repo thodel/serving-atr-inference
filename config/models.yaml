@@ -368,6 +368,61 @@ models:
       - https://huggingface.co/datasets/dh-unibe/image-text_dach-gt
       - https://huggingface.co/datasets/dh-unibe/image-text_weisthuemer
 
+  # The line arm of training-atr-models#59: the twenty corpora of
+  # qwen3.5-4b-german-kurrent-xvi-xix-page-v1, trained at `granularity: line` on
+  # the corpus that reserves the 130 documents of german-kurrent-xvi-xix-v1
+  # (training-atr-models#319). So unlike its v1 — trained before that
+  # reservation and never registered — it can be scored held-out there, and it
+  # is the Qwen row of the early-modern set in agentic_historian#903.
+  # Spec: training-atr-models ubelix/specs/qwen3.5-4b-german-kurrent-xvi-xix-line-v2.json.
+  #
+  # `level: line` because that is what it was trained on and measured at; kraken
+  # segments, the model reads one line per call. `max_pixels` is the line budget
+  # it trained at, written out although it is the default at this level.
+  # vram_mb is page-v1's estimate (#130), same base and same LoRA, not measured.
+  - id: qwen3.5-4b-german-kurrent-xvi-xix-line-v2
+    engine: vllm
+    description: >-
+      Single lines of German Kurrent and chancery hands, 16th to 19th century,
+      trained and measured on line crops. Give it one segmented line, not a
+      page: the page reader for the same hands is
+      qwen3.5-4b-german-kurrent-xvi-xix-page-v1.
+    vllm_venv: vllm-next
+    max_num_seqs: 64     # hybrid model: at vLLM's 256 it does not start (see ModelSpec)
+    hf_repo: dh-unibe/qwen3.5-4b-german-kurrent-xvi-xix-line-v2
+    base_model: Qwen/Qwen3.5-4B
+    task: htr
+    level: line          # trained at granularity: line, and measured there
+    max_pixels: 262144   # the line budget it trained at
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [16, 17, 18, 19]
+    vram_mb: 12000       # page-v1's estimate (#130)
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_rats-und-richtebuecher_xv-xvi
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-post-1500
+      - https://huggingface.co/datasets/dh-unibe/image-text_bullinger-autoren
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii
+      - https://huggingface.co/datasets/dh-unibe/image-text_historisches-grundbuch-basel_xix-xx_train
+      - https://huggingface.co/datasets/dh-unibe/image-text_german-20th-century
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-part-2
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-adhr-colmar
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii-part-2
+      - https://huggingface.co/datasets/dh-unibe/image-text_sg-missiven
+      - https://huggingface.co/datasets/dh-unibe/image-text_reichsanzeiger-gt
+      - https://huggingface.co/datasets/dh-unibe/image-text_gt-fraktur
+      - https://huggingface.co/datasets/dh-unibe/image-text_fibeln
+      - https://huggingface.co/datasets/dh-unibe/image-text_dtgt
+      - https://huggingface.co/datasets/dh-unibe/image-text_dach-gt
+      - https://huggingface.co/datasets/dh-unibe/image-text_weisthuemer
+
   - id: qwen3.5-4b-german-xix-v1
     engine: vllm
     # Disabled 2026-09-14 because Qwen3.5 could not be merged or served on this box

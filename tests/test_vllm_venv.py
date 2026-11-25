@@ -115,14 +115,19 @@ def test_only_the_models_vllm_011_cannot_load_use_the_second_vllm():
     """Moving a proven model to another vLLM is a decision, not a side effect.
 
     The list grows only for a model that cannot run on the default vLLM at all:
-    two Qwen3.5 bases, whose `qwen3_5` only `.venvs/vllm-next`'s transformers
-    knows, and two Gemma 4 bases (E4B and 12B), which need transformers 5 as well
+    Qwen3.5 bases, whose `qwen3_5` only `.venvs/vllm-next`'s transformers knows,
+    and two Gemma 4 bases (E4B and 12B), which need transformers 5 as well
     (training-atr-models#83). A model appearing here for any other reason is the
     side effect this test exists to catch.
+
+    qwen3.5-4b-german-kurrent-xvi-xix-line-v2 (agentic_historian#903) is here for
+    the first reason: a Qwen/Qwen3.5-4B LoRA like page-v1, which vLLM 0.11 cannot
+    load.
     """
     registry = load_registry(REPO_ROOT / "config" / "models.yaml")
     on_next = sorted(s.id for s in registry.all() if s.vllm_venv == "vllm-next")
     assert on_next == ["gemma4-12b-german-xix-v1", "gemma4-e4b-german-xix-v1",
+                       "qwen3.5-4b-german-kurrent-xvi-xix-line-v2",
                        "qwen3.5-4b-german-kurrent-xvi-xix-page-v1",
                        "qwen3.5-4b-german-xix-v2"]
 
