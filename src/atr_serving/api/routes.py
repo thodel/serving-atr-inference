@@ -136,6 +136,16 @@ def _segcache(request: Request):
     return cache
 
 
+def _kraken_ref(spec, model: str) -> str:
+    """What the kraken engine is asked to load: weights on this box first (a
+    trained model has no DOI, #36), then the Zenodo DOI, then the hub repo — a
+    model published on Hugging Face only (dh-unibe's kraken models, #903). A
+    model not in the registry is a raw reference the caller passed, verbatim."""
+    if spec is None:
+        return model
+    return spec.local_path or spec.zenodo_id or spec.hf_repo or spec.id
+
+
 def _parse_lines(lines: str | None) -> list[Line] | None:
     if not lines:
         return None
@@ -1122,7 +1132,7 @@ async def recognize(
     # has no registry to look one up in (#36). The response still reports the
     # registry id — the path is how the engine finds the weights, not what the
     # caller asked for.
-    kraken_ref = (spec.local_path or spec.zenodo_id or spec.id) if spec else model
+    kraken_ref = _kraken_ref(spec, model)
     trocr_ref = (spec.local_path or spec.hf_repo or spec.id) if spec else model
 
     # Party reads the image alongside the requested engine when the caller asked
@@ -1257,7 +1267,7 @@ async def ocr(
     try:
         if engine == "kraken":
             # local_path first: a trained model has no DOI (#36).
-            kraken_ref = (spec.local_path or spec.zenodo_id or spec.id) if spec else model
+            kraken_ref = _kraken_ref(spec, model)
             result = await _kraken_client(request).recognize(
                 raw, filename, ctype, model=kraken_ref, lines=None,
             )
