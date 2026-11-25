@@ -282,6 +282,39 @@ models:
       - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
       - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
 
+  # The 12B sibling of the E4B above: same four corpora, same prompt, line
+  # crops, LoRA on a 4-bit base. Measured on the same 15 XIX pages (G6,
+  # training-atr-models#86, 05.11.2026) it reads lines at CER 0.166 against the
+  # E4B's 0.143 and pages not at all (0.99), so it is registered for comparison,
+  # not as the better reader. `vram_mb` is an estimate from the bf16 size of a
+  # 12B checkpoint, never measured on idhefix (#130).
+  - id: gemma4-12b-german-xix-v1
+    engine: vllm
+    enabled: true
+    vllm_venv: vllm-next  # Gemma 4 needs transformers 5
+    vllm_args:
+      - --mm-processor-kwargs
+      - '{"max_soft_tokens": 140}'
+      - --limit-mm-per-prompt
+      - '{"image": 1, "audio": 0}'
+    hf_repo: dh-unibe/gemma4-12b-german-xix-v1   # private, the LoRA adapter
+    base_model: google/gemma-4-12B-it
+    task: htr
+    level: line          # lines 0.166, pages 0.99 (G6); never `page`
+    max_pixels: 322560   # soft-token step 140, as measured
+    prompt: Transcribe the handwritten text in this image exactly as written.
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [19]
+    vram_mb: 26000       # estimate (#130)
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+
   # The first fine-tune here trained at `granularity: page`, and that is the whole
   # point of it: every other dh-unibe VLM reads one line per call because that is
   # what it saw in training (#165). This one saw whole pages — 171 validation
@@ -490,6 +523,116 @@ models:
     vram_mb: 1500
     residency: pinned
     gpu_affinity: 1
+
+  # Kurrent and chancery hands, 16th to 19th century, on the 20 corpora of the
+  # kurrent-xvi-xix page model. Three runs of the training service (Oct. 2026),
+  # each scored on its own seeded validation split — unseen pages in seen hands,
+  # not a shared benchmark, so the three CERs rank the runs and nothing more:
+  #   from-kurrent-v2  from trocr-kurrent-xvi-xvii, 3 epochs, 100 pages/corpus  8.89 %
+  #   full-v1          from trocr-kurrent-xvi-xvii, 1 epoch, 2000 pages/corpus 10.38 %
+  #   v2               from microsoft/trocr-base-handwritten, 3 epochs          11.00 %
+  # from-kurrent-v2 is the one adopted in the discovery triage (13.11.2026).
+  - id: trocr-german-kurrent-xvi-xix-from-kurrent-v2
+    engine: trocr
+    hf_repo: dh-unibe/trocr-german-kurrent-xvi-xix-from-kurrent-v2
+    base_model: dh-unibe/trocr-kurrent-XVI-XVII
+    task: htr
+    level: line
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [16, 17, 18, 19]
+    vram_mb: 1500
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_rats-und-richtebuecher_xv-xvi
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-post-1500
+      - https://huggingface.co/datasets/dh-unibe/image-text_bullinger-autoren
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii
+      - https://huggingface.co/datasets/dh-unibe/image-text_historisches-grundbuch-basel_xix-xx_train
+      - https://huggingface.co/datasets/dh-unibe/image-text_german-20th-century
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-part-2
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-adhr-colmar
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii-part-2
+      - https://huggingface.co/datasets/dh-unibe/image-text_sg-missiven
+      - https://huggingface.co/datasets/dh-unibe/image-text_reichsanzeiger-gt
+      - https://huggingface.co/datasets/dh-unibe/image-text_gt-fraktur
+      - https://huggingface.co/datasets/dh-unibe/image-text_fibeln
+      - https://huggingface.co/datasets/dh-unibe/image-text_dtgt
+      - https://huggingface.co/datasets/dh-unibe/image-text_dach-gt
+      - https://huggingface.co/datasets/dh-unibe/image-text_weisthuemer
+
+  - id: trocr-german-kurrent-xvi-xix-full-v1
+    engine: trocr
+    hf_repo: dh-unibe/trocr-german-kurrent-xvi-xix-full-v1   # private
+    base_model: dh-unibe/trocr-kurrent-XVI-XVII
+    task: htr
+    level: line
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [16, 17, 18, 19]
+    vram_mb: 1500
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_rats-und-richtebuecher_xv-xvi
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-post-1500
+      - https://huggingface.co/datasets/dh-unibe/image-text_bullinger-autoren
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii
+      - https://huggingface.co/datasets/dh-unibe/image-text_historisches-grundbuch-basel_xix-xx_train
+      - https://huggingface.co/datasets/dh-unibe/image-text_german-20th-century
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-part-2
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-adhr-colmar
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii-part-2
+      - https://huggingface.co/datasets/dh-unibe/image-text_sg-missiven
+      - https://huggingface.co/datasets/dh-unibe/image-text_reichsanzeiger-gt
+      - https://huggingface.co/datasets/dh-unibe/image-text_gt-fraktur
+      - https://huggingface.co/datasets/dh-unibe/image-text_fibeln
+      - https://huggingface.co/datasets/dh-unibe/image-text_dtgt
+      - https://huggingface.co/datasets/dh-unibe/image-text_dach-gt
+      - https://huggingface.co/datasets/dh-unibe/image-text_weisthuemer
+
+  - id: trocr-german-kurrent-xvi-xix-v2
+    engine: trocr
+    hf_repo: dh-unibe/trocr-german-kurrent-xvi-xix-v2   # private
+    base_model: microsoft/trocr-base-handwritten
+    task: htr
+    level: line
+    languages: [de]
+    scripts: [Kurrent]
+    centuries: [16, 17, 18, 19]
+    vram_mb: 1500
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_zh-regierungsratsprotokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_kurrent-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_rats-und-richtebuecher_xv-xvi
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-post-1500
+      - https://huggingface.co/datasets/dh-unibe/image-text_bullinger-autoren
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii
+      - https://huggingface.co/datasets/dh-unibe/image-text_historisches-grundbuch-basel_xix-xx_train
+      - https://huggingface.co/datasets/dh-unibe/image-text_german-20th-century
+      - https://huggingface.co/datasets/dh-unibe/image-text_parlamentsdienste-protokolle
+      - https://huggingface.co/datasets/dh-unibe/image-text_nr-sr-vereinigte-bundesversammlung-xix
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-part-2
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-adhr-colmar
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii-part-2
+      - https://huggingface.co/datasets/dh-unibe/image-text_sg-missiven
+      - https://huggingface.co/datasets/dh-unibe/image-text_reichsanzeiger-gt
+      - https://huggingface.co/datasets/dh-unibe/image-text_gt-fraktur
+      - https://huggingface.co/datasets/dh-unibe/image-text_fibeln
+      - https://huggingface.co/datasets/dh-unibe/image-text_dtgt
+      - https://huggingface.co/datasets/dh-unibe/image-text_dach-gt
+      - https://huggingface.co/datasets/dh-unibe/image-text_weisthuemer
 
   - id: trocr-essoins-middle-latin
     engine: trocr
@@ -717,6 +860,30 @@ models:
     vram_mb: 500
     residency: pinned
     gpu_affinity: 1
+
+  # dh-unibe's medieval German kraken model, fine-tuned from CATMuS Medieval
+  # above on four corpora of the 14th to 17th century (Zurich Rats- und
+  # Richtebücher, Bullinger, Königsfelden, AAEB). CER 21.31 % on its own
+  # validation split (30.08.2026). Published on the hub only — an HF DOI, not a
+  # Zenodo one — so the engine fetches it by its repo (#903).
+  - id: kraken-medieval-german-v2
+    engine: kraken
+    hf_repo: dh-unibe/kraken-medieval-german-v2
+    base_model: "10.5281/zenodo.15030337"
+    description: "Medieval German (dh-unibe), fine-tuned from CATMuS Medieval"
+    task: htr
+    level: page
+    languages: [de]
+    scripts: [Medieval]
+    centuries: [14, 15, 16, 17]
+    vram_mb: 500
+    residency: lazy
+    gpu_affinity: 1
+    training_datasets:
+      - https://huggingface.co/datasets/dh-unibe/image-text_rats-und-richtebuecher_xv-xvi
+      - https://huggingface.co/datasets/dh-unibe/image-text_bullinger-autoren
+      - https://huggingface.co/datasets/dh-unibe/image-text_koenigsfelden-charters-post-1500
+      - https://huggingface.co/datasets/dh-unibe/image-text_aaeb-xiv-xvii
 
   # HTR model for (Japanese) Kuzushiji — Stökl Ben Ezra, 2024. Kuronet dataset.
   - id: kraken-kuzushiji

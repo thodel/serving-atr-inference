@@ -317,7 +317,9 @@ def test_the_offline_run_needs_no_network(capsys):
     assert offline("kraken") == 0
 
     printed = capsys.readouterr().out
-    assert "37 entries for kraken, 37 with a DOI, 37 distinct records" in printed
+    # 38 entries: kraken-medieval-german-v2 is registered by its hub repo, with
+    # no Zenodo DOI to audit (agentic_historian#903).
+    assert "38 entries for kraken, 37 with a DOI, 37 distinct records" in printed
     assert "0 ids recorded as mismatched" in printed
 
 

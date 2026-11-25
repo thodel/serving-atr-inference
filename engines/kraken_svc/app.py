@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -87,13 +88,43 @@ RELEASE_CUDA_CACHE = os.getenv("KRAKEN_RELEASE_CUDA_CACHE", "1") != "0"
 _cache_release_failure: str | None = None
 
 
+#: ``owner/name`` — a Hugging Face model repo. A DOI has the same shape
+#: (``10.5281/zenodo.123``), so a reference starting with ``10.`` is never one.
+_HF_REPO = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")
+
+
+def is_hf_repo(ref: str) -> bool:
+    return bool(_HF_REPO.match(ref or "")) and not ref.startswith("10.")
+
+
+def _fetch_hf(repo_id: str, dest: Path) -> Path:
+    """The weights of a kraken model published on the Hugging Face hub.
+
+    dh-unibe publishes its kraken models there (``kraken-medieval-german-v2``,
+    with an HF DOI, not a Zenodo one), and htrmopo resolves Zenodo only, so a
+    model the training service had already published could not be registered
+    by its repo (#903). Only the weights and ``metadata.json`` are fetched; the
+    hub token, when the repo is private, comes from the environment as for every
+    other engine.
+    """
+    from huggingface_hub import snapshot_download
+    logger.info("Fetching kraken model {} from the Hugging Face hub -> {}", repo_id, dest)
+    got = Path(snapshot_download(repo_id=repo_id, local_dir=str(dest),
+                                 allow_patterns=["*.mlmodel", "*.safetensors", "metadata.json"]))
+    cands = sorted(got.rglob("*.mlmodel")) + sorted(got.rglob("*.safetensors"))
+    if not cands:
+        raise RuntimeError(f"no kraken weights (*.mlmodel, *.safetensors) in hub repo {repo_id}")
+    return cands[0]
+
+
 def _model_file(model_id: str) -> Path:
     """A kraken model reference → a weights file on this box.
 
     A **local path** (file or registered model directory) is used as-is: models
     this box trained have no DOI, and the gateway sends their ``local_path`` as
     the reference precisely because the engine has no registry to look one up in
-    (#36). Anything else is a Zenodo DOI, downloaded once.
+    (#36). An ``owner/name`` reference is a Hugging Face repo, fetched once.
+    Anything else is a Zenodo DOI, downloaded once.
 
     Each downloaded model gets its own cache subdir (htrmopo.get_model drops the
     weights + metadata.json directly into ``path``, so a shared dir would mix
@@ -112,6 +143,9 @@ def _model_file(model_id: str) -> Path:
                 if dest.is_dir() else [])
     if existing:
         p = existing[0]
+    elif is_hf_repo(model_id):
+        dest.mkdir(parents=True, exist_ok=True)
+        p = _fetch_hf(model_id, dest)
     else:
         dest.mkdir(parents=True, exist_ok=True)
         logger.info("Fetching kraken model {} via htrmopo -> {}", model_id, dest)

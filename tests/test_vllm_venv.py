@@ -116,13 +116,13 @@ def test_only_the_models_vllm_011_cannot_load_use_the_second_vllm():
 
     The list grows only for a model that cannot run on the default vLLM at all:
     two Qwen3.5 bases, whose `qwen3_5` only `.venvs/vllm-next`'s transformers
-    knows, and one Gemma 4 base, which needs transformers 5 as well
+    knows, and two Gemma 4 bases (E4B and 12B), which need transformers 5 as well
     (training-atr-models#83). A model appearing here for any other reason is the
     side effect this test exists to catch.
     """
     registry = load_registry(REPO_ROOT / "config" / "models.yaml")
     on_next = sorted(s.id for s in registry.all() if s.vllm_venv == "vllm-next")
-    assert on_next == ["gemma4-e4b-german-xix-v1",
+    assert on_next == ["gemma4-12b-german-xix-v1", "gemma4-e4b-german-xix-v1",
                        "qwen3.5-4b-german-kurrent-xvi-xix-page-v1",
                        "qwen3.5-4b-german-xix-v2"]
 
