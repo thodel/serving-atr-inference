@@ -17,7 +17,7 @@ from loguru import logger
 from PIL import Image
 
 from atr_serving import __version__
-from atr_serving.api.schemas import Line, RecognitionResult
+from atr_serving.api.schemas import Line, RecognitionResult, SegmentResponse
 from atr_serving.image_io import decode_image, encode_png, fit_pixel_budget
 from atr_serving.seam import VLM_PIXEL_BUDGET
 from atr_serving.segcache import segmentation_id
@@ -325,6 +325,7 @@ async def recognize_lines(
     lines_per_crop: int = 1,
     crop_scale: float = 1.0,
     max_pixels: int | None = None,
+    given: list[Line] | None = None,
 ) -> RecognitionResult:
     """Engine-agnostic line pipeline: segment -> crop each line -> recognize ->
     assemble. ``recognize_line`` runs one line image through whichever backend
@@ -353,9 +354,22 @@ async def recognize_lines(
     consecutive lines of one region in one crop, enlarged ``crop_scale`` times
     (see :func:`crop_strip`) and kept within ``max_pixels``. Each strip comes back as one ``Line`` with the box
     around its lines and the model's text for all of them.
+
+    ``given`` are lines the caller already has — a ground-truth PAGE file's,
+    say — and the page is then **not segmented**: those lines are read, in the
+    order given, and the result says ``segmented_by: "given"``, as kraken's
+    does for the same request. Without this only kraken honoured ``lines`` on
+    ``/recognize``; TrOCR and a line-level VLM segmented anew, so a per-line
+    comparison against ground truth compared different lines
+    (agentic_historian#903). A given line without usable geometry is kept, with
+    empty text, so the answer has one line per line asked for and the caller
+    can align by ``order``.
     """
     t0 = time.perf_counter()
-    if segcache is None:
+    if given:
+        seg = SegmentResponse(lines=list(given), segmented_by="given",
+                              reading_order=list(range(len(given))))
+    elif segcache is None:
         seg = await segmenter.segment(image, filename, content_type, mode="baseline")
     else:
         seg = await segcache.get(
@@ -387,10 +401,14 @@ async def recognize_lines(
             crop = crop_line(pil, ln)
             if crop is not None:
                 crops.append((len(crops), ln, _png_bytes(crop)))
+            elif given:
+                crops.append((len(crops), ln, None))
 
     sem = asyncio.Semaphore(max(1, int(concurrency)))
 
-    async def _one(idx: int, ln, png: bytes) -> tuple[int, object, str]:
+    async def _one(idx: int, ln, png: bytes | None) -> tuple[int, object, str]:
+        if png is None:          # a given line with nothing to crop
+            return idx, ln, ""
         async with sem:
             return idx, ln, await recognize_line(png, "image/png")
 

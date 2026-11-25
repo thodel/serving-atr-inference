@@ -146,10 +146,14 @@ def _parse_lines(lines: str | None) -> list[Line] | None:
 
 
 async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
-                                ctype: str, model: str, trocr_ref: str) -> RecognitionResult:
+                                ctype: str, model: str, trocr_ref: str,
+                                given: list[Line] | None = None) -> RecognitionResult:
     """Full-page TrOCR (#25): TrOCR is line-level, so the gateway auto-segments —
     kraken baseline segmentation → per-line crops → TrOCR per line → reassembled
-    top-to-bottom. Shared by /recognize and the /ocr convenience alias."""
+    top-to-bottom. Shared by /recognize and the /ocr convenience alias.
+
+    ``given`` lines (``/recognize``'s ``lines``) are read instead of segmenting,
+    as kraken reads them (agentic_historian#903)."""
     tro = _engine_client(request, "trocr")
 
     async def _trocr_line(line_img: bytes, line_ct: str) -> str:
@@ -160,6 +164,7 @@ async def _recognize_trocr_page(request: Request, raw: bytes, filename: str,
         raw, filename, ctype, model, "trocr", _kraken_client(request), _trocr_line,
         concurrency=_settings(request).line_concurrency,
         segcache=_segcache(request),
+        given=given,
     )
 
 
@@ -1102,6 +1107,10 @@ async def recognize(
     filename = image.filename or "image"
     ctype = image.content_type or "application/octet-stream"
     _require_image(raw, filename)
+    # Parsed once, up front: a malformed ``lines`` is the caller's 400 whichever
+    # engine would have read it. kraken, TrOCR and a line-level VLM read exactly
+    # these lines; party and a page-level VLM read the page and ignore them.
+    given = _parse_lines(lines)
 
     # Each engine wants a different model reference: kraken/party download by
     # Zenodo DOI, trocr loads by HF repo, vllm uses the registry id (= its
@@ -1134,7 +1143,7 @@ async def recognize(
         # kraken & party segment internally → one engine call.
         if engine == "kraken":
             res = await _kraken_client(request).recognize(
-                raw, filename, ctype, model=kraken_ref, lines=_parse_lines(lines)
+                raw, filename, ctype, model=kraken_ref, lines=given
             )
             res.model = model  # echo the id the caller requested
             return await _with_second_opinion(res)
@@ -1147,7 +1156,8 @@ async def recognize(
         # trocr is line-level (engine handles one line) → gateway segments + crops.
         if engine == "trocr":
             return await _with_second_opinion(
-                await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref)
+                await _recognize_trocr_page(request, raw, filename, ctype, model, trocr_ref,
+                                            given=given)
             )
 
         # vLLM: page = one call; line = segment + per-line chat; block =
@@ -1182,6 +1192,7 @@ async def recognize(
                     lines_per_crop=spec.lines_per_crop or 1,
                     crop_scale=spec.crop_scale or 1.0,
                     max_pixels=visual_budget(spec, _settings(request)),
+                    given=given,
                 )
             )
     except EngineError as exc:
