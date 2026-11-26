@@ -86,7 +86,9 @@ open(os.environ["STEPS"], "a").write("granularity " + " ".join(sys.argv[1:]) + "
 if os.environ.get("FAKE_GRAN_FAILS"):
     sys.exit(4)
 out = sys.argv[sys.argv.index("--out") + 1]
-json.dump({"argv": sys.argv[1:]}, open(out, "w"))
+rep = {"argv": sys.argv[1:]}
+rep.update(json.loads(os.environ.get("FAKE_GRAN_REPORT", "{}")))
+json.dump(rep, open(out, "w"))
 """
 
 
@@ -320,3 +322,34 @@ def test_keep_keeps_a_successful_workspace_but_never_the_server(tmp_path):
     assert done.returncode == 0, done.stderr
     assert len(_workspaces(tmp_path)) == 1
     assert _server_pids_alive(tmp_path) == []
+
+
+
+# ── 4. the usable line, printed (26.11.2026) ─────────────────────────────────
+
+def test_the_end_says_each_levels_verdict_against_the_line(tmp_path):
+    report = {"usable_cer": 0.15, "summary": [
+        {"level": "line", "cer": 0.858, "cer_ci_pages": [0.84, 0.87], "verdict": "useless",
+         "usable_items": 120, "usable_share": 0.0053},
+        {"level": "region@page_budget", "cer": 0.12, "cer_ci_pages": [0.1, 0.14], "verdict": "usable",
+         "usable_items": 900, "usable_share": 0.74},
+        {"level": "page@page_budget", "cer": None}]}
+    done, _ = _run(tmp_path, "m-20", FAKE_GRAN_REPORT=json.dumps(report))
+    assert done.returncode == 0, done.stderr
+    assert "usable line: CER 15% — a reading above it is useless" in done.stderr
+    assert "line" in done.stderr and "[0.84, 0.87]" in done.stderr
+    lines = done.stderr.splitlines()
+    assert any(ln.strip().startswith("line ") and "useless" in ln and "120 (1%)" in ln for ln in lines)
+    assert any("region@page_budget" in ln and "usable" in ln and "900 (74%)" in ln for ln in lines)
+    assert any("page@page_budget" in ln and "nothing measured" in ln for ln in lines)
+
+
+def test_a_report_without_verdicts_is_judged_by_its_point(tmp_path):
+    """An older training checkout writes no verdict: the CER decides."""
+    report = {"summary": [{"level": "block@block_budget", "cer": 0.48},
+                          {"level": "line", "cer": 0.10}]}
+    done, _ = _run(tmp_path, "m-21", FAKE_GRAN_REPORT=json.dumps(report))
+    assert done.returncode == 0, done.stderr
+    lines = done.stderr.splitlines()
+    assert any("block@block_budget" in ln and "useless" in ln for ln in lines)
+    assert any(ln.strip().startswith("line ") and "usable" in ln for ln in lines)
