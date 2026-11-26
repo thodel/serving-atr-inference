@@ -47,7 +47,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from atr_serving.eval_pages import EvalPagesError, resolve_model_job  # noqa: E402
+from atr_serving.eval_pages import JOB_ID_RE, EvalPagesError, resolve_model_job  # noqa: E402
+from atr_serving.hf_cache import hub_cache_dir  # noqa: E402
 
 CLEAN, CROSSED, UNCHECKED = 0, 3, 4
 VERDICTS = {CLEAN: "clean", CROSSED: "crossed", UNCHECKED: "unchecked"}
@@ -87,8 +88,89 @@ def _find_job(job_id: str, stores: list[Path]) -> Path | None:
     return None
 
 
+#: The gateway's registry, where a model trained elsewhere names its hub repo.
+MODELS_YAML = Path(__file__).resolve().parents[1] / "config" / "models.yaml"
+
+
+def hf_repo_of(model: str, models_yaml: Path = MODELS_YAML) -> str | None:
+    """The model's ``hf_repo`` in the gateway's registry, read without pyyaml:
+    this runs under whatever python the measuring box has, and the registry's
+    entries are flat enough for a line scan."""
+    try:
+        lines = models_yaml.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    inside = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("- id:"):
+            inside = stripped.split(":", 1)[1].split("#", 1)[0].strip().strip("'\"") == model
+        elif inside and stripped.startswith("hf_repo:"):
+            return stripped.split(":", 1)[1].split("#", 1)[0].strip().strip("'\"") or None
+    return None
+
+
+def hf_metadata(repo: str, cache: Path | None = None) -> tuple[dict | None, str]:
+    """``metadata.json`` of a published model: from the local hub cache, else
+    from the hub. ``publish_to_hub.py`` puts the training's metadata.json, job
+    id included, into every repo — which is the only record of a UBELIX run on
+    a box whose trained folder never held it (page-v1 on asteraix, 26.11.2026).
+    """
+    cache = hub_cache_dir() if cache is None else cache
+    snaps = cache / f"models--{repo.replace('/', '--')}" / "snapshots"
+    found = sorted(snaps.glob("*/metadata.json"), key=lambda f: f.stat().st_mtime, reverse=True) \
+        if snaps.is_dir() else []
+    source = None
+    if found:
+        source = found[0]
+    else:
+        try:
+            from huggingface_hub import hf_hub_download
+            source = Path(hf_hub_download(repo, "metadata.json"))
+        except Exception as exc:  # noqa: BLE001 — no hub lib, no token, no file: say which
+            return None, f"metadata.json of {repo} is not in the hub cache ({snaps}) and " \
+                         f"could not be fetched: {type(exc).__name__}: {exc}"
+    try:
+        return json.loads(source.read_text(encoding="utf-8")), str(source)
+    except (OSError, ValueError) as exc:
+        return None, f"{source} is unreadable: {exc}"
+
+
+def job_of(model: str, trained_root: Path | None, job: str | None = None,
+           models_yaml: Path = MODELS_YAML, cache: Path | None = None) -> tuple[str | None, str]:
+    """Which run trained the model, and where that was read. In this order:
+    ``--job``; the model's metadata.json in the trained root (trained on this
+    side); the metadata.json its hub repo carries (trained on UBELIX)."""
+    if job:
+        if not JOB_ID_RE.match(job):
+            return None, f"--job {job!r} is not a job id"
+        return job, "--job"
+    tried = []
+    if trained_root is not None:
+        try:
+            return resolve_model_job(model, trained_root)[1], str(trained_root / model / "metadata.json")
+        except EvalPagesError as exc:
+            tried.append(str(exc))
+    else:
+        tried.append("no trained root (ATR_TRAIN_TRAINED_ROOT)")
+    repo = hf_repo_of(model, models_yaml)
+    if repo is None:
+        tried.append(f"no hf_repo for {model} in {models_yaml}")
+        return None, "; ".join(tried)
+    meta, where = hf_metadata(repo, cache)
+    if meta is None:
+        tried.append(where)
+        return None, "; ".join(tried)
+    job_id = meta.get("job_id")
+    if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
+        tried.append(f"{where} has no job_id")
+        return None, "; ".join(tried)
+    return job_id, f"hf:{repo} ({where})"
+
+
 def check(model: str, page_set: Path, training_repo: Path, trained_root: Path | None,
-          stores: list[Path], training_python: str) -> tuple[int, dict]:
+          stores: list[Path], training_python: str, job: str | None = None,
+          models_yaml: Path = MODELS_YAML, cache: Path | None = None) -> tuple[int, dict]:
     record: dict = {"model": model, "page_set": str(page_set), "set": None, "job_id": None,
                     "job_dir": None, "stores": [str(s) for s in stores],
                     "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
@@ -105,14 +187,10 @@ def check(model: str, page_set: Path, training_repo: Path, trained_root: Path | 
     if entry is None:
         return answer(UNCHECKED, f"{training_repo / REGISTRY} holds no set {name!r} — the "
                                  "training never reserved it, so no run was kept off it")
-    if trained_root is None:
-        return answer(UNCHECKED, "no trained root (ATR_TRAIN_TRAINED_ROOT) to find the "
-                                 "model's metadata.json in")
-    try:
-        _, job_id = resolve_model_job(model, trained_root)
-    except EvalPagesError as exc:
-        return answer(UNCHECKED, f"which run trained the model is not known: {exc}")
-    record["job_id"] = job_id
+    job_id, source = job_of(model, trained_root, job, models_yaml, cache)
+    if job_id is None:
+        return answer(UNCHECKED, f"which run trained the model is not known: {source}")
+    record["job_id"], record["job_from"] = job_id, source
 
     if entry.get("source_job") == job_id:
         return answer(CROSSED, f"the set {name} was drawn from this run's own manifests "
@@ -168,10 +246,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--store", type=Path, action="append", default=None,
                     help="a job store; repeatable (default: ATR_TRAIN_JOBS_ROOT, ATR_MEASURE_JOB_STORES)")
     ap.add_argument("--training-python", default=os.environ.get("ATR_TRAINING_PYTHON", "python3"))
+    ap.add_argument("--job", default=os.environ.get("ATR_MEASURE_JOB_ID") or None,
+                    help="the run that trained the model, when neither the trained root nor "
+                         "its hub repo says (ATR_MEASURE_JOB_ID)")
     args = ap.parse_args(argv)
     code, record = check(args.model, args.page_set, args.training_repo, args.trained_root,
                          args.store if args.store is not None else _default_stores(),
-                         args.training_python)
+                         args.training_python, args.job)
     args.out.write_text(json.dumps(record, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(f"held out? {record['verdict']}: {record['why']}", file=sys.stderr)
     return code

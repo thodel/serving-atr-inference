@@ -65,7 +65,16 @@ runs `eval_granularity.py` from training-atr-models and takes everything down.
 
   The answer always lands beside the report as `<report>.heldout.json`. The job stores are
   `ATR_TRAIN_JOBS_ROOT` and `ATR_MEASURE_JOB_STORES` (`:`-separated, e.g. the share's copy of
-  UBELIX's store); the model's run is found by `ATR_TRAIN_TRAINED_ROOT`.
+  UBELIX's store).
+
+  The check needs to know which run trained the model. It looks in three places, in this order:
+  1. `--job` / `ATR_MEASURE_JOB_ID`;
+  2. the model's `metadata.json` under `ATR_TRAIN_TRAINED_ROOT`;
+  3. the `metadata.json` that `publish_to_hub.py` put into the model's hub repo (`hf_repo` in
+     `config/models.yaml`), read from the local hub cache or fetched.
+
+  The third place is the one that finds a model trained on UBELIX. page-v1 was not in
+  asteraix's trained folder (26.11.2026).
 
   Why: on 24.–26.11.2026, `qwen3.5-4b-german-kurrent-xvi-xix-page-v1` was measured for
   38 hours on `german-kurrent-xvi-xix-v1`, a set drawn from its own manifests, and nothing

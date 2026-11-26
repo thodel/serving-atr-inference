@@ -220,3 +220,109 @@ def test_a_wrong_page_set_path_is_said_as_such(tmp_path, monkeypatch):
     (bad / "benchmark.json").write_text("{not json")
     code, rec = hc.check("m", bad, trepo, trained, [store], sys.executable)
     assert code == hc.UNCHECKED and "unreadable" in rec["why"]
+
+
+# ── a model trained elsewhere: its run from the metadata.json of its hub repo ─
+
+MODELS_YAML = """models:
+  # a comment
+  - id: other
+    engine: vllm
+    hf_repo: dh-unibe/other
+  - id: m
+    engine: vllm
+    hf_repo: "dh-unibe/m"   # private
+    level: page
+  - id: k
+    engine: kraken
+    zenodo_id: "10.5281/zenodo.1"
+"""
+
+
+def _hub(tmp: Path, repo: str, job: str | None) -> Path:
+    cache = tmp / "hub"
+    snap = cache / f"models--{repo.replace('/', '--')}" / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "metadata.json").write_text(json.dumps({"job_id": job} if job else {}))
+    return cache
+
+
+def test_the_hub_repo_comes_from_the_gateway_registry(tmp_path):
+    y = tmp_path / "models.yaml"
+    y.write_text(MODELS_YAML)
+    assert hc.hf_repo_of("m", y) == "dh-unibe/m"
+    assert hc.hf_repo_of("other", y) == "dh-unibe/other"
+    assert hc.hf_repo_of("k", y) is None and hc.hf_repo_of("nope", y) is None
+    assert hc.hf_repo_of("qwen3.5-4b-german-kurrent-xvi-xix-page-v1") == \
+        "dh-unibe/qwen3.5-4b-german-kurrent-xvi-xix-page-v1"
+
+
+def test_a_ubelix_model_is_found_by_the_metadata_its_hub_repo_carries(tmp_path, monkeypatch):
+    """page-v1 on asteraix, 26.11.2026: not in the trained folder, so unchecked —
+    while its hub repo names the very run the set was drawn from."""
+    trepo, trained, store, pset = _world(tmp_path)
+    y = tmp_path / "models.yaml"
+    y.write_text(MODELS_YAML)
+    cache = _hub(tmp_path, "dh-unibe/m", JOB)
+    code, rec = hc.check("m", pset, trepo, tmp_path / "empty-trained", [store], sys.executable,
+                         models_yaml=y, cache=cache)
+    assert code == hc.CROSSED and rec["job_id"] == JOB
+    assert rec["job_from"].startswith("hf:dh-unibe/m (")
+
+
+def test_the_trained_root_comes_before_the_hub(tmp_path, monkeypatch):
+    trepo, trained, store, pset = _world(tmp_path)       # trained/m says OTHER
+    y = tmp_path / "models.yaml"
+    y.write_text(MODELS_YAML)
+    cache = _hub(tmp_path, "dh-unibe/m", JOB)
+    monkeypatch.setenv("FAKE_BOUNDARY", "clean")
+    monkeypatch.setenv("BOUNDARY_CALLS", str(tmp_path / "calls"))
+    code, rec = hc.check("m", pset, trepo, trained, [store], sys.executable, models_yaml=y, cache=cache)
+    assert rec["job_id"] == OTHER and code == hc.CLEAN
+
+
+def test_job_overrides_both_and_must_be_a_job_id(tmp_path):
+    trepo, trained, store, pset = _world(tmp_path)
+    code, rec = hc.check("m", pset, trepo, trained, [store], sys.executable, job=JOB)
+    assert code == hc.CROSSED and rec["job_from"] == "--job"
+    code, rec = hc.check("m", pset, trepo, trained, [store], sys.executable, job="page-v1")
+    assert code == hc.UNCHECKED and "not a job id" in rec["why"]
+
+
+def test_not_in_the_cache_it_is_fetched_from_the_hub(tmp_path, monkeypatch):
+    import types
+    got = tmp_path / "fetched.json"
+    got.write_text(json.dumps({"job_id": JOB}))
+    calls = []
+    hub = types.ModuleType("huggingface_hub")
+    hub.hf_hub_download = lambda repo, name: (calls.append((repo, name)), str(got))[1]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    meta, where = hc.hf_metadata("dh-unibe/m", tmp_path / "empty-cache")
+    assert meta == {"job_id": JOB} and where == str(got)
+    assert calls == [("dh-unibe/m", "metadata.json")]
+
+
+def test_a_hub_that_cannot_answer_says_why_and_stays_unchecked(tmp_path, monkeypatch):
+    import types
+    hub = types.ModuleType("huggingface_hub")
+
+    def refuse(repo, name):
+        raise PermissionError("401 private repo, no token")
+    hub.hf_hub_download = refuse
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    trepo, trained, store, pset = _world(tmp_path)
+    y = tmp_path / "models.yaml"
+    y.write_text(MODELS_YAML)
+    code, rec = hc.check("m", pset, trepo, tmp_path / "empty-trained", [store], sys.executable,
+                         models_yaml=y, cache=tmp_path / "empty-cache")
+    assert code == hc.UNCHECKED
+    assert "401 private repo" in rec["why"] and "does not exist" in rec["why"]
+
+
+def test_hub_metadata_without_a_job_id_is_not_a_run(tmp_path):
+    trepo, trained, store, pset = _world(tmp_path)
+    y = tmp_path / "models.yaml"
+    y.write_text(MODELS_YAML)
+    cache = _hub(tmp_path, "dh-unibe/m", None)
+    code, rec = hc.check("m", pset, trepo, None, [store], sys.executable, models_yaml=y, cache=cache)
+    assert code == hc.UNCHECKED and "has no job_id" in rec["why"]
