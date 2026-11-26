@@ -7,7 +7,8 @@
 #   bash scripts/measure_model.sh <model-id> [--pages <model|job id | archive dir>
 #        | --page-set <eval_sets/<set>/vlm-pages-<side>>]
 #        [--n 15] [--seed 42] [--vllm 0.11|next] [--serve <dir|hf repo>]
-#        [--report <file.json>] [--keep] [-- <further eval_granularity.py args>]
+#        [--report <file.json>] [--keep] [--not-held-out]
+#        [-- <further eval_granularity.py args>]
 #
 # The pieces, each usable alone (docs/MEASURING.md):
 #   eval_begin / eval_serve  scripts/eval_cleanup.sh   card, workspace, trap (#183, #184)
@@ -19,8 +20,12 @@
 # --page-set measures on a frozen held-out benchmark (build_page_benchmark.py)
 # instead of pages drawn from the model's own job: the way for a model whose
 # job is not on the share (trained on UBELIX). eval_granularity.py checks the
-# draw against its benchmark.json; that the model did not train on the set's
-# documents is the training's split, not something this command can prove.
+# draw against its benchmark.json. Whether the MODEL kept off the set's
+# documents is scripts/heldout_check.py's question, asked before the claim:
+# a model that trained on them is refused (page-v1 was measured 38 hours on a
+# set drawn from its own manifests, #179) unless --not-held-out says that is
+# the point; one that cannot be checked is measured with a warning. Either
+# way the answer lands beside the report as <report>.heldout.json.
 #
 # Before anything is claimed, the measuring side is checked: the training repo,
 # its eval_granularity.py and a python that imports what it needs. A refusal
@@ -43,6 +48,8 @@
 #   ATR_MEASURE_START_S      how long vLLM may take to answer /health (default 1200)
 #   ATR_MEASURE_VLLM_ARGS    further vllm serve arguments, word-split
 #   ATR_MEASURE_REPORTS      report directory (default ~/atr-eval-reports)
+#   ATR_TRAIN_TRAINED_ROOT, ATR_TRAIN_JOBS_ROOT, ATR_MEASURE_JOB_STORES (:-separated)
+#                            where heldout_check.py finds the model's run (--page-set)
 #   and those of scripts/eval_cleanup.sh (ATR_EVAL_ROOT, EVAL_GPU, …).
 set -euo pipefail
 
@@ -55,6 +62,7 @@ die() { printf 'measure_model: %s\n' "$*" >&2; exit "${2:-1}"; }
 say() { printf '\n\033[1;36m» %s\033[0m\n' "$*" >&2; }
 
 MODEL="" PAGES="" PAGE_SET="" N=15 SEED=42 VARIANT=0.11 SERVE="" REPORT="" KEEP=()
+NOT_HELD_OUT=""
 GRAN_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -66,8 +74,9 @@ while [ $# -gt 0 ]; do
         --serve)  SERVE="${2:?--serve needs a value}"; shift 2 ;;
         --report) REPORT="${2:?--report needs a value}"; shift 2 ;;
         --keep)   KEEP=(--keep); shift ;;
+        --not-held-out) NOT_HELD_OUT=1; shift ;;
         --)       shift; GRAN_ARGS=("$@"); break ;;
-        -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,53p' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*)       die "unknown option $1" 2 ;;
         *)        [ -z "$MODEL" ] || die "one model, not two ($MODEL, $1)" 2; MODEL="$1"; shift ;;
     esac
@@ -115,6 +124,21 @@ PAGES_DIR="" JSONL=""
 if [ -n "$PAGE_SET" ]; then
     [ -f "$PAGE_SET/benchmark.json" ] || die "$PAGE_SET has no benchmark.json — not a frozen page set (build_page_benchmark.py)"
     PAGE_SET="$(cd "$PAGE_SET" && pwd)"
+    # Did the model keep off the set? Before the claim: the answer costs seconds.
+    HELDOUT="${ATR_MEASURE_HELDOUT_CHECK:-$REPO/scripts/heldout_check.py}"
+    rc=0
+    "${ATR_EVAL_PYTHON:-python3}" "$HELDOUT" "$MODEL" --page-set "$PAGE_SET" --training-repo "$TREPO" \
+        --training-python "$TPY" --out "$REPORT.heldout.json" || rc=$?
+    case "$rc" in
+        0) ;;
+        3) if [ -z "$NOT_HELD_OUT" ]; then
+               rm -f "$REPORT.heldout.json"
+               die "$MODEL trained on the documents of $PAGE_SET (above) — its numbers there are not held out. Measure it anyway with --not-held-out, and say so where they are quoted"
+           fi
+           say "measuring on a set $MODEL trained on (--not-held-out): $REPORT.heldout.json says so" ;;
+        4) say "NOT PROVEN HELD OUT: whether $MODEL trained on this set is unknown (above) — measuring; $REPORT.heldout.json says so" ;;
+        *) die "heldout_check.py failed (exit $rc)" ;;
+    esac
 elif [ -d "$PAGES" ]; then
     [ -f "$PAGES/selection.json" ] || die "$PAGES is a directory without selection.json — not an eval_pages archive"
     PAGES_DIR="$(cd "$PAGES" && pwd)"

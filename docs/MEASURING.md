@@ -51,8 +51,25 @@ runs `eval_granularity.py` from training-atr-models and takes everything down.
   e.g. `/mnt/wbkolleg_dh_1/Textrecognition_Training/eval_sets/german-kurrent-xvi-xix-v1/vlm-pages-test`)
   instead of pages drawn from the model's own job. This is the way for a model trained on
   UBELIX, whose job and pages are not on the share. `eval_granularity.py` checks the draw
-  against its `benchmark.json`. Whether the model trained on the set's documents depends
-  on its training split, and the command cannot prove that; the report names the set.
+  against its `benchmark.json`.
+- **Is the set held out from this model?** Before a card is claimed, `scripts/heldout_check.py`
+  reads the set's name from `benchmark.json` and the model's run from its `metadata.json`.
+  It applies training-atr-models' own rules to them: `config/heldout_eval_documents.json`
+  and `scripts/heldout_boundary.py --job`. There are three answers:
+  - **clean:** the training manifest holds no page of a registered held-out document.
+  - **crossed:** the set was drawn from this run's manifests (`source_job`), or the manifest
+    holds pages of the set's documents. The command refuses this. `--not-held-out` measures
+    anyway, for a deliberate in-domain number.
+  - **unchecked:** no `metadata.json`, the run is in no job store, or its manifest is purged
+    or names no document. The command measures with a loud warning. This answer is not clean.
+
+  The answer always lands beside the report as `<report>.heldout.json`. The job stores are
+  `ATR_TRAIN_JOBS_ROOT` and `ATR_MEASURE_JOB_STORES` (`:`-separated, e.g. the share's copy of
+  UBELIX's store); the model's run is found by `ATR_TRAIN_TRAINED_ROOT`.
+
+  Why: on 24.–26.11.2026, `qwen3.5-4b-german-kurrent-xvi-xix-page-v1` was measured for
+  38 hours on `german-kurrent-xvi-xix-v1`, a set drawn from its own manifests, and nothing
+  said so (#179).
 
 The skeleton below is what the command does, for a measurement that needs a step of its
 own.
