@@ -208,3 +208,15 @@ def test_an_exit_zero_without_the_word_clean_proves_nothing(tmp_path, monkeypatc
     monkeypatch.setenv("FAKE_BOUNDARY_EXIT", "0")
     code, rec = _check(tmp_path, monkeypatch, "summary")
     assert code == hc.UNCHECKED and "'summary'" in rec["why"]
+
+
+def test_a_wrong_page_set_path_is_said_as_such(tmp_path, monkeypatch):
+    """26.11.2026: an unset variable in the path gave "names no set"."""
+    trepo, trained, store, _ = _world(tmp_path)
+    code, rec = hc.check("m", tmp_path / "nowhere", trepo, trained, [store], sys.executable)
+    assert code == hc.UNCHECKED and "no benchmark.json at" in rec["why"]
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "benchmark.json").write_text("{not json")
+    code, rec = hc.check("m", bad, trepo, trained, [store], sys.executable)
+    assert code == hc.UNCHECKED and "unreadable" in rec["why"]
