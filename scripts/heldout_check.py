@@ -55,12 +55,21 @@ REGISTRY = Path("config") / "heldout_eval_documents.json"
 BOUNDARY = Path("scripts") / "heldout_boundary.py"
 
 
-def _set_name(page_set: Path) -> str | None:
+def _set_name(page_set: Path) -> tuple[str | None, str]:
+    """The set's name from ``benchmark.json``, or None and why not: a missing
+    file (a wrong path, usually an unset variable in it) is not the same as a
+    file that names no set, and saying "names no set" for both sent the first
+    caller looking in the wrong place (asteraix, 26.11.2026)."""
+    bench = page_set / "benchmark.json"
+    if not bench.is_file():
+        return None, f"no benchmark.json at {bench} — is the page-set path right?"
     try:
-        name = json.loads((page_set / "benchmark.json").read_text(encoding="utf-8")).get("set")
-    except (OSError, ValueError, AttributeError):
-        return None
-    return name if isinstance(name, str) and name else None
+        name = json.loads(bench.read_text(encoding="utf-8")).get("set")
+    except (OSError, ValueError, AttributeError) as exc:
+        return None, f"{bench} is unreadable: {exc}"
+    if isinstance(name, str) and name:
+        return name, ""
+    return None, f"{bench} names no set"
 
 
 def _registry_entry(training_repo: Path, name: str) -> dict | None:
@@ -88,10 +97,10 @@ def check(model: str, page_set: Path, training_repo: Path, trained_root: Path | 
         record.update(extra, verdict=VERDICTS[code], why=why)
         return code, record
 
-    name = _set_name(page_set)
+    name, why_not = _set_name(page_set)
     record["set"] = name
     if name is None:
-        return answer(UNCHECKED, "benchmark.json names no set")
+        return answer(UNCHECKED, why_not)
     entry = _registry_entry(training_repo, name)
     if entry is None:
         return answer(UNCHECKED, f"{training_repo / REGISTRY} holds no set {name!r} — the "
