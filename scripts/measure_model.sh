@@ -210,3 +210,29 @@ if [ -z "$PAGE_SET" ]; then
 else
     say "done: $REPORT (the page set's identity is in it)"
 fi
+
+# ── 4. what the numbers mean: the usable line (15 % CER, 26.11.2026) ─────────
+# eval_granularity.py gives each level a verdict against the line; a report
+# from an older checkout has none, and the point decides here. Printed, not
+# only stored: a table of levels says which is least bad, the line whether any
+# can be used. The held-out answer stands beside it.
+"$TPY" - "$REPORT" "$REPORT.heldout.json" <<'PY' >&2 || true
+import json, sys
+rep = json.load(open(sys.argv[1], encoding="utf-8"))
+line = rep.get("usable_cer", 0.15)
+print(f"\nusable line: CER {line:.0%} — a reading above it is useless")
+for s in rep.get("summary", []):
+    cer = s.get("cer")
+    verdict = s.get("verdict") or ("nothing measured" if cer is None
+                                    else "usable" if cer <= line else "useless")
+    ci = s.get("cer_ci_pages")
+    share = s.get("usable_share")
+    print(f"  {s.get('level', '?'):22s} CER {cer if cer is not None else '—':>7}"
+          f"  {('[%s, %s]' % tuple(ci)) if ci else '':16s} {verdict:10s}"
+          + (f"  items ≤ line: {s.get('usable_items')} ({share:.0%})" if share is not None else ""))
+try:
+    held = json.load(open(sys.argv[2], encoding="utf-8"))
+    print(f"held out? {held.get('verdict')}: {held.get('why')}")
+except (OSError, ValueError):
+    pass
+PY

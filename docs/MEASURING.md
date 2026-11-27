@@ -52,6 +52,11 @@ runs `eval_granularity.py` from training-atr-models and takes everything down.
   instead of pages drawn from the model's own job. This is the way for a model trained on
   UBELIX, whose job and pages are not on the share. `eval_granularity.py` checks the draw
   against its `benchmark.json`.
+- **The usable line.** At the end, the command prints each level's CER, its verdict against
+  15 % CER and how many crops are at or under it. The rule: **a reading above 15 % is
+  useless**, whatever it beats (26.11.2026). `eval_granularity.py` sets the verdict against a
+  page interval: `useless`, `usable` or `undecided`. A report from an older training checkout
+  has no verdict, and then its point decides.
 - **Is the set held out from this model?** Before a card is claimed, `scripts/heldout_check.py`
   reads the set's name from `benchmark.json` and the model's run from its `metadata.json`.
   It applies training-atr-models' own rules to them: `config/heldout_eval_documents.json`
